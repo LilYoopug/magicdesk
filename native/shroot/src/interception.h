@@ -77,6 +77,7 @@ struct md_interception_abi {
     uintptr_t svc_runtime;
 };
 long md_guest_buffer_admit(unsigned purpose);
+void md_cooperative_revoke(void);
 
 int md_interception_install(int inherited);
 long md_shm_dispatch(long, const unsigned long *);

@@ -32,7 +32,9 @@ struct md_entry_call {
 };
 /* Fixed caller storage, not the transport's state layout. Zero once per thread
  * and after fork; never inspect/copy an active handle or share it across threads.
- * Reentry/inherited handles decline before publication. UNKNOWN forbids replay. */
+ * Reentry/foreign handles never publish into another active channel. A disabled
+ * channel retains the original kernel call without probing helper identity.
+ * UNKNOWN forbids replay. */
 struct md_entry_client {
     uintptr_t opaque[3];
 };

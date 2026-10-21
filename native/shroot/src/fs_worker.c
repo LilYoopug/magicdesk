@@ -21,6 +21,7 @@
 #include <stdatomic.h>
 #include <sys/eventfd.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 struct md_fs_worker {
@@ -50,6 +51,7 @@ struct md_fs_worker {
     int (*prepare_wait)(void *);
     struct md_fs_worker_pause *pause;
     atomic_int pause_requested;
+    atomic_int tid;
     struct md_cost queued, execution, delivery, completion;
 };
 static struct md_fs_work *take_submitted(struct md_fs_worker *w, int *stopping) {
@@ -144,6 +146,7 @@ static int prepare_wait(void *context) {
 }
 static void *run(void *context) {
     struct md_fs_worker *w = context;
+    atomic_store(&w->tid,(int)syscall(SYS_gettid));
     sigset_t mask;
     sigemptyset(&mask); sigaddset(&mask, SIGPIPE);
     pthread_sigmask(SIG_BLOCK, &mask, NULL);
@@ -251,6 +254,7 @@ int md_fs_worker_start(const char *store, const char *endpoint, const char *admi
     w->stop = w->ready = -1;
     w->notification_fd = -1;
     atomic_init(&w->pause_requested,0);
+    atomic_init(&w->tid,0);
     w->store = store; w->endpoint = endpoint; w->admit = admit;
     w->tasks = tasks;
     w->exchanges=exchanges;
@@ -299,6 +303,20 @@ struct md_mount_namespace *md_fs_worker_mounts(struct md_fs_worker *w) { return 
 struct md_device_events *md_fs_worker_device_events(struct md_fs_worker *w) { return w ? w->device_events : NULL; }
 struct md_ofd_orders *md_fs_worker_cursors(struct md_fs_worker *w) { return w ? w->cursors : NULL; }
 void md_fs_worker_wake(struct md_fs_worker *w) { if (w) md_queue_signal_send(&w->wake); }
+void md_fs_worker_describe(struct md_fs_worker *w,int output) {
+    if (!w) return;
+    int tid=atomic_load(&w->tid);
+    char path[80],state[256];
+    snprintf(path,sizeof(path),"/proc/self/task/%d/syscall",tid);
+    int fd=open(path,O_RDONLY|O_CLOEXEC);
+    ssize_t size=fd<0 ? -1 : read(fd,state,sizeof(state)-1);
+    int error=size<0 ? errno : 0;
+    if (fd>=0) close(fd);
+    if (size>0 && state[size-1]=='\n') --size;
+    if (size>=0) state[size]=0;
+    dprintf(output,"Shroot: worker tid=%d paused=%d syscall=%s error=%d\n",
+        tid,atomic_load(&w->pause_requested),size>=0 ? state : "unavailable",error);
+}
 int md_fs_worker_pause_begin(struct md_fs_worker *w, struct md_fs_worker_pause *p) {
     if (!w || !p || p->owner) return -EINVAL;
     pthread_mutex_lock(&w->lock);

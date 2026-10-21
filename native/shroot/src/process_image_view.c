@@ -5,6 +5,7 @@
 #include "control_file.h"
 #include "program_files.h"
 #include "arguments.h"
+#include "task_memory.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -68,30 +69,24 @@ struct md_control_file md_process_executable_view(struct md_process_executable *
     return (struct md_control_file){image ? &image_ops : NULL,image};
 }
 static int copy(pid_t pid, uintptr_t address, void *data, size_t size,int memory) {
-    if (address>UINTPTR_MAX-size) return -EFAULT;
-    struct iovec local={data,size}, remote={(void *)address,size};
-    if (process_vm_readv(pid,&local,1,&remote,1,0)==(ssize_t)size) return 0;
-    return memory>=0 && address<=INT64_MAX && pread(memory,data,size,(off_t)address)==(ssize_t)size ? 0 : -EFAULT;
+    ssize_t n=md_task_read_memory(pid,address,data,size,memory);
+    return n==(ssize_t)size ? 0 : n==-EPERM || n==-EACCES ? -EACCES : -EFAULT;
 }
-ssize_t md_process_image_link(pid_t pid, uintptr_t image, char *out, size_t capacity) {
+ssize_t md_process_image_link(pid_t pid, uintptr_t image, int memory, char *out, size_t capacity) {
     if (!image) return -ENOENT;
     if (!out || !capacity || image>UINTPTR_MAX-sizeof(struct md_process_image)) return -EINVAL;
     uintptr_t path=0;
-    int error=copy(pid,image+offsetof(struct md_process_image,executable_path),&path,sizeof(path),-1);
+    int error=copy(pid,image+offsetof(struct md_process_image,executable_path),&path,sizeof(path),memory);
     if (error) return error;
-    for (size_t size=0;size<capacity;++size) {
-        if (path>UINTPTR_MAX-size) return -EFAULT;
-        error=copy(pid,path+size,out+size,1,-1);
-        if (error) return error;
-        if (!out[size]) return (ssize_t)size;
-    }
-    return -ENAMETOOLONG;
+    ssize_t length=md_task_read_string_from(pid,path,out,capacity,(size_t)sysconf(_SC_PAGESIZE),memory);
+    if (length==-EPERM || length==-EACCES) return -EACCES;
+    return length<0 && length!=-ENAMETOOLONG ? -EFAULT : length;
 }
-int md_process_image_identity(pid_t pid,uintptr_t image,struct md_image_identity *out) {
+int md_process_image_identity(pid_t pid,uintptr_t image,int memory,struct md_image_identity *out) {
     memset(out,0,sizeof(*out));
-    ssize_t result=md_process_image_link(pid,image,out->path,sizeof(out->path));
+    ssize_t result=md_process_image_link(pid,image,memory,out->path,sizeof(out->path));
     if (result<0) return (int)result;
-    int error=copy(pid,image+offsetof(struct md_process_image,executable_object),out->object,sizeof(out->object),-1);
+    int error=copy(pid,image+offsetof(struct md_process_image,executable_object),out->object,sizeof(out->object),memory);
     if (!error && out->object[sizeof(out->object)-1]) error=-EPROTO;
     return error;
 }

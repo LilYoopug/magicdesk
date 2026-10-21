@@ -721,121 +721,12 @@ denial remains unknown liveness, never permission to discard provenance. The
 separate queued-pipe lifetime candidate uses baseline pipe/socket and poll/epoll
 operations and does not depend on socket diagnostics.
 
-The separate [cooperative-entry fixture](../guest-exec-lab/cooperative-entry.md)
-uses shared anonymous mmap, classic shared FUTEX_WAIT/FUTEX_WAKE, Unix
-SOCK_SEQPACKET and SCM_RIGHTS with the existing receiver's close-on-exec handling.
-It introduces no post-5.15 dependency and does not participate in runtime
-admission. Its bounded-spin mode is a userspace experiment, not a requirement
-for ordinary Shroot or a substitute for application seccomp admission.
-
-Its optional private-engine FD experiments use baseline `clone(CLONE_FILES)`
-without CLONE_VM for the guest, and a pthread executor with
-`unshare(CLONE_FILES)`. Flags-zero `pidfd_open` (5.3) and `pidfd_getfd` (5.6)
-copy from the engine/thread-group leader into its same-process helper's private
-table. They do not require PIDFD_THREAD or permission to export from a protected
-guest process. The explicit `test-pidfd` fixture checks shared open-file offsets,
-sockets, pipes, CLOEXEC and exact death retirement under shell UID 2000. A denied
-probe fails that optional experiment; SCM_RIGHTS remains a separate control,
-not an untested implicit fallback. `/proc/thread-self/fd` inventories the helper
-table, whereas engine backing paths deliberately refer to the leader's table.
-The ordinary-file `/proc/self/fd` reopen control creates a fresh open description
-and is not a generic substitute for FD transfer. None changes runtime admission.
-
-The same fixture's optional readonly open plans use baseline `O_PATH` pins and
-proc FD links. The helper control opens through `/proc/self/fd`; the direct guest
-control uses `/proc/<engine-pid>/fd`. The latter requires actual host permission
-to access that engine's proc descriptor, and the guest's own seccomp policy must
-permit the native open. It is not a way to bypass those policies. Deterministic
-replacement/unlink and denied-open checks cover object pinning and cancellation
-without publishing an origin or leaking pins. Readonly plans add no post-5.15
-interface; creation still uses the separately probed pidfd control. These lab
-checks do not make the mechanism a production capability or prove admission for
-every sandbox.
-
-The follow-up single-pin and queued-completion controls use the same interfaces.
-Native guest close reports its actual result through a bounded shared-memory
-queue; classic futex waits handle backpressure and explicit draining. Tests
-cover a full queue, index wraparound, denied close and controlled guest death.
-The optional bounded read window is userspace engine admission, not a new kernel
-requirement. Arbitrary death between a native operation and completion posting,
-concurrent FD users and production filter admission remain integration work.
-
-The optional [SVC rewriting experiment](../guest-exec-lab/svc-rewriting.md)
-uses baseline PTRACE_SEIZE, GET/SETREGSET, GET_SYSCALL_INFO, POKETEXT and
-NT_ARM_HW_BREAK. It requires firmware permission and available execution
-breakpoint slots; failed hardware witnesses leave code untouched and fail the
-fixture's coverage assertion. NT_ARM_HW_BREAK does not raise the 5.15 minimum.
-Sequential anonymous RX replacement uses ordinary mprotect and mremap, without
-RWX or file-backed execmod permission. These are lab-only requirements, not
-shared startup or production syscall-path prerequisites. Tests cover adjacent
-literal rejection, actual predecessor entry, fault-PC restoration, fork/shared
-mm and changed code at a reused address. No SVE/SME capability is advertised.
-
-Its optional private-frame entry checks AT_HWCAP/HWCAP_ATOMICS for the emitted
-LSE operations; CPU capability is separate from kernel version. Signal deferral
-borrows three free execution-breakpoint slots, preserving their previous state.
-PTRACE_GETSIGMASK/SETSIGMASK and exact siginfo restoration are baseline interfaces.
-Nested adapters preserve the logical mask under this temporary shield. The
-fault-during-drain fixture checks both mask layers and an existing unrelated
-breakpoint; libc stress checks blocked TRAP alongside exact real-time counts.
-The frame layout uses 16 KiB protection boundaries and has been exercised only
-on 4 KiB pages; 64 KiB pages and extended architectural state are not admitted
-by this proof. None of these checks is an APK or shared-service prerequisite.
-
-The separately compiled lifecycle owner observes destructive mmap/mprotect/
-munmap/mremap/madvise operations before execution, restores code under the
-existing task barrier and drains in-flight entries before replaying the original
-stop. Coverage includes fork, CLONE_VM, vfork, nonleader exec, debugger attach,
-address reuse, and rejected writable/shared code. Its additional memory filter
-exists only in MAGICDESK_GUEST_SVC_SIGNAL_PROOF builds; ordinary Shroot retains
-the existing filter. No post-5.15 operation is introduced.
-
-A separate SVC-only publication fixture writes four aligned bytes through
-`/proc/self/mem` to private RX text, with no peer interrupts or page-wide
-permission changes. Generated gates are cache-synchronized before publication
-and retained until exit. The writer depends on arm64's eligible concurrent
-instruction exchange and the kernel's aligned-copy/cache-maintenance semantics,
-not merely the availability of pwrite. Linux 5.15 source and the tested 6.12
-device support the experiment; arbitrary vendor kernels are not certified.
-Failure remains a rejected experiment, not a production prerequisite or a
-reason to change the minimum kernel. `test_svc_live.py` covers concurrent
-SVC/B publication, context preservation, explicit busy/channel exhaustion and
-controlled exact-IP seccomp fallback. It does not certify barrier-free code
-reclamation for arbitrary self-modifying mappings.
-
-The same fixture's `svc_text.c` owner avoids patch-induced private COW with a
-memfd-backed MAP_PRIVATE RX view and a retained MAP_SHARED RW writer. Memfd,
-F_SEAL_FUTURE_WRITE (5.1), F_SEAL_GROW/SHRINK/SEAL, MAP_FIXED_NOREPLACE,
-ordinary mprotect/madvise and fork are all within 5.15. No MFD_EXEC or newer
-memfd flags are required. Publication uses an aligned atomic 32-bit SVC/B
-store and AArch64 cache maintenance; firmware refusal of preparation is an
-explicit error, not a reason to weaken protections or enable this globally.
-`mirror`, `mirror-live`, `mirror-fork`, `mirror-filter` and `mirror-denied`
-cover native permission restoration, running peers, child backing independence,
-exact-IP retirement with memory syscalls denied, seals and early-failure cleanup.
-Actual supervisor quiescence and memory-repair counters must remain zero.
-Live MREMAP_FIXED replacement is not claimed failure-atomic under late ENOMEM;
-new-map admission uses MAP_FIXED_NOREPLACE. Production loader/clone admission
-and mutable-source provenance remain unintegrated.
-
-Its `cold-*` fallback experiment uses ordinary SVC, classic-BPF seccomp
-ERRNO/TRAP/TRACE actions, PTRACE_EVENT_SECCOMP and GET/SETREGSET/SETSIGINFO,
-all available by 5.15. `svc_filter.c` preserves logical IP loads without
-changing filter actions. The opt-in proof supervisor canonicalizes native
-cold syscall entry before execution so arm64 retains its EINTR/SA_RESTART
-decision; SIGSYS context is projected separately because TRAP precedes TRACE.
-`cold-syscall`, `cold-filter`, `cold-trap` and `cold-restart` cover blocked/
-ignored TRAP, busy frames, real filter denials, handler context and interrupted
-pipe reads, with expected-fatal controls. No new kernel operation is required.
-Inherited unknown filters, automatic TSYNC admission, USER_NOTIF context and
-interaction with every virtual-FD owner remain unproved. None of these
-experimental rules is installed in ordinary Shroot.
-
-The no-peer-stop body owner uses baseline atomic closed/count admission and
-resident fallback. `lifetime` reclaims actual executable bodies after completion;
-`entry` proves why a saved pre-acquisition signal PC still requires the entry
-gate to remain resident. Negative controls unmap too early, move a live branch
-and leave fork backing shared. No additional kernel capability is required.
+The [entry/runtime fixtures](../guest-exec-lab/cooperative-entry.md) now exercise
+the production shared-memory channel, FD publication and cancellation owners.
+They add no post-5.15 dependency or separate transport implementation.
+Superseded private-engine FD relays and whole-loop read-lease experiments are
+removed. Their historical measurements do not establish sandbox admission or
+authorize reopening an ordinary proc FD link as generic descriptor transfer.
 
 The shared deferred-standard-signal owner uses baseline PTRACE_SINGLESTEP and
 ptrace register/siginfo/mask operations. A bootstrap-owned NOP supplies the stop;
@@ -845,10 +736,35 @@ disposition, mask and registers retained. Native and traced tests cover
 sigwait/signalfd, original sender data, retained coalescing, blocked SIGTRAP,
 preexisting and concurrent SIGURG/TRAP, and RLIMIT_SIGPENDING exhaustion.
 Exhaustion can discard standard-signal metadata in the native kernel too.
+PTRACE_GET_SYSCALL_INFO (5.3) identifies syscall boundaries before the NOP.
+At an entry/seccomp stop, delivery first cancels the unexecuted call and waits
+for its exit; restoration then replays the original instruction. At an exit
+stop the completed result is retained without replay. The standalone delivery
+fixture covers all three boundaries. arm64 may report an extra senderless
+step stop without executing the NOP. This
+owned boundary must not be delivered as SIGTRAP; an indistinguishable pending
+standard signal outside that boundary still retains native delivery semantics.
 This path does not allocate hardware breakpoint slots or add a post-5.15 API.
 
-The default lazy-entry owner (`SHROOT_MACHINE_ENTRY=0` selects Base) is separate from the earlier
-breakpoint proof. `svc_runtime.c` prepares private frames and nearby RX pools;
+Channel registration uses the existing `gettid` USER_NOTIF gate instead of BRK,
+preserving blocked SIGTRAP and its handler. A per-image hint revokes fresh
+registration before application filters, including TSYNC and inherited policy
+after exec; it adds no per-call syscall. Existing channels retain per-task
+eligibility. The shared-memory and cooperative fixtures cover this admission.
+The guest's existing filter preflight owns the local hint write; image startup
+receives inherited policy through its register handshake. Protected forks do
+not require PTRACE_POKEDATA or a retained writable memory descriptor for this
+step. The direct and managed `fs-export` fixtures cover this boundary.
+
+Known separate limitation: internal Base BRK stops can reset an application's
+explicit `SIG_IGN` disposition for SIGTRAP even while it is unblocked. This also
+reproduces without lazy entry. `resource_guest shared-memory DIRECTORY 0 16`
+retains the failing regression; ordinary modes check a blocked installed handler
+and its mask. Fixing ignored dispositions needs shared-sighand ownership or a
+signal-free Base control protocol, not a temporary per-thread handler override.
+
+The default [lazy-entry owner](../guest-exec-lab/svc-rewriting.md)
+(`SHROOT_MACHINE_ENTRY=0` selects Base) uses no hardware-breakpoint experiment. `svc_runtime.c` prepares private frames and nearby RX pools;
 `svc_registry.c` publishes a single SVC replacement through baseline
 PTRACE_POKETEXT after actual syscall execution. It requires HWCAP_ATOMICS,
 4/16 KiB-compatible layout, MAP_FIXED_NOREPLACE (4.17) and firmware permission
@@ -858,17 +774,18 @@ hardware breakpoints or stop peer threads; no extra filter is installed per
 pool or exec.
 
 `svc_machine.c` uses the existing seccomp TRACE/USER_NOTIF routing and baseline
-register/siginfo APIs to recover logical contexts. Deferred asynchronous signals
-use rt_tgsigqueueinfo (2.6.31) with supervisor-authenticated carriers and restored
-original siginfo. A caller-owned getuid checkpoint handles pending signals;
-it is not a service SIGTRAP. The normal `signal_delivery` owner still supplies
-the shielded-adapter queue. This mechanism adds no post-5.15 dependency.
+register/siginfo APIs to recover logical contexts. Deferred standard signals
+use the same `signal_delivery` owner as shielded Base operations. Realtime
+signals use rt_tgsigqueueinfo (2.6.31) with supervisor-authenticated carriers and
+restored original siginfo to preserve FIFO against later kernel arrivals.
+A caller-owned getuid checkpoint handles pending signals; its syscall must exit
+before delivery installs the recovered guest registers. It is not a service
+SIGTRAP. This mechanism adds no post-5.15 dependency.
 The integrated cooperative suite, stock Go with and without seccomp, glibc
 signal/churn fixtures and deterministic instruction-boundary fixture cover it.
 Application filters revoke admission; passing their fallback tests does not
 prove continued acceleration in a sandbox.
 
-The ptrace writer does not integrate the laboratory memfd mirror loader.
 Bootstrap supplies exact program/interpreter FDs and `/proc/PID/maps` ranges to
 `interception_memory` before closing them. Initial ELF text therefore uses the
 same retained-file repair as intercepted mmap when a later NONE/R to RX change
@@ -891,3 +808,9 @@ fork inheritance. The initial quiescence failure retains
 fail-closed cancellation. These operations are all within the 5.15 baseline.
 Arbitrary externally mutable backing and untested architectures remain outside
 this coverage. Entry admission fails back to Base; no libc build is required.
+
+The deterministic instruction-boundary fixture alone uses `svc_text.c` to
+prepare a private RX memfd view with a retained shared RW writer. It uses
+memfd seals and mapping operations available by 5.15, with explicit failure
+when the firmware denies preparation. This is test scaffolding, not the
+production loader, a global permission workaround or a startup prerequisite.

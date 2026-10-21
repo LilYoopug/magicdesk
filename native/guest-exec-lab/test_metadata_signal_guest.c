@@ -22,6 +22,15 @@
 static volatile sig_atomic_t caught;
 static atomic_int done;
 static pthread_t reader;
+extern char metadata_kernel_return[];
+__attribute__((noinline)) static long metadata_kernel(long number,const unsigned long *args) {
+    register long x8 __asm__("x8")=number;
+    register long x0 __asm__("x0")=args[0], x1 __asm__("x1")=args[1], x2 __asm__("x2")=args[2];
+    register long x3 __asm__("x3")=args[3], x4 __asm__("x4")=args[4], x5 __asm__("x5")=args[5];
+    __asm__ volatile("svc 0\n.global metadata_kernel_return\nmetadata_kernel_return:"
+        : "+r"(x0) : "r"(x8),"r"(x1),"r"(x2),"r"(x3),"r"(x4),"r"(x5) : "memory","cc");
+    return x0;
+}
 static void signal_handler(int signal) { assert(signal==SIGUSR1); ++caught; }
 static void *sender(void *unused) {
     (void)unused;
@@ -32,13 +41,21 @@ static void *sender(void *unused) {
     return NULL;
 }
 static void install_filter(void) {
+    uintptr_t site=(uintptr_t)metadata_kernel_return;
     struct sock_filter code[]={
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_faccessat2,0,3),
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[2])),
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,X_OK,0,1),
         BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|ENOMSG),
-        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_fgetxattr,0,4),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(site>>32),0,3),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)site,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EACCES)
     };
     struct sock_fprog program={sizeof(code)/sizeof(*code),code};
     assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
@@ -75,14 +92,21 @@ static void reads(int file,int directory,int filtered,int protected,int restart)
     }
     struct sigaction action={.sa_handler=signal_handler,.sa_flags=restart ? SA_RESTART : 0};
     sigemptyset(&action.sa_mask); assert(!sigaction(SIGUSR1,&action,NULL));
-    if (filtered) install_filter();
+    if (filtered) {
+        install_filter();
+        assert(syscall(SYS_fgetxattr,file,attribute,value,sizeof(value))==-1 && errno==EACCES);
+    }
     if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
     caught=0; atomic_store(&done,0); reader=pthread_self();
     pthread_t peer; assert(!pthread_create(&peer,NULL,sender,NULL));
-    for (unsigned round=0;round<32;++round) for (unsigned i=0;i<sizeof(calls)/sizeof(*calls);++i) {
+    /* EVENT_WAIT: keep exercising reads until the sender has actually run.
+     * The fixture alarm bounds starvation; native reads can finish 32 rounds
+     * before a newly created sender is scheduled. */
+    for (unsigned round=0;round<32 || !caught;++round) for (unsigned i=0;i<sizeof(calls)/sizeof(*calls);++i) {
         memset(value,0xa5,sizeof(value));
         unsigned long *a=calls[i].args;
-        long result=syscall(calls[i].nr,a[0],a[1],a[2],a[3],a[4],a[5]);
+        long result=metadata_kernel(calls[i].nr,a);
+        if (result<0) { errno=(int)-result; result=-1; }
         if (result<0 || (calls[i].result>=0 && result!=calls[i].result))
             fprintf(stderr,"metadata nr=%d result=%ld errno=%d filtered=%d protected=%d restart=%d\n",
                 calls[i].nr,result,errno,filtered,protected,restart);

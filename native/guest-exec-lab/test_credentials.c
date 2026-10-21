@@ -214,7 +214,7 @@ static void root_context(struct md_inode_store *s) {
     out=root_call(&fs,123,MD_FS_GETDENTS,root,NULL,0,bytes,sizeof(bytes));
     assert(!out.error); unsigned dots=0;
     for(size_t p=0;p<out.size;) {
-        struct md_inode_dirent *entry=(void *)(bytes+p);
+        struct md_directory_entry *entry=(void *)(bytes+p);
         if(!strcmp(entry->name,".") || !strcmp(entry->name,"..")) {
             assert(entry->inode==st.st_ino); dots++;
         }

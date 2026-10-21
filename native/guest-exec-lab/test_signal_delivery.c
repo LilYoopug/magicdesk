@@ -1,10 +1,16 @@
 #define _GNU_SOURCE
 #include "signal_delivery.h"
+#include "syscall_result.h"
 #include <assert.h>
 #include <elf.h>
 #include <errno.h>
 #include <stdio.h>
 #include <sys/ptrace.h>
+#include <linux/ptrace.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <sys/prctl.h>
+#include <stddef.h>
 #include <sys/resource.h>
 #include <sys/signalfd.h>
 #include <sys/syscall.h>
@@ -34,7 +40,7 @@ static void child(unsigned round,int traced) {
     assert(!sigprocmask(SIG_BLOCK,&set,NULL));
     struct sigaction action={.sa_handler=unexpected};
     sigemptyset(&action.sa_mask); assert(!sigaction(SIGTRAP,&action,NULL));
-    if (round>=2) {
+    if (round==2 || round==3) {
         struct rlimit limit;
         assert(!getrlimit(RLIMIT_SIGPENDING,&limit)); limit.rlim_cur=0;
         assert(!setrlimit(RLIMIT_SIGPENDING,&limit));
@@ -43,10 +49,23 @@ static void child(unsigned round,int traced) {
         assert(!ptrace(PTRACE_TRACEME,0,NULL,NULL));
         if (round==1) assert(!raise(SIGURG));
         assert(!raise(SIGSTOP));
+        if (round==6) {
+            struct sock_filter code[]={
+                BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+                BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_getpid,0,1),
+                BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE),
+                BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+            };
+            struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+            assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+            assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+        }
+        if (round>=4) assert(syscall(SYS_getpid)>0);
     } else assert(!raise(SIGUSR1) && !raise(SIGTRAP));
-    unsigned count=round==1 || round==3 ? 3 : 2,seen=0;
-    int fd=round>=2 ? signalfd(-1,&set,SFD_CLOEXEC|SFD_NONBLOCK) : -1;
-    if (round>=2) assert(fd>=0);
+    unsigned count=round==1 || round==3 ? 3 : 2;
+    uint64_t seen=0;
+    int fd=round==2 || round==3 ? signalfd(-1,&set,SFD_CLOEXEC|SFD_NONBLOCK) : -1;
+    if (round==2 || round==3) assert(fd>=0);
     for (unsigned i=0;i<count;++i) {
         int number,code; pid_t sender; uid_t uid;
         if (fd>=0) {
@@ -59,7 +78,7 @@ static void child(unsigned round,int traced) {
             assert(sigtimedwait(&set,&info,&bound)>0);
             number=info.si_signo; code=info.si_code; sender=info.si_pid; uid=info.si_uid;
         }
-        if (round>=2) {
+        if (round==2 || round==3) {
             /* Native standard-signal allocation failure also yields SI_USER
              * with zero sender; no userspace implementation can recover
              * information the kernel could not store. Keep delivery itself. */
@@ -69,25 +88,47 @@ static void child(unsigned round,int traced) {
             if (number==SIGURG) assert(round==1 && sender==getpid() && uid==getuid());
             else assert((number==SIGUSR1 || number==SIGTRAP) && sender==12345 && uid==54321);
         }
-        assert(!(seen&(1u<<number))); seen|=1u<<number;
+        assert(!(seen&(UINT64_C(1)<<(number-1))));
+        seen|=UINT64_C(1)<<(number-1);
     }
-    assert((seen&((1u<<SIGTRAP)|(1u<<SIGUSR1)))==((1u<<SIGTRAP)|(1u<<SIGUSR1)));
+    assert((seen&((UINT64_C(1)<<(SIGTRAP-1))|(UINT64_C(1)<<(SIGUSR1-1))))
+        ==((UINT64_C(1)<<(SIGTRAP-1))|(UINT64_C(1)<<(SIGUSR1-1))));
     if (fd>=0) assert(!close(fd));
     assert(!sigaction(SIGTRAP,NULL,&action) && action.sa_handler==unexpected);
     _exit(0);
 }
 int main(void) {
     alarm(15);
+    for (long value=-4095;value<=4095;++value)
+        assert(md_syscall_restarting(value)==(value==-512 || value==-513 || value==-514 || value==-516));
+    assert(!md_syscall_restarting(-EINTR));
     pid_t native=fork(); assert(native>=0);
     if (!native) child(2,0);
     int native_status;
     assert(waitpid(native,&native_status,0)==native && WIFEXITED(native_status) && !WEXITSTATUS(native_status));
-    for (unsigned round=0;round<4;++round) {
+    for (unsigned round=0;round<7;++round) {
         pid_t pid=fork(); assert(pid>=0);
         if (!pid) child(round,1);
         int status;
         assert(waitpid(pid,&status,0)==pid && WIFSTOPPED(status) && WSTOPSIG(status)==SIGSTOP);
+        if (round==4 || round==5) {
+            assert(!ptrace(PTRACE_SETOPTIONS,pid,NULL,(void *)PTRACE_O_TRACESYSGOOD));
+            for (unsigned i=0;i<(round==4 ? 2u : 1u);++i) {
+                assert(!ptrace(PTRACE_SYSCALL,pid,NULL,NULL));
+                assert(waitpid(pid,&status,0)==pid && WIFSTOPPED(status) && WSTOPSIG(status)==(SIGTRAP|0x80));
+                struct ptrace_syscall_info call={0};
+                assert(ptrace(PTRACE_GET_SYSCALL_INFO,pid,(void *)sizeof(call),&call)>0);
+                assert(call.op==(i ? PTRACE_SYSCALL_INFO_EXIT : PTRACE_SYSCALL_INFO_ENTRY));
+                if (!i) assert(call.entry.nr==SYS_getpid);
+            }
+        }
+        if (round==6) {
+            assert(!ptrace(PTRACE_SETOPTIONS,pid,NULL,(void *)(PTRACE_O_TRACESYSGOOD|PTRACE_O_TRACESECCOMP)));
+            assert(!ptrace(PTRACE_CONT,pid,NULL,NULL));
+            assert(waitpid(pid,&status,0)==pid && (unsigned)status>>16==PTRACE_EVENT_SECCOMP);
+        }
         uintptr_t stopped=pc(pid);
+        if (round>=5) stopped-=4;
         struct md_signal_delivery q={0};
         siginfo_t info=original(SIGUSR1);
         assert(!md_signal_delivery_hold(&q,&info));
@@ -99,18 +140,30 @@ int main(void) {
             assert(!syscall(SYS_tgkill,pid,pid,SIGURG));
             assert(!syscall(SYS_tgkill,pid,pid,SIGTRAP));
         }
-        assert(!ptrace(PTRACE_SINGLESTEP,pid,NULL,NULL));
-        unsigned stops=0;
+        assert(!ptrace(q.preparing ? PTRACE_SYSCALL : PTRACE_SINGLESTEP,pid,NULL,NULL));
+        unsigned stops=0,boundaries=0,preparations=0;
         while (waitpid(pid,&status,0)==pid && WIFSTOPPED(status)) {
-            assert(q.active && ++stops<=3);
+            /* The replayed guest call still follows its original seccomp policy. */
+            if (round==6 && (unsigned)status>>16==PTRACE_EVENT_SECCOMP) {
+                assert(!q.active && !q.preparing && !q.first);
+                assert(!ptrace(PTRACE_CONT,pid,NULL,NULL)); continue;
+            }
+            assert((q.active || q.preparing) && ++stops<=5);
             siginfo_t observed; assert(!ptrace(PTRACE_GETSIGINFO,pid,NULL,&observed));
-            if (observed.si_code>0) assert(pc(pid)==(uintptr_t)delivery_step+4);
+            if (q.preparing && WSTOPSIG(status)==(SIGTRAP|0x80)) ++preparations;
+            if (q.syscall_boundary && observed.si_code==SI_USER && !observed.si_pid && !observed.si_uid
+                    && pc(pid)==(uintptr_t)delivery_step) ++boundaries;
+            if (q.active && observed.si_code>0) assert(pc(pid)==(uintptr_t)delivery_step+4);
             int deliver=0;
             assert(md_signal_delivery_event(&q,pid,WSTOPSIG(status),&deliver)==1);
-            if (!q.active) assert(pc(pid)==stopped);
-            assert(!ptrace(q.active ? PTRACE_SINGLESTEP : PTRACE_CONT,pid,NULL,(void *)(intptr_t)deliver));
+            if (!q.active && !q.preparing) assert(pc(pid)==stopped);
+            assert(!ptrace(q.active ? PTRACE_SINGLESTEP : q.preparing ? PTRACE_SYSCALL : PTRACE_CONT,
+                pid,NULL,(void *)(intptr_t)deliver));
         }
-        assert(WIFEXITED(status) && !WEXITSTATUS(status) && stops==(round==3 ? 3u : 2u));
+        if (!WIFEXITED(status) || WEXITSTATUS(status) || stops-boundaries-preparations!=(round==3 ? 3u : 2u))
+            fprintf(stderr,"signal round=%u status=%#x stops=%u boundaries=%u\n",round,status,stops,boundaries);
+        assert(WIFEXITED(status) && !WEXITSTATUS(status) && boundaries<=1
+            && preparations==(round>=5 ? 1u : 0u) && stops-boundaries-preparations==(round==3 ? 3u : 2u));
         assert(!q.first && !q.last && !q.active);
         md_signal_delivery_clear(&q);
     }
@@ -121,6 +174,9 @@ int main(void) {
     info=original(SIGRTMIN); assert(md_signal_delivery_hold(&q,&info)==-EINVAL);
     info=original(SIGTRAP); info.si_code=TRAP_BRKPT;
     assert(md_signal_delivery_hold(&q,&info)==-EINVAL);
+    info.si_code=SI_KERNEL; assert(md_signal_delivery_hold(&q,&info)==-EINVAL);
+    info=original(SIGALRM); info.si_code=SI_KERNEL;
+    assert(!md_signal_delivery_hold(&q,&info));
     info=original(SIGUSR1); assert(!md_signal_delivery_hold(&q,&info));
     md_signal_delivery_clear(&q); assert(!q.first && !q.last && !q.active);
     puts("PASS signal delivery: exact kernel info, coalescing, sigwait/signalfd, no guest execution, exhausted queue");

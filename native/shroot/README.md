@@ -83,6 +83,28 @@ Each launch captures its identity and environment. Separate launches may share
 a store, but each retains its own supervisor and process tree. Persistent store
 lifetime is independent of launch lifetime.
 
+### Shared parsing and custody
+
+Low-level framing is shared without moving resource policy into the parser:
+
+- `mapping_reader` consumes retained maps/smaps descriptions for image,
+  protected-memory and machine-entry owners. It does not reopen a PID or cache
+  mapping authority. Consumers retain their own bounded traversal and admission.
+- `directory_record` owns the `getdents64` layout, bounded decoding and padded
+  output for inode, proc, devpts, provider and FUSE directories. Directory
+  cookies, membership, permissions and cursor publication remain provider-owned.
+- `netlink_attributes` owns aligned attribute traversal for route, generic and
+  nftables protocols. Their supported types, flags, nesting and transaction
+  semantics remain distinct; sharing framing does not expand kernel emulation.
+- `task_memory` reads guest strings in page-bounded chunks. A terminator before
+  an inaccessible page remains valid; callers preserve their own error contract.
+  Retained-memory reads require explicit owner-provided authority. Executable
+  metadata uses it only for same-process inspection after `dumpable=0`, never
+  to authorize a foreign process's proc access.
+- `received_fds` owns exclusive parcel accumulation, immutable shared custody
+  and provenance. Geometric growth transfers no FD twice and leaves both inputs
+  unchanged on allocation failure.
+
 ### Process and resource lifetime
 
 Kernel tasks and open descriptions are not replaced by simulated processes or
@@ -127,6 +149,10 @@ use retained sources and confirmed kernel publication; cancellation releases
 unpublished resources without closing an application's installed or reused FD.
 No SQLite transaction or file-table turn may span an application readiness wait.
 Mixed poll/epoll keeps native waiting in the calling guest's signal context.
+Before an application installs seccomp, readiness selectors are prepared for
+future virtual FDs, because the application may forbid further filter installation.
+That sandbox path adds admission overhead even to native waits; ordinary
+unfiltered workloads retain selective interception.
 Inherited stdio can retain metadata-only O_PATH identity pins; these neither
 keep pipes open for data IO nor supply filesystem authority. Filtered result
 publication replays the original syscall admission and consumes the retained

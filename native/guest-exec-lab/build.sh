@@ -33,13 +33,14 @@ inode_compile() {
 }
 node "$src/test_signature.mjs" "$work"
 mkdir -p "$work/bundle/rootfs" "$work/path-test"
-(
-    set --
-    case "$($cc -dumpmachine)" in *android*) set -- --target=aarch64-linux-android34 -L/system/lib64 ;; esac
-    "$cc" "$@" -iquote "$runtime" -std=c17 -O2 -Wall -Wextra -Werror -UNDEBUG \
-        "$src/test_interception_memory.c" "$runtime/interception_memory.c" "$runtime/interception_buffers.c" "$runtime/resource_order.c" -o "$work/test-interception-memory"
-)
-"$work/test-interception-memory"
+cmake -S "$src/../shroot" -B "$work/native-runtime" -G Ninja \
+    -DCMAKE_C_COMPILER="$cc" -DCMAKE_ASM_COMPILER="$cc" \
+    -DANDROID_PLATFORM_LEVEL=34 -DMAGICDESK_GUEST_FIXTURES=ON \
+    -DCMAKE_C_FLAGS=--target=aarch64-linux-android34 \
+    -DCMAKE_ASM_FLAGS=--target=aarch64-linux-android34 \
+    -DCMAKE_EXE_LINKER_FLAGS=-fno-termux-rpath
+cmake --build "$work/native-runtime" --target test_interception_memory --parallel 2
+"$work/native-runtime/libmagicdesk_guest_test_interception_memory.so"
 "$cc" -iquote "$runtime" -std=c17 -O2 -Wall -Wextra -Werror -UNDEBUG -fno-builtin -DMD_NO_START \
     "$src/test_socket_routes.c" "$runtime/socket_routes.c" "$runtime/raw.c" "$runtime/memory.c" "$runtime/raw.S" -o "$work/test-socket-routes"
 "$work/test-socket-routes"
@@ -121,14 +122,10 @@ guest_cc() {
         -fuse-ld=lld -std=c17 -O2 -g -Wall -Wextra -Werror -fPIC -mno-outline-atomics -nostdlib "$@" \
         -L"$sysroot/lib/aarch64-linux-gnu" -l:libc.so.6
 }
-cmake -S "$src/../shroot" -B "$work/native-runtime" -G Ninja \
-    -DCMAKE_C_COMPILER="$cc" -DCMAKE_ASM_COMPILER="$cc" \
-    -DANDROID_PLATFORM_LEVEL=34 \
-    -DCMAKE_C_FLAGS=--target=aarch64-linux-android34 \
-    -DCMAKE_ASM_FLAGS=--target=aarch64-linux-android34 \
-    -DCMAKE_EXE_LINKER_FLAGS=-fno-termux-rpath
-cmake --build "$work/native-runtime" --parallel 2
-cp "$work/native-runtime"/libmagicdesk_guest_*.so "$work/bundle/"
+cmake --build "$work/native-runtime" --target bootstrap supervisor run service image --parallel 2
+for name in bootstrap supervisor run service image; do
+    cp "$work/native-runtime/libmagicdesk_guest_$name.so" "$work/bundle/"
+done
 "$cc" -iquote "$runtime" --target=aarch64-linux-android34 -fno-termux-rpath -static \
     -std=c17 -O2 -Wall -Wextra -Werror -UNDEBUG "$src/test_capabilities.c" -o "$work/bundle/md-capabilities-test"
 "$cc" --target=aarch64-linux-android34 -fno-termux-rpath -static \

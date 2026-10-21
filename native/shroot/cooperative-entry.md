@@ -74,10 +74,15 @@ Thus every syscall has a route, but only worker operations and admitted native
 plans avoid ordinary syscall interception. A common entry is not an accelerated
 implementation of every family.
 
-Registration is an authenticated supervisor trap. Eight persistent slots in the
+Registration uses the existing exact-site `gettid` notification gate; the
+supervisor selects the caller's channel, never a supplied task identity. It does
+not use a synchronous signal: Linux can unblock a blocked SIGTRAP and reset its
+disposition before ptrace observes a BRK. Eight persistent slots in the
 existing per-image buffer pool are separate from its 32 ordinary response slots
-and control reserve. Exhaustion selects the kernel route without waiting, with
-bounded retry backoff; unsupported admission is remembered by that client. No guest socket,
+and control reserve. Exhaustion, allocation failure and interrupted registration
+select the kernel route without waiting, with bounded retry backoff; unsupported
+admission is remembered by that client. The original syscall has not run yet.
+No guest socket,
 temporary FD or helper thread is created. Fork cannot reuse an inherited client;
 a fresh client registers separately. Thread exit returns its slot, and exec
 replaces the descriptor and pool.
@@ -107,10 +112,14 @@ EINTR. The JIT repair fixture includes a semop waiter whose pending operation
 survives memory repair without retrying in the application.
 
 Internal signal scopes save and restore masks through one supervisor boundary.
-An experimental machine-entry shield is an overlay, not application state;
-nested adapters retain the logical mask below it. Retained asynchronous signals
-are released only after all internal owners restore the guest boundary. The
-ordinary no-retained-signal route adds no signal-delivery round trip.
+Nested adapters retain the logical application mask below their internal
+protocol masks. Retained asynchronous signals are released only after all
+internal owners restore the guest boundary. `signal_delivery` identifies that
+boundary with `PTRACE_GET_SYSCALL_INFO`: at entry/seccomp it first cancels the
+unexecuted syscall, waits for its exit, then delivers and replays the original
+instruction. A completed syscall is never replayed. This prevents a signal
+handler from receiving an untouched argument instead of its syscall result.
+The ordinary no-retained-signal route adds no signal-delivery round trip.
 
 The task registry retains an immutable resource generation for repeated reads.
 Each admitted read owns one reference instead of independently retaining every
@@ -316,6 +325,11 @@ Awake publication ends at the service's actual poll boundary, not after each
 burst. The shared request/native-result check and producer's wake check form a
 sequentially consistent handshake: work observed during parking forces a
 nonblocking poll, which still services other sources before the next burst.
+Eligibility changes participate in the same protocol: retiring a delegated
+operation wakes a parked worker if the caller has already published its next
+request. Registration replies may resume the caller before supervisor-side
+retirement; that overlap must not require a later unrelated syscall to progress.
+The broker fixture forces this ordering and waits without any further guest IO.
 Clock reads are batched every eight empty worker iterations and 32 guest
 iterations; the budget remains time-based, not a presumed fixed iteration cost.
 At the request/time burst limit, the worker releases the store window and may
@@ -410,8 +424,16 @@ the entry API. Before
 attempting a filter installation, the supervisor revokes the relevant task or
 TSYNC thread group's authoritative eligibility. A failed installation leaves it
 disabled conservatively. Already admitted operations may complete; later requests
-use the kernel continuation. Fresh filtered clients are rejected at registration
-without first issuing helper syscalls. Debugger tracing and protected native-root
+use the kernel continuation. A monotonic per-image hint disables new channel
+registration before any application filter, including inherited policy after
+exec. Fresh clients therefore do not issue a potentially forbidden helper.
+Existing channels retain per-task eligibility; unfiltered siblings need not lose
+their registered channels. The hint grants no authority, and the registration
+notification still passes the kernel filter if a caller ignores it.
+The existing guest filter preflight writes the hint locally, before replaying
+the application's filter syscall; the image handshake returns inherited policy
+in a register. Neither path needs to write a protected child's memory remotely.
+Debugger tracing and protected native-root
 restrictions also select the existing kernel-admitted route.
 
 Thus the entry contract works in sandboxed programs, but **their filtered calls
@@ -442,7 +464,7 @@ The stock musl/glibc fixtures exercise cancellation, signal abandonment,
 FIFO restart, FD counts and static/dynamic linking. They compile only the small
 test workload against distribution libraries. Entry changes rebuild Shroot,
 not libc. The [SVC guide](../guest-exec-lab/svc-rewriting.md#product-boundary)
-documents publication and signal semantics and retained experimental evidence.
+documents publication, signal semantics and verification boundaries.
 
 ## Verification And Performance
 
@@ -523,12 +545,10 @@ unexecuted admission. The runtime suite explicitly runs the broker-directory
 contract, including deterministic live-token, identity mismatch, ioctl failure
 and interrupted-token-check cases; a successful check never installs another FD.
 
-`benchmark_cooperative.py BUILD --workload metadata --iterations 32768
---rounds 5 --cpu-mask 3 --logical-root --modes native shroot shroot-entry`
-compares identical production workloads. `shroot-entry` retains real guest
-pointers, task identity, lifecycle and completion ownership; the older
-`cooperative-*` modes are controlled captured-request experiments, not production
-timings. See [experiment measurements](../guest-exec-lab/cooperative-entry.md).
+The stock-libc runner measures real guest pointers, task identity, lifecycle
+and completion ownership. Superseded captured-request transports are removed;
+their timings are not a production baseline. See the
+[measurement workflow](../guest-exec-lab/cooperative-entry.md).
 
 No storage-format change, runtime dependency, ART integration or kernel newer
 than 5.15 is required. Extending SVC-free execution to more syscall families and

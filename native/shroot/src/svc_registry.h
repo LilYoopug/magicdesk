@@ -28,10 +28,12 @@ int md_svc_registry_pool(struct md_svc_registry *,uintptr_t);
 int md_svc_registry_read(pid_t,uintptr_t,void *,size_t);
 int md_svc_registry_write(pid_t,uintptr_t,const void *,size_t);
 int md_svc_registry_executable(pid_t,uintptr_t,size_t);
-int md_svc_registry_active(struct md_svc_registry *,uintptr_t);
 int md_svc_registry_direct(struct md_svc_registry *,pid_t,uintptr_t svc,uint64_t number);
 struct md_svc_site *md_svc_registry_direct_at(struct md_svc_registry *,pid_t,uintptr_t pc,uintptr_t sp);
 uintptr_t md_svc_registry_call_origin(const struct md_svc_registry *,uintptr_t pc);
+/* Decode a captured word for syscall replay, never arbitrary code at a former
+ * site. Only an exact resident replacement has an owned original instruction. */
+uint32_t md_svc_registry_instruction(const struct md_svc_registry *,uintptr_t pc,uint32_t word);
 int md_svc_registry_retire(struct md_svc_registry *,struct md_svc_site *,pid_t);
 int md_svc_registry_revoke(struct md_svc_registry *,pid_t);
 int md_svc_registry_unpatch(struct md_svc_registry *,pid_t,uintptr_t,size_t);

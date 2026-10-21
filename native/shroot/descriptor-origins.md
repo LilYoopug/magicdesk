@@ -107,6 +107,12 @@ native-fchdir completion paths after interception is ready and before guest code
 loads. Exec retains the existing cwd. Direct-rootfs bootstrap cwd and
 unannotated native descriptors have unknown provenance.
 
+Capture fixtures distinguish these paths. A directory opened by the guest
+retains its origin and must work when helper syscalls are denied. An inherited
+native directory on stdin has no path authority; it exercises clone, table
+isolation and export failure under a full descriptor table. Both preserve all
+descriptors in surviving CLONE_FILES peers.
+
 Proc aliases of the current thread's descriptor table borrow the original input
 for metadata, readlink, reopen, watch registration and directory suffix traversal.
 The mapped request captures its identity under the file-table turn, without a
@@ -159,8 +165,10 @@ After an application filter is installed, a completed filesystem result may
 require task-affine FD delivery. The result owner retains that completion while
 the supervisor admits the original syscall PC and six arguments through the
 kernel filter. A permitted replay publishes the existing result exactly once;
-it does not execute open/create again. A denied replay retains the filter's
-action. Optional mapping-backing capture is omitted when its clone/sendmsg
+it does not execute open/create again. Group-stop cancellation retains the open
+description and repeats only admission on kernel-internal restart results, not
+on a final errno such as EINTR. A denied replay retains the filter's action.
+Optional mapping-backing capture is omitted when its clone/sendmsg
 helpers would introduce additional calls after filter installation.
 
 `resource_order` provides an intrusive queue embedded independently in each
@@ -226,8 +234,13 @@ the acknowledgement is not a shared-table publication barrier.
 The direct broker prepares the annotation before atomic ADDFD_SEND, publishes
 the returned FD number, then releases its table turn. An observed shared-table
 mutation cannot overtake that publication. Failed atomic delivery discards the
-prepared annotation, not a guessed descriptor number. O_PATH still requires the
-task-affine transport, since notification ADDFD rejects it.
+prepared annotation, not a guessed descriptor number. Notification ADDFD rejects
+O_PATH. An eligible caller-side native open can acquire its own descriptor, but
+O_PATH|O_NOFOLLOW retains exact descriptor custody: reopening a procfs magic link
+would either open the link itself or lose NOFOLLOW from F_GETFL. The common open
+admission rule therefore routes that combination through task-affine transport.
+An already matching O_PATH pin is duplicated; directory reopening uses its
+retained `/.` target, never a mutable guest name.
 
 Task-affine RPC captures input origins under a short send turn. A launch-local
 exchange ID binds them to the authenticated actor and exact table; wire values

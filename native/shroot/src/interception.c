@@ -70,7 +70,7 @@ static long md_guest_open_proc_fds(int directory, unsigned long flags) {
     return RAW4(openat,directory,proc_fds_path,flags,0);
 }
 
-extern void md_guest_ready(int, const char *, uint64_t, const struct md_interception_abi *);
+extern int md_guest_ready(int, const char *, uint64_t, const struct md_interception_abi *);
 extern void md_guest_done(void), md_guest_allocate(void), md_guest_allocated(void);
 extern void md_guest_dispatch_entry(void);
 extern void md_guest_exported(void), md_guest_store(void), md_guest_stored(void);
@@ -96,7 +96,10 @@ static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, un
     unsigned long args[] = {a0, a1, a2, a3, a4, a5};
     if (nr==SYS_epoll_ctl || nr==SYS_epoll_pwait || nr==SYS_epoll_pwait2) return md_epoll_call(nr,args);
     if (nr==SYS_ppoll || nr==SYS_pselect6) return md_poll_call(nr,args);
-    if (nr==SYS_seccomp || nr==SYS_prctl) return md_fd_filter_prepare_sandbox();
+    if (nr==SYS_seccomp || nr==SYS_prctl) {
+        md_cooperative_revoke();
+        return md_fd_filter_prepare_sandbox();
+    }
     if (nr==SYS_unshare || nr==SYS_clone || nr==SYS_setns) return md_pid_filter_install();
     if (nr==SYS_kill && (int)a0<=0) return md_pid_signal_group((int)a0,(int)a1);
     if (nr==SYS_pidfd_send_signal) return md_pidfd_signal(args);
@@ -360,20 +363,12 @@ int md_interception_install(int inherited) {
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_MEMORY),
             BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_mremap,0,1),
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_MEMORY),
-#ifdef MD_SVC_SIGNAL_PROOF
-            /* Only the isolated code-lifetime experiment observes removal of
-             * execute permission and anonymous executable-page discard. */
-            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_mprotect,0,1),
-            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_MEMORY),
-            OBSERVE(madvise)
-#else
             BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_mprotect,0,4),
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[2])),
             BPF_JUMP(BPF_JMP|BPF_JSET|BPF_K,PROT_EXEC,0,1),
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_MEMORY),
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
             NATIVE(madvise)
-#endif
             NATIVE(brk)
             NATIVE(rt_sigaction) NATIVE(rt_sigprocmask) NATIVE(rt_sigreturn) NATIVE(sigaltstack)
             NATIVE(getpid) NATIVE(getppid) NATIVE(gettid)
@@ -479,7 +474,8 @@ int md_interception_install(int inherited) {
             if (result >= 0) { listener = (int)result; result = 0; }
         }
     } else if (RAW1(prctl, PR_GET_SECCOMP) != SECCOMP_MODE_FILTER) result = -EINVAL;
-    if (!result) md_guest_ready(listener, md_files.endpoint, MD_INTERCEPTION_MAGIC, &abi);
+    if (!result && !md_guest_ready(listener, md_files.endpoint, MD_INTERCEPTION_MAGIC, &abi))
+        md_cooperative_revoke();
     if (!result) md_fd_client_enable();
     if (listener >= 0) RAW1(close, listener);
     if (!result) result=md_adapter_buffer_install();

@@ -26,10 +26,20 @@ _Static_assert(ATOMIC_INT_LOCK_FREE==2,"signal counter must be lock-free");
 static _Atomic unsigned signals;
 static _Atomic unsigned traps;
 static void interrupted(int signal,siginfo_t *info,void *context) {
-    (void)context;
     int saved=errno;
-    sigset_t mask; assert(!sigprocmask(SIG_SETMASK,NULL,&mask));
+    sigset_t mask; int read_mask=sigprocmask(SIG_SETMASK,NULL,&mask);
+    if (read_mask) {
+        ucontext_t *frame=context;
+        fprintf(stderr,"shared memory mask read: result=%d errno=%d tid=%ld interrupted=%#llx\n",
+            read_mask,errno,syscall(SYS_gettid),frame->uc_mcontext.pc);
+    }
+    assert(!read_mask);
     assert(signal==SIGALRM && info->si_signo==SIGALRM && info->si_code==SI_KERNEL);
+    if (sigismember(&mask,SIGUSR2)!=1 || sigismember(&mask,SIGTRAP)!=1) {
+        ucontext_t *frame=context;
+        fprintf(stderr,"shared memory signal mask: usr2=%d trap=%d pc=%#llx\n",
+            sigismember(&mask,SIGUSR2),sigismember(&mask,SIGTRAP),frame->uc_mcontext.pc);
+    }
     assert(sigismember(&mask,SIGUSR2)==1 && sigismember(&mask,SIGTRAP)==1);
     ++signals; errno=saved;
 }
@@ -114,6 +124,9 @@ int test_shared_memory_guest(const char *root,int protected,int restart) {
     sigset_t mask,original;
     sigemptyset(&mask); sigaddset(&mask,SIGUSR2); sigaddset(&mask,SIGTRAP);
     assert(!sigprocmask(SIG_BLOCK,&mask,&original));
+    struct sigaction trap={.sa_sigaction=interrupted,.sa_flags=SA_SIGINFO},original_trap,current_trap;
+    if (restart&16) trap=(struct sigaction){.sa_handler=SIG_IGN};
+    assert(!sigaction(SIGTRAP,&trap,&original_trap));
     if (restart&2) filter();
     struct sigaction action={.sa_sigaction=interrupted,.sa_flags=SA_SIGINFO|((restart&1) ? SA_RESTART : 0)};
     assert(!sigaction(SIGALRM,&action,NULL));
@@ -152,6 +165,9 @@ int test_shared_memory_guest(const char *root,int protected,int restart) {
     assert(!sigprocmask(SIG_SETMASK,NULL,&mask));
     assert(sigismember(&mask,SIGUSR2)==1 && sigismember(&mask,SIGTRAP)==1
         && sigismember(&mask,SIGALRM)==0 && sigismember(&mask,SIGSYS)==0);
+    assert(!sigaction(SIGTRAP,NULL,&current_trap));
+    assert((restart&16) ? current_trap.sa_handler==SIG_IGN : current_trap.sa_sigaction==interrupted);
+    assert(!sigaction(SIGTRAP,&original_trap,NULL));
     assert(!sigprocmask(SIG_SETMASK,&original,NULL));
     printf("PASS shared memory under signals: protected=%d restart=%d delivered=%d\n",protected,restart,signals);
     return 0;

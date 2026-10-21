@@ -59,6 +59,7 @@ struct md_mount_namespace *md_fs_worker_mounts(struct md_fs_worker *);
 struct md_device_events *md_fs_worker_device_events(struct md_fs_worker *);
 struct md_ofd_orders *md_fs_worker_cursors(struct md_fs_worker *);
 void md_fs_worker_wake(struct md_fs_worker *);
+void md_fs_worker_describe(struct md_fs_worker *,int fd);
 /* Caller-owned intrusive records containing trusted host-side state, never
  * guest pointers to dereference. Submit once per ownership cycle; publication
  * returns access to complete(). The owner retains storage through completion

@@ -17,6 +17,12 @@
 static void same(int fd,const struct stat *expected) {
     struct stat st;
     assert(!fstat(fd,&st));
+    if (st.st_dev!=expected->st_dev || st.st_ino!=expected->st_ino
+            || st.st_rdev!=expected->st_rdev || st.st_mode!=expected->st_mode)
+        fprintf(stderr,"device fd=%d actual=%llu:%llu/%llu/%o expected=%llu:%llu/%llu/%o\n",fd,
+            (unsigned long long)st.st_dev,(unsigned long long)st.st_ino,(unsigned long long)st.st_rdev,st.st_mode,
+            (unsigned long long)expected->st_dev,(unsigned long long)expected->st_ino,
+            (unsigned long long)expected->st_rdev,expected->st_mode);
     assert(st.st_dev==expected->st_dev && st.st_ino==expected->st_ino
         && st.st_rdev==expected->st_rdev && st.st_mode==expected->st_mode);
     assert(!fstatat(fd,"",&st,AT_EMPTY_PATH) && st.st_ino==expected->st_ino

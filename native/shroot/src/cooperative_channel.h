@@ -31,8 +31,8 @@ static inline int md_entry_native_fd(int number,const uint64_t args[6]) {
 /* Bootstrap-only initialization, before any guest thread exists. */
 void md_cooperative_init(const void *vdso,size_t first_page);
 
-/* Private interpretation of the fixed libc handle. Progress/feedback lives in
- * the runtime-owned channel, so adding transport state never grows libc TLS. */
+/* Private interpretation of the fixed entry handle. Progress/feedback lives
+ * in the runtime-owned channel, independently of a caller's TLS layout. */
 enum { MD_ENTRY_CLIENT_CHANNEL, MD_ENTRY_CLIENT_OWNER, MD_ENTRY_CLIENT_CONTROL };
 /* The control word's low bit guards reentry; the rest holds registration backoff. */
 enum { MD_ENTRY_CLIENT_BUSY = 1 };
@@ -42,7 +42,7 @@ _Static_assert(sizeof(atomic_uint)==4,"Linux futex word size");
 
 enum md_entry_state { MD_ENTRY_IDLE, MD_ENTRY_REQUEST, MD_ENTRY_FD_REQUEST, MD_ENTRY_RUNNING,
     MD_ENTRY_RESPONSE, MD_ENTRY_CLOSED, MD_ENTRY_NATIVE, MD_ENTRY_RETIRING };
-enum { MD_ENTRY_WAKE = 0x434f4f50 };
+enum { MD_ENTRY_WAKE = 0x434f4f50, MD_ENTRY_BIND };
 struct md_entry_channel {
     _Alignas(64) atomic_uint state;
     atomic_uint enabled, awake, sleeping, copying, caller;

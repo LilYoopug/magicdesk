@@ -89,7 +89,9 @@ static void semantics(void) {
     fd=openat(src,"a",O_RDONLY); CHECK(fd>=0 && read(fd,target,8)==8 && !memcmp(target,"contents",8)); close(fd);
     CHECK(md_inode_import_tree(s,src,&limits,&result)==-ENOTEMPTY && !result.entries);
     CHECK(names(s)==(aliases?7U:5U)); md_inode_store_close(s);
-    CHECK(md_inode_store_open(dstpath,0,&s)==0 && names(s)==(aliases?7U:5U)); md_inode_store_close(s); close(src);
+    CHECK(md_inode_store_open(dstpath,0,&s)==0 && names(s)==(aliases?7U:5U)); md_inode_store_close(s);
+    /* Restore only the fixture source after checking imported readonly modes. */
+    CHECK(!fchmodat(src,"d",0700,0)); close(src);
     puts("PASS import: data, modes, timestamps, symlinks, native identity, independent source and reopen");
 }
 static void fifo_import(void) {

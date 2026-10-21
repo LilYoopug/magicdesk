@@ -54,6 +54,20 @@ static void string_operands(void) {
     puts("PASS string operands: caller capture and executor decoding share exact argument selectors");
 }
 
+static void open_admission(void) {
+    for (unsigned i=0;i<8;++i) {
+        unsigned flags=O_PATH | (i&1 ? O_DIRECTORY : 0) | (i&2 ? O_CLOEXEC : 0)
+            | (i&4 ? O_NOFOLLOW : 0);
+        uint64_t args[]={AT_FDCWD,1,flags,0,0,0};
+        for (unsigned birth=0;birth<2;++birth)
+            assert(md_open_native_plan(flags,birth)==!(flags&O_NOFOLLOW));
+        assert(md_entry_native_open(SYS_openat,args)==!(flags&O_NOFOLLOW));
+    }
+    assert(md_open_native_plan(O_RDONLY|O_NOFOLLOW,0));
+    assert(md_open_native_plan(O_CREAT|O_EXCL|O_RDWR,1));
+    puts("PASS native open admission: exact O_PATH NOFOLLOW custody, ordinary plans unchanged");
+}
+
 static unsigned descriptors(void) {
     DIR *d=opendir("/proc/self/fd"); assert(d);
     unsigned count=0; struct dirent *entry;
@@ -197,6 +211,7 @@ static void park_handoff(void) {
 int main(void) {
     alarm(30); unsigned count=0;
     string_operands();
+    open_admission();
     park_handoff();
     for (int kind=0;kind<7;++kind)
         for (uintptr_t pc=(uintptr_t)md_cooperative_native;pc<=(uintptr_t)md_cooperative_native_end;pc+=4) {
@@ -204,8 +219,9 @@ int main(void) {
         }
     long result=0;
     for (long restart=-516;restart<=-512;++restart) {
-        assert(md_native_stopped(MD_NATIVE_RUNNING,108,restart,100,104,120,&result)==MD_NATIVE_CANCELLED);
-        assert(result==-EINTR);
+        assert(md_native_stopped(MD_NATIVE_RUNNING,108,restart,100,104,120,&result)
+            ==(restart==-515 ? MD_NATIVE_DONE : MD_NATIVE_CANCELLED));
+        assert(result==(restart==-515 ? restart : -EINTR));
     }
     assert(md_native_stopped(MD_NATIVE_RUNNING,108,-EINTR,100,104,120,&result)==MD_NATIVE_DONE);
     assert(result==-EINTR);

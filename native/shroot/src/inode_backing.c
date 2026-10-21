@@ -30,10 +30,7 @@ int mdi_backing_path(struct md_inode_store *s,const struct mdi_node *node,char *
 int mdi_backing_open(struct md_inode_store *s,const struct mdi_node *node,int flags) {
     int fd;
     if (node->descriptor) {
-        char path[64];
-        int r=mdi_backing_path(s,node,path,sizeof(path));
-        if (r) return r;
-        fd=open(path,(flags&~O_NOFOLLOW)|O_CLOEXEC);
+        return md_open_pinned(node->descriptor-1,flags);
     } else {
         int dir=mdi_backing_directory(s,node);
         if (dir<0) return dir;

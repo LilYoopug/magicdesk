@@ -16,7 +16,6 @@ def main():
     parser.add_argument('stock', type=Path)
     parser.add_argument('--rounds', type=int, default=8)
     parser.add_argument('--checks-only', action='store_true')
-    parser.add_argument('--syscall', type=int, default=79, help='AArch64 discovery syscall, not an ABI rule')
     parser.add_argument('--workload', default='metadata', choices=['metadata', 'opens'])
     parser.add_argument('--threaded', action='store_true', help='enter libc threaded mode before first open')
     parser.add_argument('--sandbox', action='store_true', help='time original-SVC fallback after an application filter')
@@ -27,7 +26,6 @@ def main():
     parser.add_argument('--signal-storm', action='store_true', help='additional adversarial asynchronous signal acceptance')
     parser.add_argument('--signal-rounds', type=int, default=1, help='repeat each signal scenario independently')
     parser.add_argument('--condition', default='unspecified')
-    parser.add_argument('--integrated', action='store_true', help='ordinary supervisor without the discovery tracer')
     args = parser.parse_args()
     if args.signal_rounds<1:
         parser.error('--signal-rounds must be positive')
@@ -44,7 +42,6 @@ def main():
         root, native = suite.base + '/root', suite.base + '/native'
         suite.command(['mkdir', '-p', root + '/bin', root + '/tmp', root + '/lib', native])
         files = [(args.stock, root + '/bin/stock'),
-                 (args.build / 'libmagicdesk_guest_trace_svc_patch.so', root + '/bin/tracer'),
                  (args.build / 'libmagicdesk_guest_service.so', suite.base + '/service'),
                  (args.build / 'libmagicdesk_guest_test_signal_delivery.so', suite.base + '/signals')]
         if args.dynamic_loader:
@@ -61,21 +58,16 @@ def main():
         suite.command([suite.base + '/signals'])
         suite.command([suite.base + '/service', '--import', root, suite.base + '/store'])
         guest = [suite.runner, '--store', suite.base + '/store', '--user', '0:0',
-                 '--env', 'MD_BENCH_WARMUP=1',
-                 '--env', 'MD_SVC_NUMBER=' + str(args.syscall)]
-        if not args.integrated: guest += ['--env', 'MD_SVC_SIGNAL_PROOF=1', '--env', 'SHROOT_MACHINE_ENTRY=0']
+                 '--env', 'MD_BENCH_WARMUP=1']
         if args.threaded: guest += ['--env', 'MD_LIBC_THREADED=1']
         guest += ['--']
         launches = {
             'native': ['env', 'MD_BENCH_WARMUP=1', *(['MD_LIBC_THREADED=1'] if args.threaded else []), root + '/bin/stock', native],
             'base': [*guest[:-1], '--env', 'SHROOT_MACHINE_ENTRY=0', '--', '/bin/stock', '/tmp'],
-            'machine': [*guest, '/bin/tracer', 'edge', '/bin/stock', '/tmp'],
+            'machine': [*guest[:-1], '--statistics', '--', '/bin/stock', '/tmp'],
         }
-        if args.integrated:
-            launches['machine'] = [*guest[:-1], '--statistics', '--', '/bin/stock', '/tmp']
-        evidence_prefix = 'SVC_RUNTIME_STATS ' if args.integrated else 'SVC_EDGE_STATS '
         def machine_evidence(output):
-            items = records(output, evidence_prefix)
+            items = records(output, 'SVC_RUNTIME_STATS ')
             assert items and not any(item['unknown'] for item in items), output
             return max(items, key=lambda item: item['completed'])
         if args.dynamic_loader:
@@ -89,14 +81,12 @@ def main():
             if name == 'machine':
                 evidence = machine_evidence(output)
                 assert evidence['completed'] > 0
-                if not args.integrated:
-                    assert evidence['detached'] and evidence['selectedNumber'] == args.syscall and evidence['selectedCompleted'] > 0
                 suite.report['entryEvidence'].append(evidence)
             print('libc contracts', name, 'PASS', flush=True)
         output = suite.command([*launches['machine'], 'thread-churn'], quiet=True)
         evidence = machine_evidence(output)
         assert '256 retired owners' in output and evidence['retiredClients'] >= 256
-        assert evidence['completed' if args.integrated else 'selectedCompleted'] >= 8190
+        assert evidence['completed'] >= 8190
         suite.report['churnEvidence'] = evidence
         print('libc thread churn PASS', evidence, flush=True)
         if args.signal_storm:
@@ -110,19 +100,18 @@ def main():
         count = 32768 if args.workload == 'metadata' else 4096
         workload = [args.workload, str(count), *(['filtered'] if args.sandbox else [])]
         timed_launches = dict(launches)
-        if args.integrated:
-            # Counter collection includes clocks in the engine's hot path.
-            # Verify real completions separately, then time every mode without it.
-            timed_launches['machine'] = [arg for arg in launches['machine'] if arg != '--statistics']
-            suite.report['timedRuntimeStatistics'] = False
-            if not args.checks_only:
-                output = suite.command(['taskset', '3', *launches['machine'], *workload], quiet=True)
-                evidence = machine_evidence(output)
-                if args.sandbox:
-                    assert evidence['revoked'] and 0 < evidence['completed'] < count
-                else:
-                    assert evidence['completed'] >= count
-                suite.report['workloadEntryEvidence'] = evidence
+        # Counter collection includes clocks in the engine's hot path.
+        # Verify real completions separately, then time every mode without it.
+        timed_launches['machine'] = [arg for arg in launches['machine'] if arg != '--statistics']
+        suite.report['timedRuntimeStatistics'] = False
+        if not args.checks_only:
+            output = suite.command(['taskset', '3', *launches['machine'], *workload], quiet=True)
+            evidence = machine_evidence(output)
+            if args.sandbox:
+                assert evidence['revoked'] and 0 < evidence['completed'] < count
+            else:
+                assert evidence['completed'] >= count
+            suite.report['workloadEntryEvidence'] = evidence
         for round_number in range(0 if args.checks_only else args.rounds):
             rotation = round_number // 2 % len(modes)
             order = modes[rotation:] + modes[:rotation]
@@ -132,14 +121,6 @@ def main():
                 sample, = [json.loads(line) for line in output.splitlines() if line.startswith('{"workload"')]
                 sample.update(mode=mode, round=round_number)
                 suite.report['samples'].append(sample)
-                if mode == 'machine' and not args.integrated:
-                    evidence = machine_evidence(output)
-                    assert evidence['detached']
-                    if args.sandbox:
-                        assert evidence['revoked'] and 0 < evidence['selectedCompleted'] < count
-                    else:
-                        assert evidence['selectedCompleted'] >= count
-                    suite.report['entryEvidence'].append(evidence)
                 print('libc', args.workload, round_number, mode, sample['nanoseconds']/1e6, 'ms', flush=True)
         if not args.checks_only:
             series = {mode: [s['nanoseconds'] for s in suite.report['samples'] if s['mode'] == mode] for mode in modes}

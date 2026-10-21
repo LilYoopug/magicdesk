@@ -57,8 +57,10 @@ def main():
         return value
 
     def check_namespaces():
-        check("guest device nodes", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
-              + root + "/store --deadline-seconds 90 -- /bin/test device-nodes", "PASS guest device nodes:")
+        for entry in (0, 1):
+            check(f"guest device nodes entry={entry}", root + "/libmagicdesk_guest_run.so --user 0:0"
+                  + f" --env SHROOT_MACHINE_ENTRY={entry} --diagnostics --store "
+                  + root + "/store --deadline-seconds 90 -- /bin/test device-nodes", "PASS guest device nodes:")
         check("guest keyring absence", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
               + root + "/store --deadline-seconds 90 -- /bin/test keyring", "PASS guest keyring absence:")
         check("native memfd metadata", root + "/libmagicdesk_guest_resource_guest.so native-metadata", "PASS native metadata:")
@@ -148,11 +150,21 @@ def main():
               + root + "/native", "PASS capture terminal ownership")
         check("guest capture terminal ownership", root + "/libmagicdesk_guest_run.so --diagnostics --store " + root
               + "/store --deadline-seconds 90 -- /bin/test capture-terminal /tmp", "PASS capture terminal ownership")
-        check("native unknown cwd control", root + "/libmagicdesk_guest_resource_guest.so native-cwd "
-              + root + "/native", "PASS native cwd")
-        check("guest unknown cwd capture", root + "/libmagicdesk_guest_run.so --diagnostics --store " + root
-              + "/store --deadline-seconds 90 -- /bin/test native-cwd /tmp", "PASS native cwd",
-              patterns=(r"PROBE buffer-capture pid=\d+",))
+        # Opening /dev through the guest now retains its origin. An inherited
+        # native directory really requires capture and exercises helper failure.
+        check("native inherited capture terminal control", root + "/libmagicdesk_guest_resource_guest.so capture-terminal-inherited-native "
+              + root + "/native </dev", "PASS capture terminal ownership")
+        check("guest inherited capture terminal ownership", root + "/libmagicdesk_guest_run.so --diagnostics --store " + root
+              + "/store --deadline-seconds 90 -- /bin/test capture-terminal-inherited /tmp </dev", "PASS capture terminal ownership")
+        for inherited in (False, True):
+            scenario="native-cwd-inherited" if inherited else "native-cwd"
+            control=" </dev" if inherited else ""
+            check("native cwd control inherited=" + str(inherited), root + "/libmagicdesk_guest_resource_guest.so "
+                  + scenario + " " + root + "/native" + control, "PASS native cwd")
+            check("guest cwd capture inherited=" + str(inherited), root + "/libmagicdesk_guest_run.so --diagnostics --store " + root
+                  + "/store --deadline-seconds 90 -- /bin/test " + scenario + " /tmp" + control, "PASS native cwd",
+                  patterns=(r"PROBE buffer-capture pid=\d+",) if inherited else (),
+                  absent_patterns=() if inherited else (r"PROBE buffer-capture pid=\d+",))
         check("native proc watch full table", root + "/libmagicdesk_guest_resource_guest.so watch-slots "
               + root + "/native", "PASS watch paths without private FDs")
         check("guest proc watch full table", root + "/libmagicdesk_guest_run.so --diagnostics --store " + root
@@ -167,6 +179,8 @@ def main():
                         r"MD_BROKER nr=56 notifications=\d+ handled=[1-9]\d* delegated=\d+"))
         check_mutation_signals()
         check_captures()
+        check("adapter stack ownership", root + "/libmagicdesk_guest_test_interception_memory.so",
+              "PASS adapter stacks:")
         check("adapter address-space ownership", root + "/libmagicdesk_guest_test_interception_buffers.so",
               "PASS shared request buffer ownership")
         check("native buffered cwd control", root + "/libmagicdesk_guest_resource_guest.so buffer-cwd " + root + "/native",
@@ -175,8 +189,10 @@ def main():
               + "/store --deadline-seconds 90 -- /bin/test buffer-cwd /tmp", "PASS buffered cwd")
         check("native buffered open control", root + "/libmagicdesk_guest_resource_guest.so buffer-open " + root + "/native",
               "PASS buffered O_PATH")
-        check("guest buffered O_PATH", root + "/libmagicdesk_guest_run.so --store " + root
-              + "/store --deadline-seconds 90 -- /bin/test buffer-open /tmp", "PASS buffered O_PATH")
+        for entry in (0, 1):
+            check("guest buffered O_PATH entry=" + str(entry), root + "/libmagicdesk_guest_run.so --env SHROOT_MACHINE_ENTRY="
+                  + str(entry) + " --store " + root + "/store --deadline-seconds 90 -- /bin/test buffer-open /tmp",
+                  "PASS buffered O_PATH")
         check_buffer_descriptors()
         check_exports()
         check_returns()
@@ -389,7 +405,7 @@ def main():
         if args.case == "fs-directory":
             names += ("fs_dispatch",)
         if args.case in ("all", "fs-buffer"):
-            names += ("test_interception_buffers",)
+            names += ("test_interception_memory", "test_interception_buffers")
         if args.case == "all":
             names += ("test_open_job", "fs_dispatch", "test_launch_registry", "ipc_credentials_guest", "ipc_io_job", "fd_observation", "task_helper_fd", "test_native_mounts", "file_metadata", "event_signal")
             names += ("control_event", "wait_guest")
@@ -493,11 +509,19 @@ def main():
             for filtered in range(2):
                 check("native wait control " + str(filtered), root + "/libmagicdesk_guest_wait_guest.so "
                       + str(filtered), "PASS native wait fast paths")
+                expected = [r"MD_SYSCALL nr=20 trace=2 notification=0"]
+                absent = [r"MD_SYSCALL nr=(?:21|22|72|73|441) "]
+                if filtered:
+                    # Sandbox preflight admits future virtual FDs before the
+                    # application denies seccomp. Native waits still execute in
+                    # the caller, but readiness admission is no longer selective.
+                    expected += [r"MD_SYSCALL nr=" + str(nr) + r" trace=" + str(count) + r" notification=0"
+                                 for nr, count in ((21, 3), (22, 10005), (72, 10000), (73, 10000), (441, 10000))]
+                    absent = []
                 check("guest wait fast paths " + str(filtered), root + "/libmagicdesk_guest_run.so --statistics --store "
                       + root + "/wait-store --deadline-seconds 30 -- /bin/waits " + str(filtered),
                       "PASS native wait fast paths",
-                      patterns=(r"MD_SYSCALL nr=20 trace=2 notification=0",),
-                      absent_patterns=(r"MD_SYSCALL nr=(?:21|22|72|73|441) ",))
+                      patterns=expected, absent_patterns=absent)
             if args.case == "control-event":
                 return
         if args.case == "all":
@@ -806,7 +830,10 @@ def main():
             check("RPC cwd without private capture" + (" protected" if protected else ""),
                   runner + "/bin/test " + ("rpc-cwd-protected" if protected else "rpc-cwd")
                   + " /tmp", "PASS RPC cwd without guest directory capture")
-        check("guest resource semantics", runner + shlex.join(["/bin/test", "guest", "/tmp"]), "PASS process resources")
+        check("guest unprivileged chroot", runner + "/bin/test unprivileged-root /tmp",
+              "PASS unprivileged chroot denied without changing cwd")
+        check("guest resource semantics", root + "/libmagicdesk_guest_run.so --user 0:0 --store "
+              + root + "/store --deadline-seconds 60 -- /bin/test guest-managed /tmp", "PASS process resources")
         check("guest namespace capabilities", runner + "/bin/test probe /tmp")
         check("guest roots", root + "/libmagicdesk_guest_run.so --user 0:0 --store "
               + root + "/store --deadline-seconds 60 -- /bin/root-test run", "PASS guest roots")

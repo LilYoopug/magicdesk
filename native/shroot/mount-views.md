@@ -683,6 +683,9 @@ share this contract, including rename and retained-descriptor lifetime. Cwd
 and existing descriptors are not moved or revoked: relative access through a
 retained directory outside the new root remains possible, as with Linux chroot.
 getcwd returns ENOENT when the directory has no path within the selected root.
+Reconstruction stops at the root's own mount, so a detached mount retained as
+the process root does not need a name in the former parent tree. Unlinked cwd
+and detached child mounts still have no reachable path.
 Mount-table snapshots omit attachments outside it and retain visible parent/child
 mount IDs. Native roots preserve their attachment's readonly policy and the
 kernel's permission checks; guest CAP_SYS_CHROOT grants no Android authority.
@@ -693,14 +696,18 @@ current-root cache. Ordinary launches need no additional RPC, SQL query or
 per-request allocation. Only scoped-root adapter calls materialize a local
 filesystem configuration.
 
-Arbitrary native/proc roots outside explicit attachments return ENOTSUP.
+An already-admitted, caller-captured native directory outside explicit
+attachments becomes a retained detached root in this same mount model. Procfs
+is identified at root admission and uses the existing proc component walker:
+caller-relative `self`, parent traversal and descriptor provenance do not turn
+into an unrestricted native suffix. This probe is not on ordinary path calls.
 Retained `/proc` and `/dev` directory descriptors remain usable after root
 selection. Their task-owned paths return to the caller's provider, never the
 filesystem worker's `self`. Selecting the initial inode root preserves its
 proc/dev boundary; a different root or mounted filesystem has ordinary names
-there. The separately admitted
-`/proc/self/fd` and `fdinfo` restriction retains its irreversible policy. These
-explicit limits are not successful mount or namespace emulation.
+there. The direct-rootfs fixture backend's separately admitted
+`/proc/self/fd` and `fdinfo` restriction retains its irreversible policy; it is
+not a fallback for the managed mount model.
 
 Copying a descriptor table does not copy open-file descriptions: offsets remain
 shared, while close-on-exec flags and descriptor closure become independent.

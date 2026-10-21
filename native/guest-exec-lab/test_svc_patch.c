@@ -17,6 +17,15 @@ int main(void) {
     assert(md_svc_registry_call_origin(&registry,0x40108)==0x40108);
     assert(md_svc_registry_call_origin(&registry,0x40304)==0x20004);
     assert(md_svc_registry_call_origin(&registry,0x50004)==0x50004);
+    registry.sites[0].original=0xd4000001;
+    registry.sites[0].replacement=0x1400c000;
+    assert(md_svc_registry_instruction(NULL,0x10000,0x1400c000)==0x1400c000);
+    assert(md_svc_registry_instruction(&registry,0x10000,0x1400c000)==0xd4000001);
+    assert(md_svc_registry_instruction(&registry,0x10004,0x1400c000)==0x1400c000);
+    assert(md_svc_registry_instruction(&registry,0x10000,0xd503201f)==0xd503201f);
+    registry.sites[0].state=MD_SVC_RETIRED;
+    assert(md_svc_registry_instruction(&registry,0x10000,0x1400c000)==0x1400c000);
+    registry.sites[0].state=MD_SVC_PUBLISHED;
     registry.disabled=1;
     assert(md_svc_registry_call_origin(&registry,0x40304)==0x20004);
     uint32_t word=0;

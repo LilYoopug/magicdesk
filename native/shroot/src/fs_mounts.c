@@ -12,6 +12,8 @@
 #include <string.h>
 #include <sys/random.h>
 #include <sys/syscall.h>
+#include <sys/vfs.h>
+#include <linux/magic.h>
 #include <unistd.h>
 
 struct md_view_mount *md_view_root_mount(struct md_filesystem *fs) {
@@ -152,17 +154,25 @@ int md_view_backing_contains(struct md_filesystem *fs,const struct md_view_mount
     if (!r) r=md_view_backing_path(fs,object,mount,child,sizeof(child));
     return r ? r : beneath(child,parent);
 }
-static int location_path(struct md_filesystem *fs, int fd, struct md_view_mount *m, char *out, size_t size) {
+static int location_path(struct md_filesystem *fs, int fd, struct md_view_mount *m,
+        const struct md_view_mount *boundary, char *out, size_t size) {
     if (!m) m=&fs->mounts->base;
+    /* A retained root names its own subtree even if its mount is detached.
+     * Only ancestors above that root are irrelevant; detached children still
+     * have no reachable pathname in this process's view. */
     if (m==&fs->mounts->base && m->source<0) return md_view_backing_path(fs,fd,m,out,size);
-    if (m->detached) return -ENOENT;
+    if (m->detached && m!=boundary) return -ENOENT;
     char root[PATH_MAX], path[PATH_MAX], target[PATH_MAX];
     struct stat st;
     if (fstat(fd, &st)) return -errno;
+    if (m==boundary) {
+        if (!st.st_nlink) return -ENOENT;
+        return md_view_backing_path(fs,fd,m,out,size);
+    }
     /* A mount root is named by its covered dentry, not by the backing
      * inode's aliases. File binds need no source-name reconstruction. */
     if (md_view_same(&st,&m->native)) {
-        if (m->parent) return location_path(fs,m->target,m->parent,out,size);
+        if (m->parent) return location_path(fs,m->target,m->parent,boundary,out,size);
         if (size<2) return -ERANGE;
         strcpy(out,"/"); return 0;
     }
@@ -171,7 +181,7 @@ static int location_path(struct md_filesystem *fs, int fd, struct md_view_mount 
     if (!r) r=md_view_backing_path(fs,fd,m,path,sizeof(path));
     if (!r && !beneath(path, root)) r = -EXDEV;
     if (!r) {
-        if (m->parent) r=location_path(fs,m->target,m->parent,target,sizeof(target));
+        if (m->parent) r=location_path(fs,m->target,m->parent,boundary,target,sizeof(target));
         else strcpy(target,"/");
     }
     if (!r) {
@@ -182,7 +192,7 @@ static int location_path(struct md_filesystem *fs, int fd, struct md_view_mount 
     return r;
 }
 int md_view_path(struct md_filesystem *fs, int fd, struct md_view_mount *m, char *out, size_t size) {
-    if (!fs->native_root && !fs->store->root_id) return location_path(fs,fd,m,out,size);
+    if (!fs->native_root && !fs->store->root_id) return location_path(fs,fd,m,NULL,out,size);
     if (fs->native_root) {
         struct md_view_mount *ancestor=m;
         while (ancestor && ancestor!=fs->native_root->mount) ancestor=ancestor->parent;
@@ -196,8 +206,9 @@ int md_view_path(struct md_filesystem *fs, int fd, struct md_view_mount *m, char
      * the process root only after composing the complete mount-tree path. */
     fs->store->root_id=NULL;
     char root[PATH_MAX], path[PATH_MAX];
-    int r = location_path(fs,root_fd,fs->native_root ? fs->native_root->mount : NULL,root,sizeof(root));
-    if (!r) r = location_path(fs,fd,m,path,sizeof(path));
+    struct md_view_mount *boundary=fs->native_root ? fs->native_root->mount : NULL;
+    int r = location_path(fs,root_fd,boundary,boundary,root,sizeof(root));
+    if (!r) r = location_path(fs,fd,m,boundary,path,sizeof(path));
     fs->store->root_id=selected;
     if (!fs->native_root) close(root_fd);
     if (!r && !beneath(path,root)) r = -ENOENT;
@@ -248,6 +259,11 @@ int md_fs_root_capture(struct md_filesystem *fs, int fd, const struct md_fs_anch
         if (syscall(SYS_faccessat2,fd,"",X_OK,AT_EMPTY_PATH|MD_AT_EACCESS)) return -errno;
         struct md_mount_source source={.fd=fd,.backing=MD_MOUNT_NATIVE};
         r=md_mount_native_policy(fd,&source.policy);
+        struct statfs type;
+        if (!r && fstatfs(fd,&type)) r=-errno;
+        /* Captured proc roots use the same caller-aware component walker as
+         * mounted proc, not a native suffix that can bypass the new root. */
+        if (!r && type.f_type==PROC_SUPER_MAGIC) source.backing=MD_MOUNT_PROC;
         struct md_view_mount *mount=NULL;
         if (!r) r=md_view_attach_source(fs,&source,NULL,&mount);
         if (!r) r=md_view_record(fs,fd,mount,&p);

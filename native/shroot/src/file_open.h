@@ -16,7 +16,9 @@ static inline int md_open_readonly_plan(unsigned flags) {
  * custody. Keep offer, provider and execution-window admission in agreement. */
 static inline int md_open_native_plan(unsigned flags,int birth) {
     if (birth) flags&=~O_EXCL;
-    if (flags&O_PATH) return 1;
+    /* Reopening a pin crosses a procfs magic link. O_PATH|O_NOFOLLOW must
+     * transfer the exact descriptor instead, preserving its F_GETFL value. */
+    if (flags&O_PATH) return !(flags&O_NOFOLLOW);
     return (flags&(O_CREAT|O_EXCL))!=(O_CREAT|O_EXCL)
         && (flags&O_ACCMODE)!=O_ACCMODE && !(flags & ~(O_ACCMODE | O_CLOEXEC
         | O_NOFOLLOW | O_LARGEFILE | O_APPEND | O_TRUNC | O_NONBLOCK | O_NOCTTY

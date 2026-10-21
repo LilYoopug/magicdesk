@@ -194,6 +194,35 @@ static void filter(unsigned flags) {
     assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,flags,&program));
 }
 static pthread_barrier_t filter_barrier;
+static void *filtered_exec(void *executable) {
+    struct sock_filter code[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_gettid,0,3),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[0])),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,MD_ENTRY_BIND,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_PROCESS),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+    char *argv[]={executable,"--filtered-exec",NULL};
+    execv(executable,argv); _exit(99);
+}
+static void filter_exec(const char *executable) {
+    for (unsigned nonleader=0;nonleader<2;++nonleader) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            if (!nonleader) filtered_exec((void *)executable);
+            pthread_t peer;
+            assert(!pthread_create(&peer,NULL,filtered_exec,(void *)executable));
+            /* EVENT_WAIT: successful exec replaces the leader; return fails. */
+            assert(!pthread_join(peer,NULL)); _exit(98);
+        }
+        reap(child);
+    }
+    puts("PASS filter exec: leader and nonleader retain registration revocation");
+}
 static void barrier(pthread_barrier_t *value) {
     int result=pthread_barrier_wait(value); assert(!result || result==PTHREAD_BARRIER_SERIAL_THREAD);
 }
@@ -866,6 +895,13 @@ static void reader_writer_bursts(void) {
         assert(!pthread_barrier_init(&burst.ready,NULL,4));
         for (unsigned i=0;i<3;++i) assert(!pthread_create(&readers[i],NULL,burst_reader,&burst));
         barrier(&burst.ready);
+        if (filtered) {
+            struct md_entry_client fresh={0}; struct stat st; long result;
+            assert(stat_try(&fresh,&st,&result)==MD_ENTRY_COMPLETED && !result);
+            assert(!fresh.opaque[MD_ENTRY_CLIENT_CHANNEL]);
+            struct md_entry_channel *registered=(void *)client.opaque[MD_ENTRY_CLIENT_CHANNEL];
+            assert(registered && atomic_load(&registered->enabled));
+        }
         for (unsigned i=0;i<128;++i) {
             unsigned mode=i&1 ? 0600 : 0644;
             if (i&1) assert(!chmod(path,mode));
@@ -1363,7 +1399,15 @@ static void contracts(const char *executable) {
     assert(md_entry_invoke(api,&client,&unsupported)==MD_ENTRY_DECLINED);
     pid_t child=fork(); assert(child>=0);
     if (!child) {
-        assert(stat_try(&client,&st,&result)==MD_ENTRY_DECLINED);
+        struct md_entry_channel *inherited=(void *)client.opaque[MD_ENTRY_CLIENT_CHANNEL];
+        assert(inherited && client.opaque[MD_ENTRY_CLIENT_OWNER]==(uintptr_t)inherited->owner);
+        uint64_t sequence=inherited->sequence;
+        enum md_entry_outcome outcome=stat_try(&client,&st,&result);
+        /* The parent may enter a task-affine wait before this child runs.
+         * Its disabled channel takes the original kernel call without a
+         * helper identity probe; an enabled foreign channel declines. */
+        assert(outcome==MD_ENTRY_DECLINED || (outcome==MD_ENTRY_COMPLETED && !result && st.st_size==7));
+        assert(inherited->sequence==sequence && !atomic_load(&inherited->caller));
         struct md_entry_client fresh={0};
         assert(stat_try(&fresh,&st,&result)==MD_ENTRY_COMPLETED && !result);
         execl(executable,executable,"exec",NULL); _exit(90);
@@ -1372,7 +1416,7 @@ static void contracts(const char *executable) {
     pthread_t peers[4];
     for (unsigned i=0;i<4;++i) assert(!pthread_create(&peers[i],NULL,threaded,NULL));
     for (unsigned i=0;i<4;++i) assert(!pthread_join(peers[i],NULL));
-    reader_writer_bursts(); capacity(); interrupted(); abandoned_memory(); jit_entry_resume(); context_changes(); credentials(); pid_namespace(); landlocked(); teardown();
+    capacity(); interrupted(); abandoned_memory(); jit_entry_resume(); context_changes(); credentials(); pid_namespace(); landlocked(); teardown();
     assert(!prctl(PR_SET_DUMPABLE,0));
     assert(!call6(SYS_newfstatat,AT_FDCWD,(uintptr_t)path,(uintptr_t)&st,0,0,0) && st.st_size==7);
     struct md_entry_channel *channel=(void *)client.opaque[MD_ENTRY_CLIENT_CHANNEL];
@@ -1385,7 +1429,10 @@ static void contracts(const char *executable) {
     assert(!pthread_join(protected_thread,NULL));
     assert(!prctl(PR_SET_DUMPABLE,1));
     puts("PASS cooperative protected copy: existing/fresh channels use sequence-bound input and output without remote memory access");
-    filters();
+    filters(); filter_exec(executable);
+    /* A thread-local filter closes new registration for this image, even after
+     * that thread exits. Verify capacity before this irreversible admission. */
+    reader_writer_bursts();
     assert(!call6(SYS_renameat2,AT_FDCWD,(uintptr_t)path,AT_FDCWD,(uintptr_t)"/tmp/cooperative-renamed",0,0));
     assert(!call6(SYS_unlinkat,AT_FDCWD,(uintptr_t)"/tmp/cooperative-renamed",0,0,0,0));
     assert(direct_calls && fallback_calls);
@@ -1420,6 +1467,12 @@ int main(int argc,char **argv) {
     assert(!sigaction(SIGUSR2,&action,NULL));
     api=(void *)getauxval(MD_AT_COOPERATIVE);
     assert(md_entry_api_valid(api));
+    if (argc>1 && !strcmp(argv[1],"--filtered-exec")) {
+        struct stat st; long result;
+        assert(stat_try(&client,&st,&result)==MD_ENTRY_COMPLETED && !result);
+        assert((client.opaque[MD_ENTRY_CLIENT_CONTROL]>>1)==UINT32_MAX);
+        puts("PASS inherited filter: fresh client uses kernel without registration"); return 0;
+    }
     if (argc>1 && (!strcmp(argv[1],"--initial-stack") || !strcmp(argv[1],"--stack-empty"))) {
         initial_stack(argc,argv,!strcmp(argv[1],"--stack-empty")); return 0;
     }

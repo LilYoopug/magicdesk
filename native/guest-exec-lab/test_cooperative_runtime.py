@@ -31,10 +31,24 @@ def main():
                                   ('test_publication', suite.base + '/publication'),
                                   ('test_native_leaf', suite.base + '/native-leaf'),
                                   ('test_interception_buffers', suite.base + '/buffers'),
+                                  ('test_mapping_reader', suite.base + '/mapping-reader'),
+                                  ('test_task_memory', suite.base + '/task-memory'),
+                                  ('test_received_fds', suite.base + '/received-fds'),
+                                  ('test_netlink_attributes', suite.base + '/netlink-attributes'),
+                                  ('test_directory_record', suite.base + '/directory-record'),
+                                  ('fuse_transport', suite.base + '/fuse-transport'),
                                   ('fs_dispatch', suite.base + '/dispatch')):
             suite.transport.upload(suite.client, args.build / ('libmagicdesk_guest_' + name + '.so'), destination)
             suite.command(['chmod', '700', destination])
         if not args.entry_only:
+            suite.command(['timeout', '10', suite.base + '/mapping-reader'])
+            suite.command(['timeout', '10', suite.base + '/task-memory'])
+            suite.command(['timeout', '10', suite.base + '/received-fds'])
+            suite.command(['timeout', '10', suite.base + '/netlink-attributes'])
+            suite.command(['timeout', '10', suite.base + '/directory-record'])
+            suite.command(['timeout', '30', suite.base + '/fuse-transport'])
+            suite.command(['timeout', '90', suite.base + '/dispatch', '--fuse-device',
+                           suite.base + '/fuse-store'])
             suite.command(['timeout', '20', suite.base + '/signals'])
             suite.command(['timeout', '15', suite.base + '/guest-copy'])
             suite.command(['timeout', '45', suite.base + '/native-journal'])
@@ -87,6 +101,7 @@ def main():
         assert 'PASS filtered close: actual syscall FD' in output
         assert 'PASS native open exhaustion:' in output
         assert 'PASS execution bursts:' in output
+        assert 'PASS filter exec: leader and nonleader retain registration revocation' in output
         for key, minimum in (('nativeOpen', 1000), ('nativeClose', 990), ('nativeFlags', 576),
                              ('nativeDuplicate', 576), ('nativeSeek', 384), ('nativeDeferred', 1)):
             count = re.search(rf'{key}=(\d+)', output)

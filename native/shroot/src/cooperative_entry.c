@@ -1,5 +1,4 @@
 #include "cooperative_channel.h"
-#include "adapter_buffer.h"
 #include "interception.h"
 #include "raw.h"
 #include "spin_policy.h"
@@ -15,6 +14,10 @@ extern long md_guest_entry_kernel(long,const uint64_t *);
 static md_vdso_clock_fn vdso_clock;
 static unsigned char offers[512];
 static unsigned char strings[512];
+static uintptr_t registration_allowed=1;
+void md_cooperative_revoke(void) {
+    __atomic_store_n(&registration_allowed,0,__ATOMIC_RELEASE);
+}
 void md_cooperative_init(const void *vdso,size_t first_page) {
     vdso_clock=md_vdso_clock(vdso,first_page);
     for (unsigned i=0;i<sizeof(offers);++i) {
@@ -121,16 +124,24 @@ static enum md_entry_outcome invoke(struct md_entry_client *client,struct md_ent
     if (md_entry_route(call->number)==MD_ENTRY_TASK) goto kernel;
     if (c && !atomic_load_explicit(&c->enabled,memory_order_acquire)) goto kernel;
     if (!c) {
+        /* Monotonic per-image hint, revoked before an application filter can
+         * forbid helpers. Existing channels retain their per-task eligibility;
+         * this flag never grants authority to the supervisor or worker. */
+        if (!__atomic_load_n(&registration_allowed,__ATOMIC_ACQUIRE)) {
+            control=(uintptr_t)UINT32_MAX<<1;
+            goto kernel;
+        }
         uint32_t retry=(uint32_t)(control>>1);
         if (retry) {
             if (retry!=UINT32_MAX) control=(uintptr_t)(retry-1)<<1;
             goto kernel;
         }
-        /* Registration is a supervisor trap, not a helper syscall through an
-         * already installed application filter. Rejected clients touch no gate. */
-        long address=md_guest_buffer_control(MD_BUFFER_COOPERATIVE,0,0);
+        /* This entry has the application's signal mask. A synchronous BRK
+         * would unblock a blocked SIGTRAP and reset its disposition in Linux,
+         * even when ptrace consumes the stop. Admission uses the syscall gate. */
+        long address=md_guest_buffer_admit(MD_ENTRY_BIND);
         if (address<0) {
-            control=(uintptr_t)(address==-EAGAIN || address==-ENOMEM ? 128 : UINT32_MAX)<<1;
+            control=(uintptr_t)(address==-EAGAIN || address==-ENOMEM || address==-EINTR ? 128 : UINT32_MAX)<<1;
             goto kernel;
         }
         c=(void *)address;

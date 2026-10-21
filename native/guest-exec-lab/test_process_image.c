@@ -39,6 +39,12 @@ static void protected_image(int argc,char **argv,int other_user) {
     pid_t child=fork(); assert(child>=0);
     if (!child) {
         assert(!prctl(PR_SET_DUMPABLE,0,0,0,0));
+        char executable[4096];
+        assert(readlink("/proc/self/exe",executable,sizeof(executable))>0);
+        int fd=open("/proc/self/exe",O_RDONLY|O_CLOEXEC); assert(fd>=0);
+        unsigned char elf[4];
+        assert(read(fd,elf,sizeof(elf))==sizeof(elf) && !memcmp(elf,"\177ELF",sizeof(elf)));
+        assert(!close(fd));
         argv[0][0]='X';
         assert(write(ready[1],"!",1)==1);
         char byte; assert(read(finish[0],&byte,1)==1);
@@ -51,11 +57,15 @@ static void protected_image(int argc,char **argv,int other_user) {
     image(AT_FDCWD,path,argc,argv); argv[0][0]=first;
     snprintf(path,sizeof(path),"/proc/%d/auxv",child);
     int fd=open(path,O_RDONLY); assert(fd==-1 && errno==EACCES);
+    snprintf(path,sizeof(path),"/proc/%d/exe",child);
+    fd=open(path,O_RDONLY); assert(fd==-1 && errno==EACCES);
+    char executable[4096];
+    assert(readlink(path,executable,sizeof(executable))==-1 && errno==EACCES);
     if (other_user) assert(!seteuid(0));
     assert(write(finish[1],"!",1)==1);
     int status; assert(waitpid(child,&status,0)==child && status==0);
     close(ready[0]); close(ready[1]); close(finish[0]); close(finish[1]);
-    puts("PASS protected process image: live cmdline remains readable, auxv stays denied");
+    puts("PASS protected process image: self exe and live cmdline readable; foreign auxv/exe stay denied");
 }
 int main(int argc, char **argv) {
     if (argc==2 && (!strcmp(argv[1],"protected") || !strcmp(argv[1],"protected-other-user"))) {

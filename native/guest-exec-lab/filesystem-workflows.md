@@ -354,14 +354,13 @@ checks remain required under the actual shell runtime.
 ## Watch Transport Controls
 
 ```sh
-sh native/guest-exec-lab/build-watch-fixture.sh build/watch-fixture
-python native/guest-exec-lab/test_watch.py build/watch-fixture
+python native/guest-exec-lab/test_watch_runtime.py build/shroot-image-tests --contracts
 ```
 
-These standalone Bionic controls require the already selected UID 2000. They do
-not install an APK or enable directory watching in the guest runtime. CMake's
-`MAGICDESK_GUEST_FIXTURES` also builds `watch_queue`, `watch_read` and
-`watch_activation`; none is installed into the APK.
+The production watch runner also executes the Bionic transport controls built
+by CMake's `MAGICDESK_GUEST_FIXTURES`: `watch_queue`, `watch_read` and
+`watch_activation`. They require the already selected UID 2000; none is installed
+into the APK. There is no separate compiler script or legacy binary layout.
 
 The single-owner queue retains whole inotify records, adjacent coalescing,
 bounded overflow and rejected-delivery state. Its stream socket carries readiness only.
@@ -398,7 +397,8 @@ its ownership limits are described in the [watch contract](../shroot/watches.md)
 ## Production Watch Checks
 
 Configure `native/shroot` with `-DMAGICDESK_GUEST_FIXTURES=ON`, then build
-`bootstrap supervisor run service watch_guest watch_launch watch_store`.
+`bootstrap supervisor run service watch_guest watch_launch watch_store
+watch_queue watch_read watch_activation`.
 `test_watch_runtime.py BUILD_DIRECTORY` stages immutable production binaries
 through the configured MCP server, requires actual shell UID 2000, imports a
 fresh disposable store and checks real guest libc inotify calls.

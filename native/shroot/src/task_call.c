@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "task_call.h"
+#include "syscall_result.h"
 #include "interception.h"
 #include "signal_protocol.h"
 #include <elf.h>
@@ -57,7 +58,7 @@ int md_task_call_begin(struct md_task_call *f,long (*operation)(int,pid_t,void *
     int restarting=0;
     if (!error && boundary==MD_TASK_CALL_EXIT) {
         long value=(long)resume->regs[0];
-        restarting=value==-512 || value==-513 || value==-514 || value==-516;
+        restarting=md_syscall_restarting(value);
         if (resume->pc<4) error=-EINVAL;
     }
     if (!error) error=trace(f,PTRACE_GETSIGMASK,(void *)sizeof(f->mask),&f->mask);

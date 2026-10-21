@@ -140,6 +140,25 @@ struct task {
         struct task *next;
     } result;
 };
+void md_broker_describe(struct md_namespace_broker *b,int fd) {
+    if (!b) return;
+    md_fs_worker_describe(b->worker,fd);
+    int error=pthread_mutex_trylock(&b->lock);
+    if (error) { dprintf(fd,"Shroot: broker snapshot unavailable error=%d\n",error); return; }
+    unsigned shown=0,total=0;
+    for (struct task *t=b->tasks;t;t=t->next) if (t->pid) {
+        ++total;
+        if (shown++>=16) continue;
+        dprintf(fd,"Shroot: broker pid=%d eligible=%d stopped=%d held=%d borrowed=%d operation=%d recovering=%d\n",
+            t->pid,t->eligible,t->stopped,t->held,t->borrowed,t->operation!=NULL,t->recovering);
+        struct md_entry_channel *c=t->channel;
+        if (c) dprintf(fd,"Shroot: channel pid=%d state=%u enabled=%u caller=%u awake=%u sleeping=%u native=%u\n",
+            t->pid,atomic_load(&c->state),atomic_load(&c->enabled),atomic_load(&c->caller),
+            atomic_load(&c->awake),atomic_load(&c->sleeping),atomic_load(&c->native.state));
+    }
+    pthread_mutex_unlock(&b->lock);
+    if (total>16) dprintf(fd,"Shroot: broker tasks shown=16 total=%u\n",total);
+}
 /* Caller holds the broker lock. A retired identity can still be borrowed by
  * a worker operation or by an exact kernel event awaiting main-loop delivery. */
 static void task_release(struct task *t) {
@@ -166,16 +185,22 @@ static void cancel_pending(struct md_namespace_broker *b,struct task *t) {
     t->sequence=sequence;
     channel_reply(b,t->channel,sequence,outcome,0);
 }
-static void operation_retired(struct md_namespace_broker *b,struct operation *op) {
+static int operation_retired(struct md_namespace_broker *b,struct operation *op) {
     /* Caller holds the broker lock. Publish only after resource turns and pins
      * have retired; the exact kernel event then resumes normal dispatch. */
     struct task *t=op->task;
-    if (!t || t->operation!=op) return;
+    if (!t || t->operation!=op) return 0;
     t->operation=NULL;
     if (t->held==1) {
         cancel_pending(b,t);
         t->held=2; md_fs_worker_publish(b->worker,&t->event_work);
     }
+    /* A delegated callback can return to its caller before this retirement.
+     * The worker may already have parked while the old operation excluded a
+     * published next request. Removing that exclusion must publish readiness. */
+    return !t->stopped && t->channel
+        && !atomic_load_explicit(&t->channel->awake,memory_order_seq_cst)
+        && atomic_load_explicit(&t->channel->state,memory_order_seq_cst)==MD_ENTRY_REQUEST;
 }
 static void channel_reply(struct md_namespace_broker *b,struct md_entry_channel *c,
         uint64_t sequence,enum md_entry_outcome outcome,long result) {
@@ -328,7 +353,8 @@ static int duplicate(struct task *task, pid_t pid, int number) {
     return md_task_descriptor_copy(pid,number,&task->process);
 }
 static int pathname(pid_t pid, uintptr_t address, char *out, size_t capacity) {
-    return md_task_read_string(pid,address,out,capacity,(size_t)sysconf(_SC_PAGESIZE));
+    ssize_t size=md_task_read_string(pid,address,out,capacity,(size_t)sysconf(_SC_PAGESIZE));
+    return size<0 ? (int)size : 0;
 }
 static int deliver_bytes(struct operation *op, uintptr_t pointer, const void *data, size_t size) {
     if (!valid(op)) return -ECANCELED;
@@ -449,13 +475,14 @@ static int recycle(struct md_namespace_broker *b, struct operation *op) {
     md_fs_context_end(&op->context);
     free(op->value); op->value=NULL;
     pthread_mutex_lock(&b->lock);
-    operation_retired(b,op);
+    int pending=operation_retired(b,op);
     if (op->task) {
         task_release(op->task);
         op->task=NULL;
     }
     op->free = b->free; b->free = op;
     pthread_mutex_unlock(&b->lock);
+    if (pending) md_fs_worker_wake(b->worker);
     md_cost_end(b->counts ? &b->retirement : NULL,start);
     return error;
 }
@@ -821,6 +848,14 @@ void md_broker_resumed(struct md_namespace_broker *b,pid_t pid) {
     pthread_mutex_unlock(&b->lock);
     if (pending) md_fs_worker_wake(b->worker);
 }
+void md_broker_resample(struct md_namespace_broker *b,pid_t pid,uintptr_t pc) {
+    if (!b) return;
+    pthread_mutex_lock(&b->lock);
+    struct task *t=find_task(b,pid);
+    if (t) for (unsigned i=0;i<16;++i)
+        if (t->discovery[i].pc==pc) { t->discovery[i].seen=0; break; }
+    pthread_mutex_unlock(&b->lock);
+}
 int md_broker_task(struct md_namespace_broker *b, int pid, int eligible, uintptr_t raw_gate, uintptr_t watch_gate,
         const struct md_broker_code_ranges *machine) {
     if (pid <= 0) return -EINVAL;
@@ -855,7 +890,11 @@ int md_broker_cooperative_bind(struct md_namespace_broker *b,pid_t pid,struct md
     if (!error) {
         memset(channel,0,sizeof(*channel));
         atomic_init(&channel->state,MD_ENTRY_IDLE);
-        atomic_init(&channel->enabled,0); atomic_init(&channel->awake,0); atomic_init(&channel->sleeping,0);
+        /* Registration is a notification, not a ptrace stop/resume cycle.
+         * Publish current eligibility with the channel instead of waiting for
+         * an unrelated future stop to enable its first request. */
+        atomic_init(&channel->enabled,!!(t->eligible&MD_BROKER_COOPERATIVE));
+        atomic_init(&channel->awake,0); atomic_init(&channel->sleeping,0);
         atomic_init(&channel->copying,0);
         channel->owner=pid;
         t->channel=channel; t->cooperative_gate=gate; t->sequence=0; ++b->cooperative_count;

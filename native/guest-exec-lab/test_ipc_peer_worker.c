@@ -56,10 +56,19 @@ int __wrap_flock(int fd, int operation) {
 }
 void *__real_calloc(size_t, size_t);
 void *__wrap_calloc(size_t count, size_t size) {
-    if (fail_allocation==1 || (fail_allocation==2 && count==253 && size==sizeof(struct md_fs_anchor *))) {
+    if (fail_allocation==1) {
         fail_allocation=0; errno=ENOMEM; return NULL;
     }
     return __real_calloc(count,size);
+}
+int __real_md_received_fds_annotate(struct md_received_fds *,struct md_fd_object *const *,unsigned);
+int __wrap_md_received_fds_annotate(struct md_received_fds *p,struct md_fd_object *const *origins,unsigned count) {
+    int inject=fail_allocation==2;
+    if (inject) fail_allocation=1;
+    int result=__real_md_received_fds_annotate(p,origins,count);
+    /* Fail the annotation allocation independently of its spare capacity. */
+    if (inject) assert(!fail_allocation && result==-ENOMEM);
+    return result;
 }
 void md_test_prepare_libc_descriptors(void) {
     /* Bionic lazily retains a trace_marker FD on mutex contention when tracing

@@ -66,6 +66,22 @@ void md_descriptor_path(char path[64], unsigned pid, unsigned fd) {
 }
 int md_open_pinned(int fd,int flags) {
     char path[64]; md_descriptor_path(path,0,(unsigned)fd);
+    if ((flags&(O_PATH|O_NOFOLLOW))==(O_PATH|O_NOFOLLOW)) {
+        /* O_PATH has no offset or mutable status flags. An exact pin can be
+         * duplicated without losing NOFOLLOW to the procfs magic link. */
+        long current=C(fcntl,fd,F_GETFL,0,0,0,0);
+        if (current<0) return (int)current;
+        if (current==(flags&(O_PATH|O_DIRECTORY|O_NOFOLLOW)))
+            return (int)C(fcntl,fd,F_DUPFD_CLOEXEC,3,0,0,0);
+        struct stat st;
+        long error=C(fstat,fd,&st,0,0,0,0);
+        if (error) return (int)error;
+        if (S_ISDIR(st.st_mode)) {
+            char *end=path; while (*end) ++end;
+            *end++='/'; *end++='.'; *end=0;
+            return (int)C(openat,AT_FDCWD,path,flags|O_CLOEXEC,0,0,0);
+        }
+    }
     return (int)C(openat,AT_FDCWD,path,md_open_endpoint_flags(flags)|O_CLOEXEC,0,0,0);
 }
 int md_reopen_file(int fd, int flags, struct md_open_completion *completion) {

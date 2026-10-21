@@ -63,9 +63,6 @@ static struct md_svc_site *head(struct md_svc_registry *r,uintptr_t svc) {
             return &r->sites[i-1];
     return NULL;
 }
-int md_svc_registry_active(struct md_svc_registry *r,uintptr_t svc) {
-    return r && !r->disabled && head(r,svc);
-}
 static int extend(struct md_svc_registry *r,pid_t pid,uintptr_t svc,uint64_t number,
         struct md_svc_site *previous) {
     if (!r || r->disabled || (svc&3) || svc<4 || r->count==MD_SVC_SITES
@@ -107,7 +104,8 @@ static int extend(struct md_svc_registry *r,pid_t pid,uintptr_t svc,uint64_t num
 }
 int md_svc_registry_direct(struct md_svc_registry *r,pid_t pid,uintptr_t svc,uint64_t number) {
     if (!r) return 0;
-    for (unsigned i=0;i<r->count;++i) if (r->sites[i].direct.svc==svc) return 0;
+    for (unsigned i=0;i<r->count;++i) if (r->sites[i].direct.svc==svc)
+        return md_svc_registry_resume(r,pid,svc,number);
     return extend(r,pid,svc,number,NULL);
 }
 int md_svc_registry_suspend(struct md_svc_registry *r,pid_t pid,uintptr_t svc) {
@@ -165,6 +163,14 @@ uintptr_t md_svc_registry_call_origin(const struct md_svc_registry *r,uintptr_t 
         if (s->direct.gate && pc==s->kernel_alias+4) return s->direct.svc+4;
     }
     return pc;
+}
+uint32_t md_svc_registry_instruction(const struct md_svc_registry *r,uintptr_t pc,uint32_t word) {
+    if (r) for (unsigned i=0;i<r->count;++i) {
+        const struct md_svc_site *s=&r->sites[i];
+        if (s->state==MD_SVC_PUBLISHED && s->direct.gate && s->direct.svc==pc && s->replacement==word)
+            return s->original;
+    }
+    return word;
 }
 int md_svc_registry_retire(struct md_svc_registry *r,struct md_svc_site *s,pid_t pid) {
     if (!r || !s || s->state!=MD_SVC_PUBLISHED) return 0;

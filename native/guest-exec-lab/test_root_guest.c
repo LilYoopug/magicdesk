@@ -41,6 +41,12 @@ static void absent(const char *path) {
     if (fd>=0 || errno!=ENOENT) fprintf(stderr,"expected absent %s fd=%d errno=%d\n",path,fd,errno);
     assert(fd == -1 && errno == ENOENT);
 }
+static void cwd_is(const char *expected) {
+    char path[4096],*current=getcwd(path,sizeof(path));
+    if (!current || strcmp(current,expected))
+        fprintf(stderr,"cwd=%s expected=%s errno=%d\n",current ? current : "null",expected,errno);
+    assert(current && !strcmp(current,expected));
+}
 static void inside(void) {
     content("/value", "inside");
     content("/absolute", "inside");
@@ -88,12 +94,45 @@ static void shared(int split, int vm) {
 }
 static void failure(void) {
     assert(chroot("/missing")==-1 && errno==ENOENT);
+    content("/outside","outside");
     assert(chroot("/outside")==-1 && errno==ENOTDIR);
-    assert(chroot("/proc")==-1 && errno==ENOTSUP);
     content("/outside","outside");
     assert(!setuid(1000));
     assert(chroot("/jail")==-1 && errno==EPERM);
     content("/outside","outside");
+}
+static void proc_root(int protected) {
+    int root=open("/",O_PATH|O_DIRECTORY); assert(root>=0);
+    struct stat before,after;
+    assert(!stat("/proc/self/status",&before));
+    if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+    assert(!chroot("/proc"));
+    char cwd[4096]; assert(!getcwd(cwd,sizeof(cwd)) && errno==ENOENT);
+    int changed=chdir("/");
+    if (changed) fprintf(stderr,"proc-root chdir error=%d\n",errno);
+    assert(!changed);
+    cwd_is("/");
+    assert(!chdir("/sys")); cwd_is("/sys");
+    assert(!chdir("../../..")); cwd_is("/");
+    assert(!chdir("/sys/../../..")); cwd_is("/");
+    assert(!chdir("/self"));
+    char process[32]; snprintf(process,sizeof(process),"/%d",getpid()); cwd_is(process);
+    assert(!chdir("..")); cwd_is("/");
+    assert(!stat("/self/status",&after));
+    assert(before.st_dev==after.st_dev && before.st_ino==after.st_ino);
+    int status=open("/self/status",O_RDONLY); assert(status>=0);
+    char bytes[256]={0}; assert(read(status,bytes,sizeof(bytes)-1)>0);
+    assert(strstr(bytes,"Name:") && strstr(bytes,"Pid:")); close(status);
+    absent("/outside");
+    assert(!fchdir(root)); content("outside","outside");
+    assert(!getcwd(cwd,sizeof(cwd)) && errno==ENOENT);
+    close(root);
+}
+static void unlinked_cwd(void) {
+    assert(!chroot("/jail") && !chdir("/sub"));
+    assert(!unlink("nested") && !rmdir("/sub"));
+    char cwd[4096]; assert(!getcwd(cwd,sizeof(cwd)) && errno==ENOENT);
+    assert(!chdir("/") && getcwd(cwd,sizeof(cwd)) && !strcmp(cwd,"/"));
 }
 static void nested(void) {
     assert(!chroot("/")); content("/outside","outside");
@@ -133,13 +172,14 @@ int main(int argc,char **argv) {
     char buffer[8192]; ssize_t n;
     while ((n=read(src,buffer,sizeof(buffer)))>0) assert(write(dst,buffer,n)==n);
     assert(!n); close(src); close(dst);
-    for (int i=0;i<8;i++) {
+    for (int i=0;i<11;i++) {
         pid_t pid=fork(); assert(pid>=0);
         if (!pid) {
             forbid_rpc();
             if(i<2) basic(i);
             else if(i<6) shared((i-2)&1,(i-2)/2);
-            else if(i==6) failure(); else nested();
+            else if(i==6) failure(); else if(i==7) nested();
+            else if(i<10) proc_root(i-8); else unlinked_cwd();
             _exit(0);
         }
         reap(pid); content("/outside","outside"); absent("/value");

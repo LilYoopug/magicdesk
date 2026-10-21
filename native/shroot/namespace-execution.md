@@ -74,8 +74,16 @@ its separate provenance requirements.
   to this same walker as a mount/object location. Absolute paths/symlinks, `..` and getcwd
   share that selection; existing cwd and descriptors are retained. See
   [process resources](mount-views.md#guest-roots) for inheritance and limits.
+  Path reconstruction stops at the selected root's mount, including a detached
+  native root; it does not require that root to remain attached above itself.
+  Unlinked cwd and detached child mounts remain unreachable.
+  Captured proc roots use the mounted-proc component walker, preserving caller
+  aliases and root-clamped parent traversal instead of delegating whole suffixes.
 - fstat/newfstatat/statx publish namespace link counts and logical owners/modes
   with native data attributes.
+  Every entry path, including notification fallback, routes annotated FDs
+  through their retained origin/provider. A device's native IO handle is not
+  its logical inode; fork, dup and SCM_RIGHTS preserve that distinction.
   Directory read/seek uses the shared open-file-description cursor. Host pipe,
   socket and other unowned descriptors retain native FD semantics.
 - chmod, chown and timestamps resolve a retained backing FD and use typed
@@ -103,6 +111,11 @@ its separate provenance requirements.
   ACL operations, without enlarging the common RPC frame or adding a mutable
   client cache. Listing merges logical names with native attributes. Native
   attachments retain kernel ACLs and launch-local readonly policy.
+- Signal-cancelled metadata reads retain native non-interruptible semantics.
+  Replay uses a stable syscall gate and restores the original PC and arguments
+  at the kernel entry stop, before application seccomp. Original SVC words and
+  exact owned lazy-entry replacements share this path; arbitrary changed code
+  is not accepted. Replay neither unpatches shared code nor stops peer threads.
 - `/proc` and `/dev` map to the host, except `/dev/shm`, which belongs to the
   guest store. These implicit boundaries belong to the launch root, not a
   nested chroot: `/proc` inside a selected directory is an ordinary backend

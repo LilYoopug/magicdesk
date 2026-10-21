@@ -12,7 +12,9 @@ struct md_control_file md_process_executable_view(struct md_process_executable *
 /* A successful caller-side proc open precedes this snapshot. Optional memory
  * is exact-mm retained authority, used only for the public cmdline view. */
 int md_process_image_view(pid_t, uintptr_t image, int memory, unsigned kind, unsigned flags, const char *endpoint, pid_t caller);
-ssize_t md_process_image_link(pid_t, uintptr_t image, char *, size_t capacity);
+/* Retained reads of private executable metadata require a same-process caller;
+ * foreign inspection passes -1 and remains subject to native ptrace access. */
+ssize_t md_process_image_link(pid_t, uintptr_t image, int memory, char *, size_t capacity);
 struct md_image_identity;
-int md_process_image_identity(pid_t,uintptr_t image,struct md_image_identity *);
+int md_process_image_identity(pid_t,uintptr_t image,int memory,struct md_image_identity *);
 #endif

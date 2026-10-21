@@ -87,8 +87,16 @@ static void sharing(unsigned flags, int split, int root) {
     int shared_fs = (flags & CLONE_FS) && !(split >= 0 && (split & CLONE_FS));
     if (root) {
         int fd = open("value", O_RDONLY);
-        if (shared_fs) assert(fd < 0 && errno == EACCES);
+        if (shared_fs && root==1) assert(fd < 0 && errno == EACCES);
         else { assert(fd >= 0); close(fd); }
+        if (root==2) {
+            /* Managed chroot changes absolute lookup, not the existing cwd. */
+            char absolute[sizeof(before)+sizeof("/value")];
+            assert(snprintf(absolute,sizeof(absolute),"%s/value",before)>0);
+            fd=open(absolute,O_RDONLY);
+            if (shared_fs) assert(fd<0 && errno==ENOENT);
+            else { assert(fd>=0); close(fd); }
+        }
     } else {
         char after[4096]; assert(getcwd(after, sizeof(after)));
         assert((strcmp(before, after) != 0) == shared_fs);
@@ -616,7 +624,10 @@ static void buffer_open(void) {
         struct stat named,opened;
         assert(!(kind==3 ? stat(names[kind],&named) : lstat(names[kind],&named)) && !fstat(fd,&opened));
         assert(named.st_dev==opened.st_dev && named.st_ino==opened.st_ino && named.st_mode==opened.st_mode);
-        assert(fcntl(fd,F_GETFL)==(flags&(O_PATH|O_DIRECTORY|O_NOFOLLOW)));
+        int actual=fcntl(fd,F_GETFL), expected=flags&(O_PATH|O_DIRECTORY|O_NOFOLLOW);
+        if (actual!=expected) fprintf(stderr,"buffer-open protected=%d kind=%u flags=%#x expected=%#x\n",
+            protected,kind,actual,expected);
+        assert(actual==expected);
         assert(!close(fd));
         for (int absolute=0;absolute<2;++absolute) for (int slots=0;slots<2;++slots)
             for (int cloexec=0;cloexec<2;++cloexec) {
@@ -690,13 +701,15 @@ static void imported_cwd(void) {
     assert(!close(imported) && !rmdir("imported-cwd"));
     puts("PASS imported cwd: protected input, zero free FD slots, exact directory and failed fchdir");
 }
-static void native_cwd(void) {
+static void native_cwd(int inherited) {
     for (unsigned protected=0;protected<2;++protected) {
         pid_t child=fork(); assert(child>=0);
         if (!child) {
             if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
             assert(!chdir("/dev"));
-            int directory=open("/dev",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(directory>=0);
+            int directory=inherited ? fcntl(STDIN_FILENO,F_DUPFD_CLOEXEC,0)
+                : open("/dev",O_PATH|O_DIRECTORY|O_CLOEXEC);
+            assert(directory>=0);
             struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
             limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
             while (fcntl(STDERR_FILENO,F_DUPFD_CLOEXEC,0)>=0) { }
@@ -714,7 +727,7 @@ static void native_cwd(void) {
         }
         reap(child);
     }
-    puts("PASS native cwd: unknown origin, protected caller, zero free FD slots and unchanged file table");
+    printf("PASS native cwd: inherited=%d, protected caller, zero free FD slots and unchanged file table\n",inherited);
 }
 struct capture_context { int guest, protected, stage, directory; };
 static int capture_terminal_child(void *context) {
@@ -734,15 +747,22 @@ static int capture_terminal_child(void *context) {
     assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
     char text[128];
     ssize_t result=readlink("/proc/thread-self/cwd",text,sizeof(text));
+    int error=errno;
+    if (c->guest && (c->stage!=3 || c->protected)
+            && !(result==-1 && error==(c->stage<2 ? EACCES : ECANCELED)))
+        fprintf(stderr,"capture terminal protected=%d stage=%d result=%zd errno=%d\n",
+            c->protected,c->stage,result,error);
     /* Dumpable O_PATH capture no longer calls sendmsg. Protected callers
      * still exercise the exact export-thread death and terminal cleanup. */
     if (c->guest && (c->stage!=3 || c->protected))
-        assert(result==-1 && errno==(c->stage<2 ? EACCES : ECANCELED));
+        assert(result==-1 && error==(c->stage<2 ? EACCES : ECANCELED));
     else assert(result==4 && !memcmp(text,"/dev",4));
     return 0;
 }
-static void capture_terminal(int guest) {
-    int directory=open("/dev",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(directory>=0);
+static void capture_terminal(int guest,int inherited) {
+    int directory=inherited ? fcntl(STDIN_FILENO,F_DUPFD_CLOEXEC,0)
+        : open("/dev",O_PATH|O_DIRECTORY|O_CLOEXEC);
+    assert(directory>=0);
     struct rlimit saved; assert(!getrlimit(RLIMIT_NOFILE,&saved));
     struct rlimit limit=saved; limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
     int held[64],count=0,fd;
@@ -751,7 +771,7 @@ static void capture_terminal(int guest) {
     void *stack=malloc(1024*1024); assert(stack);
     for (int protected=0;protected<2;++protected) for (int stage=0;stage<4;++stage)
         for (unsigned repeat=0;repeat<4;++repeat) {
-            struct capture_context context={guest,protected,stage,directory};
+            struct capture_context context={guest && inherited,protected,stage,directory};
             pid_t child=clone(capture_terminal_child,(char *)stack+1024*1024,SIGCHLD|CLONE_FILES,&context);
             assert(child>0); reap(child);
             for (int i=0;i<64;++i) assert(fcntl(i,F_GETFD)>=0);
@@ -1345,6 +1365,9 @@ static void buffer_descriptors(void) {
                     const char *path=i%3==2 ? "/proc/self/exe" : i%3 ? "/proc/self/mounts" : "/proc/self/mountinfo";
                     fd=open(path,
                         O_RDONLY|(cloexec ? O_CLOEXEC : 0));
+                    if ((!slots && (fd!=-1 || errno!=EMFILE)) || (slots && fd!=last))
+                        fprintf(stderr,"buffer descriptor protected=%d slots=%d cloexec=%d iteration=%u path=%s fd=%d last=%d errno=%d\n",
+                            protected,slots,cloexec,i,path,fd,last,errno);
                     if (!slots) { assert(fd==-1 && errno==EMFILE); continue; }
                     assert(fd==last && fcntl(fd,F_GETFD)==(cloexec ? FD_CLOEXEC : 0));
                     assert((fcntl(fd,F_GETFL)&O_ACCMODE)==O_RDONLY);
@@ -2237,10 +2260,14 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1],"proc-reopen-slots")) { proc_reopen_slots(); return 0; }
     if (!strcmp(argv[1],"buffer-cwd")) { buffer_cwd(); return 0; }
     if (!strcmp(argv[1],"imported-cwd")) { imported_cwd(); return 0; }
-    if (!strcmp(argv[1],"native-cwd")) { native_cwd(); return 0; }
+    if (!strcmp(argv[1],"native-cwd") || !strcmp(argv[1],"native-cwd-inherited")) {
+        native_cwd(!strcmp(argv[1],"native-cwd-inherited")); return 0;
+    }
     if (!strcmp(argv[1],"proc-thread-capture")) { proc_thread_capture(); return 0; }
-    if (!strcmp(argv[1],"capture-terminal") || !strcmp(argv[1],"capture-terminal-native")) {
-        capture_terminal(!strcmp(argv[1],"capture-terminal")); return 0;
+    if (!strcmp(argv[1],"capture-terminal") || !strcmp(argv[1],"capture-terminal-native")
+            || !strcmp(argv[1],"capture-terminal-inherited") || !strcmp(argv[1],"capture-terminal-inherited-native")) {
+        int native=strstr(argv[1],"-native")!=NULL;
+        capture_terminal(!native,strstr(argv[1],"-inherited")!=NULL); return 0;
     }
     if (!strcmp(argv[1],"buffer-open")) { buffer_open(); return 0; }
     if (!strcmp(argv[1],"path-invocation")) { path_invocation(); return 0; }
@@ -2271,6 +2298,16 @@ int main(int argc, char **argv) {
         buffer_park(!strcmp(argv[1],"buffer-busy-protected"),1); return 1;
     }
     if (!strcmp(argv[1], "noop")) return 0;
+    if (!strcmp(argv[1], "unprivileged-root")) {
+        assert(geteuid()!=0);
+        int before=open(".",O_PATH|O_DIRECTORY); assert(before>=0);
+        assert(chroot("/proc/self/fdinfo")==-1 && errno==EPERM);
+        struct stat old,current;
+        assert(!fstat(before,&old) && !stat(".",&current));
+        assert(old.st_dev==current.st_dev && old.st_ino==current.st_ino);
+        assert(!close(before));
+        puts("PASS unprivileged chroot denied without changing cwd"); return 0;
+    }
     if (!strcmp(argv[1], "restricted-descriptors")) {
         restricted_descriptors(0); restricted_descriptors(1); return 0;
     }
@@ -2293,8 +2330,10 @@ int main(int argc, char **argv) {
         }
         return leaked ? 1 : 0;
     }
-    int guest = !strcmp(argv[1], "guest");
+    int managed=!strcmp(argv[1],"guest-managed");
+    int guest = managed || !strcmp(argv[1], "guest");
     assert(guest || !strcmp(argv[1], "native"));
+    if (managed) assert(geteuid()==0);
     if (guest) { restricted_descriptors(0); restricted_descriptors(1); }
     concurrent_cwd(0);
     concurrent_cwd(CLONE_FILES);
@@ -2313,11 +2352,12 @@ int main(int argc, char **argv) {
     range_sharing(CLOSE_RANGE_UNSHARE,1);
     range_sharing(CLOSE_RANGE_UNSHARE|CLOSE_RANGE_CLOEXEC,1);
     if (guest) {
-        case_sharing(CLONE_FS, -1, 1);
-        case_sharing(CLONE_FS, CLONE_FS, 1);
-        case_sharing(CLONE_VM | CLONE_FS, -2, 1);
+        int root=managed ? 2 : 1;
+        case_sharing(CLONE_FS, -1, root);
+        case_sharing(CLONE_FS, CLONE_FS, root);
+        case_sharing(CLONE_VM | CLONE_FS, -2, root);
         case_sharing(CLONE_FS | CLONE_FILES, -4, 0);
-        case_sharing(CLONE_FS, -4, 1);
+        case_sharing(CLONE_FS, -4, root);
         undo();
         shared_undo(0);
         shared_undo(1);

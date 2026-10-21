@@ -10,6 +10,7 @@
 #define MD_NATIVE_RESULT 8
 #define MD_NATIVE_ARGS 16
 #ifndef __ASSEMBLER__
+#include "syscall_result.h"
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -31,7 +32,7 @@ static inline int md_native_stopped(unsigned state,uintptr_t pc,long value,
     if (state==MD_NATIVE_DONE || state==MD_NATIVE_CANCELLED) return (int)state;
     if (state==MD_NATIVE_READY) { *result=-EINTR; return MD_NATIVE_CANCELLED; }
     if (state!=MD_NATIVE_RUNNING || pc<begin || pc>end) return -EPROTO;
-    if (pc<=call || (value<=-512 && value>=-516)) {
+    if (pc<=call || md_syscall_restarting(value)) {
         *result=-EINTR; return MD_NATIVE_CANCELLED;
     }
     *result=value; return MD_NATIVE_DONE;

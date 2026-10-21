@@ -34,6 +34,7 @@ def main():
                              ('test_svc_raw', root + '/bin/raw'),
                              ('test_svc_fault', root + '/bin/fault'),
                              ('test_svc_mapping', root + '/bin/mapping'),
+                             ('test_process_image', root + '/bin/process-image'),
                              ('service', suite.base + '/service')]:
             binary = args.build / ('libmagicdesk_guest_' + name + '.so')
             suite.report['fixtureHashes'][name] = hashlib.sha256(binary.read_bytes()).hexdigest()
@@ -89,6 +90,12 @@ def main():
                 evidence = records(output, 'SVC_RUNTIME_STATS ')
                 assert any(item['completed'] > 128 and item['revoked'] for item in evidence)
         print('Integrated protected race PASS', flush=True)
+        for command in ([root + '/bin/process-image'], [*guest, '--env', 'SHROOT_MACHINE_ENTRY=0', '--', '/bin/process-image'],
+                        [*guest, '--statistics', '--', '/bin/process-image']):
+            for mode in (['protected'] if len(command)==1 else ['protected', 'protected-other-user']):
+                output = suite.command([*command, mode], quiet=True, timeout=60)
+                assert 'PASS protected process image:' in output
+        print('Protected cmdline/auxv native, Base and lazy PASS', flush=True)
         runs = [('raw', False), ('mapping', False)]
         runs += [('go-stress', sandbox) for _ in range(args.rounds) for sandbox in (False, True)]
         for program, sandbox in runs:
