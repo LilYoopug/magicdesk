@@ -129,14 +129,16 @@ int md_network_flow_route(struct md_network_namespace *from,struct md_filter_pac
             if (input && input->master) input=md_network_interface_find(next,input->master,NULL);
         } else if (out->kind==MD_LINK_BRIDGE) {
             input=bridge_peer(n,out,p->destination,&next);
-            if (input && input->peer==ingress_port) {
-                struct md_network_interface *port=md_network_interface_find(n,ingress_port,NULL);
-                if (!port || !port->hairpin) { error=-EACCES; break; }
-                path->mediated=1;
-                for (unsigned i=path->count;i>0;--i) {
+            if (input && ingress_port) {
+                struct md_network_interface *in=md_network_interface_find(n,ingress_port,NULL);
+                struct md_network_interface *port=md_network_interface_find(n,input->peer,NULL);
+                if (!in || !port) { error=-ENETUNREACH; break; }
+                if (in->master==port->master && !md_network_bridge_forward(in,port)) { error=-EACCES; break; }
+                if (in->master==port->master && (in==port || in->isolated || port->isolated)) path->mediated=1;
+                for (unsigned i=in->master==port->master ? path->count : 0;i>0;--i) {
                     struct md_network_flow_step *step=&path->steps[i-1];
                     if (step->space==n->inode && step->hook==NF_INET_FORWARD) {
-                        step->hairpin_port=ingress_port; break;
+                        step->bridge_ingress=ingress_port; step->bridge_egress=input->peer; break;
                     }
                 }
             }
@@ -160,9 +162,10 @@ static int check_path(struct md_network_fabric *f,struct md_network_flow_path *p
         struct md_network_flow_step *s=&path->steps[i];
         struct md_network_namespace *n=md_network_space_find(f,s->space);
         if (!n) { if (override) continue; return -ENETUNREACH; }
-        if (s->hairpin_port) {
-            struct md_network_interface *port=md_network_interface_find(n,s->hairpin_port,NULL);
-            if (!port || !port->hairpin) return -EACCES;
+        if (s->bridge_ingress) {
+            struct md_network_interface *in=md_network_interface_find(n,reverse ? s->bridge_egress : s->bridge_ingress,NULL);
+            struct md_network_interface *out=md_network_interface_find(n,reverse ? s->bridge_ingress : s->bridge_egress,NULL);
+            if (!in || !md_network_bridge_forward(in,out)) return -EACCES;
         }
         struct md_filter_packet p=s->packet;
         struct md_filter_rewrite rewrite=s->after;

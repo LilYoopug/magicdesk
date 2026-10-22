@@ -231,11 +231,18 @@ static void file_table_snapshot(void) {
     struct md_task_resources task; assert(!md_resources_init(&task,NULL));
     pid_t tid=getpid()+1234;
     assert(!md_task_registry_publish(registry,tid,tid,&id,&task));
+    struct md_task_snapshot proc;
+    assert(!md_task_registry_proc(registry,tid,&proc));
+    assert(proc.tid==tid && proc.pid==task.pid && proc.cgroup==task.cgroup && !proc.fs && !proc.files);
+    md_task_snapshot_release(&proc);
     struct md_fd_origins *files;
     assert(md_task_registry_files(registry,tid,tid+1,&files)==-EPERM && !files);
     assert(md_task_registry_files(registry,tid+1,0,&files)==-ESRCH && !files);
     assert(!md_task_registry_files(registry,tid,tid,&files) && files==task.files);
     md_task_registry_retire(registry,tid,&id);
+    assert(!md_task_registry_proc(registry,tid,&proc));
+    assert(proc.tid==tid && !proc.fs && !proc.files);
+    md_task_snapshot_release(&proc);
     struct md_fd_origins *missing;
     assert(md_task_registry_files(registry,tid,0,&missing)==-ESRCH && !missing);
     md_task_registry_reap(registry,tid); md_task_registry_destroy(registry);
@@ -429,6 +436,8 @@ static void landlock_resources(void) {
 }
 void test_network_model(void);
 void test_network_route(void);
+void test_socket_filter(void);
+void test_network_ethernet(void);
 void test_network_endpoint(void);
 void test_network_nft(void);
 void test_network_launch(void);
@@ -441,6 +450,8 @@ int main(void) {
     test_task_registry_exit();
     test_network_model();
     test_network_route();
+    test_socket_filter();
+    test_network_ethernet();
     test_network_endpoint();
     test_network_nft();
     test_network_launch();

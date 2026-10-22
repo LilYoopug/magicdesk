@@ -346,7 +346,7 @@ int mdi_leaf_import_attributes(struct md_inode_store *s,const struct mdi_node *n
         free(value); if (r) return r;
     }
     struct mdi_node native=*node; native.native=1; native.descriptor=fd+1;
-    return mdi_overlay_attributes_copy(s,node,s,&native);
+    return mdi_xattr_virtual_copy(s,node,s,&native);
 }
 int mdi_leaf_list(struct md_inode_store *s,const struct mdi_node *parent,int (*visit)(const char *,void *),void *context) {
     /* Real-permission directories never allocate native guest leaves. They may

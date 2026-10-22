@@ -15,7 +15,7 @@ struct listener {
     struct listener *next;
     uint64_t id, space;
     const void *endpoint;
-    int fd, type, active, external, published, listening;
+    int fd, reserved, type, active, external, published, listening, endpoint_listening;
     struct sockaddr_in address, client, target;
     struct md_network_flow_path path;
     int64_t deadline;
@@ -99,6 +99,7 @@ static void drop_listener(struct md_network_forward *f,struct listener *l) {
     while (*at && *at!=l) at=&(*at)->next;
     if (*at) { *at=l->next; --f->listeners; }
     if (l->fd>=0) { epoll_ctl(f->epoll,EPOLL_CTL_DEL,l->fd,NULL); close(l->fd); }
+    if (l->reserved>=0) close(l->reserved);
     free(l);
 }
 static int socket_bound(int type,struct sockaddr_in *address) {
@@ -400,9 +401,11 @@ static int ensure(struct md_network_fabric *fabric) {
     if (error) { if (f->wake>=0) close(f->wake); if (f->epoll>=0) close(f->epoll); free(f); return error; }
     fabric->forward=f; return 0;
 }
+static int publish_reserved(struct md_network_forward *,struct listener *,int);
 static struct listener *new_listener(struct md_network_forward *f,uint64_t space,int type,struct sockaddr_in address,int external,int listening) {
     if (f->listeners==512 || f->next_id>UINT64_MAX/4) { errno=ENOSPC; return NULL; }
     struct listener *l=calloc(1,sizeof(*l)); if (!l) return NULL;
+    l->reserved=-1;
     l->space=space; l->type=type; l->external=external; l->id=++f->next_id;
     l->address=address;
     if (external && address.sin_addr.s_addr && (ntohl(address.sin_addr.s_addr)>>24)!=127)
@@ -411,11 +414,16 @@ static struct listener *new_listener(struct md_network_forward *f,uint64_t space
     l->address.sin_port=address.sin_port;
     if (l->fd<0) { errno=-l->fd; free(l); return NULL; }
     int error=0;
-    if (type==SOCK_STREAM) { if (listening && listen(l->fd,64)) error=-errno; }
+    if (type==SOCK_STREAM) {
+        if (listening) error=external ? publish_reserved(f,l,64) : listen(l->fd,64) ? -errno : 0;
+    }
     else { int one=1; if (setsockopt(l->fd,IPPROTO_IP,IP_PKTINFO,&one,sizeof(one))) error=-errno; }
     l->listening=type==SOCK_DGRAM || listening;
-    if (!error && l->listening) error=watch(f,EPOLL_CTL_ADD,l->fd,l->id,2,EPOLLIN);
-    if (error) { close(l->fd); free(l); errno=-error; return NULL; }
+    if (!error && l->listening && l->reserved<0) error=watch(f,EPOLL_CTL_ADD,l->fd,l->id,2,EPOLLIN);
+    if (error) {
+        close(l->fd); if (l->reserved>=0) close(l->reserved);
+        free(l); errno=-error; return NULL;
+    }
     l->deadline=external ? INT64_MAX : now_ms()+30000;
     l->next=f->ports; f->ports=l; ++f->listeners; return l;
 }
@@ -450,12 +458,29 @@ int md_network_forward_listen(struct md_network_namespace *n,const void *endpoin
     struct md_network_forward *f=n->fabric->forward;
     if (!f) return 0;
     for (struct listener *l=f->ports;l;l=l->next) if (l->endpoint==endpoint && l->external && l->type==SOCK_STREAM) {
-        if (listen(l->fd,backlog)) return -errno;
-        int error=watch(f,l->listening ? EPOLL_CTL_MOD : EPOLL_CTL_ADD,l->fd,l->id,2,EPOLLIN);
+        int error=l->listening ? (listen(l->fd,backlog) ? -errno : 0) : publish_reserved(f,l,backlog);
         if (error) return error;
-        l->listening=l->active=1; wake(f); return 0;
+        l->endpoint_listening=l->listening=l->active=1; wake(f); return 0;
     }
     return 0;
+}
+/* A bound guest socket is not a listener. Retain its native reservation while
+ * NAT owns a separate acceptor, so abort/removal can restore bind-only state
+ * without a port-release race or an irreversible listen on the reservation. */
+static int publish_reserved(struct md_network_forward *f,struct listener *l,int backlog) {
+    struct sockaddr_in address;
+    socklen_t size=sizeof(address);
+    if (getsockname(l->fd,(void *)&address,&size)) return -errno;
+    int fd=socket_bound(SOCK_STREAM,&address);
+    if (fd<0) return fd;
+    int error=listen(fd,backlog) ? -errno : watch(f,EPOLL_CTL_ADD,fd,l->id,2,EPOLLIN);
+    if (error) { close(fd); return error; }
+    l->reserved=l->fd; l->fd=fd; l->listening=1;
+    return 0;
+}
+static void restore_reserved(struct md_network_forward *f,struct listener *l) {
+    epoll_ctl(f->epoll,EPOLL_CTL_DEL,l->fd,NULL); close(l->fd);
+    l->fd=l->reserved; l->reserved=-1; l->listening=l->active=0;
 }
 int md_network_forward_prepare(struct md_network_namespace *n,struct md_network_filter *filter,struct md_network_forward_update **out) {
     *out=NULL;
@@ -477,7 +502,9 @@ int md_network_forward_prepare(struct md_network_namespace *n,struct md_network_
             if (!l) { error=-errno; break; }
             u->created[u->count]=1;
         } else if (!l->listening) {
-            error=-EOPNOTSUPP; break;
+            error=publish_reserved(u->owner,l,64);
+            if (error) break;
+            u->created[u->count]=2;
         }
         u->ports[u->count++]=l;
     }
@@ -486,7 +513,10 @@ int md_network_forward_prepare(struct md_network_namespace *n,struct md_network_
 }
 void md_network_forward_abort(struct md_network_forward_update *u) {
     if (!u) return;
-    for (size_t i=0;i<u->count;++i) if (u->created[i]) drop_listener(u->owner,u->ports[i]);
+    for (size_t i=0;i<u->count;++i) {
+        if (u->created[i]==1) drop_listener(u->owner,u->ports[i]);
+        else if (u->created[i]==2) restore_reserved(u->owner,u->ports[i]);
+    }
     free(u);
 }
 void md_network_forward_commit(struct md_network_forward_update *u) {
@@ -498,7 +528,10 @@ void md_network_forward_commit(struct md_network_forward_update *u) {
             size_t i=0; while (i<u->count && u->ports[i]!=l) ++i;
             l->published=i!=u->count;
             if (!l->published && !l->endpoint) drop_listener(u->owner,l);
-            else l->active=l->listening;
+            else {
+                if (!l->published && !l->endpoint_listening && l->reserved>=0) restore_reserved(u->owner,l);
+                l->active=l->listening;
+            }
         }
         l=next;
     }
@@ -575,6 +608,7 @@ void md_network_forward_endpoint_closed(struct md_network_namespace *n,const voi
         struct listener *next=l->next;
         if (l->endpoint==endpoint) {
             l->endpoint=NULL;
+            l->endpoint_listening=0;
             if (!l->external || !l->published) drop_listener(f,l);
         }
         l=next;

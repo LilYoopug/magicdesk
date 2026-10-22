@@ -80,6 +80,13 @@ kernels, 16 KiB pages and actual root execution. Installer GUI/Turnip recipes
 also need separate validation for each distribution/toolchain; a recipe's
 presence is not a passed desktop or GPU test.
 
+The [Shroot distribution matrix](../native/guest-exec-lab/validation-matrix.md)
+tracks every installer OS separately: recipe/package setup, init, graphics,
+Docker/Podman, libvirt/QEMU, Flatpak/Snap browsers, portals, desktop applications
+and VS Code. It also adds nspawn, BuildKit, LXC and a small permanent LTP
+selection. Each scenario retains separate Shroot/Base status; historical or
+partial coverage is not current-build acceptance.
+
 - [ ] Complete [installer acceptance](../native/guest-exec-lab/README.md#installer-acceptance)
   with the packaged APK and default environment library: download the script,
   configure it interactively, install, Refresh Apps, search in Start and launch.

@@ -13,6 +13,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--distro', required=True)
     parser.add_argument('--gui', default='apps')
+    parser.add_argument('--gpu', choices=('keep', 'auto', 'software', 'turnip'), default='keep')
+    parser.add_argument('--jobs', type=int, choices=range(1, 9), default=2)
+    parser.add_argument('--dns', default='auto')
+    parser.add_argument('--package', action='append', default=[])
+    parser.add_argument('--timeout', type=int, default=7200,
+                        help='Installer command failure bound, including a source GPU build')
     parser.add_argument('--name', required=True, help='Dedicated fixture name; retained for graphics checks')
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--library', help='Dedicated shell-owned library, isolated from existing image caches')
@@ -24,11 +30,12 @@ def main():
     spec.loader.exec_module(transport)
     config = tomllib.loads((Path.home() / '.codex/config.toml').read_text())['mcp_servers']['magicdesk']
     client = transport.Client(config['url'], config['http_headers']['Authorization'].removeprefix('Bearer '),
-                              timeout=3600, request_timeout=3600)
+                              timeout=args.timeout, request_timeout=args.timeout)
     state = client.call('get_state')
     assert state['shell']['uid'] == 2000
     report = {'app': state['app'], 'distro': args.distro, 'gui': args.gui, 'name': args.name, 'library': args.library,
-              'ipv4': args.ipv4,
+              'ipv4': args.ipv4, 'gpu': args.gpu, 'jobs': args.jobs,
+              'dns': args.dns, 'packages': args.package,
               'checks': [], 'passed': False}
     console = client.call('console.open', {'directory': '/data/local/tmp/magicdesk'})['sessionId']
     try:
@@ -50,9 +57,15 @@ def main():
         report['upload'] = transport.upload(client, source, script, overwrite=True)
         invocation = ['sh', script, '--yes', '--name', args.name, '--distro', args.distro,
                       '--gui', args.gui, '--locale', 'ru_RU.UTF-8', '--timezone', 'Asia/Krasnoyarsk',
-                      '--create-user', 'mdtester', '--fonts', 'basic', '--package', 'jq']
-        invocation += ['--resume'] if args.resume else ['--dns', '1.1.1.1,1.0.0.1']
-        command(invocation)
+                      '--create-user', 'mdtester', '--fonts', 'basic', '--package', 'jq',
+                      '--gpu', args.gpu, '--jobs', str(args.jobs)]
+        for package in args.package:
+            invocation += ['--package', package]
+        invocation += ['--resume'] if args.resume else ['--dns', args.dns]
+        report['installerLog'] = script + '.log'
+        print('Installer output: ' + report['installerLog'], flush=True)
+        command(['sh', '-c', 'log=$1; shift; "$@" >"$log" 2>&1; code=$?; cat "$log"; exit "$code"',
+                 'installer-log', report['installerLog'], *invocation])
         inspect = command(['shroot', 'inspect', args.name])
         report['environment'] = json.loads(inspect)
         checks = ('set -eu\ncat /etc/os-release\n'

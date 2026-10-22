@@ -52,8 +52,25 @@ def fdinfo(fd, process='self'):
 
 
 def descriptor_info():
+    def filesystem(fd):
+        result = (ctypes.c_long * 15)()
+        native(libc.fstatfs, fd, ctypes.byref(result))
+        assert result[0] in (0x09041934, 0x50494446), list(result)
+        assert result[1] == os.sysconf('SC_PAGE_SIZE') and result[8] == 255, list(result)
+        by_path = (ctypes.c_long * 15)()
+        native(libc.statfs, f'/proc/self/fd/{fd}'.encode(), ctypes.byref(by_path))
+        assert bytes(result) == bytes(by_path), (list(result), list(by_path))
+        rejects(errno.EFAULT, native, libc.fstatfs, fd, ctypes.c_void_p(1))
+        duplicate = os.dup(fd)
+        try:
+            native(libc.fstatfs, duplicate, ctypes.byref(by_path))
+            assert bytes(result) == bytes(by_path)
+        finally:
+            os.close(duplicate)
+
     pidfd = os.pidfd_open(os.getpid())
     try:
+        filesystem(pidfd)
         fields = fdinfo(pidfd)
         assert int(fields['Pid']) == os.getpid(), (fields, os.getpid())
         if os.getpid() == 1 or 'NSpid' in fields:
@@ -92,6 +109,7 @@ def descriptor_info():
         else:
             try:
                 assert int(fdinfo(pidfd)['Pid']) == os.getpid()
+                filesystem(pidfd)
             finally:
                 os.close(pidfd)
     finally:

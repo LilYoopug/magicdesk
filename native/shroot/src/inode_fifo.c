@@ -179,7 +179,7 @@ static int retain_channel(struct md_inode_store *s,const char *channel,int sourc
     /* Never nest store transactions: projected names and canonical channel
      * custody have independent metadata gates. */
     if (!r && canonical!=s) {
-        r=mdi_begin(canonical,1);
+        r=mdi_runtime_begin(canonical);
         if (!r) {
             r=owner(canonical);
             if (!r) { pin=acquire_pin(canonical,channel,seed); if (pin<0) r=pin; }
@@ -187,7 +187,7 @@ static int retain_channel(struct md_inode_store *s,const char *channel,int sourc
         }
     }
     if (!r) {
-        r=mdi_begin(s,1);
+        r=mdi_runtime_begin(s);
         if (!r) { pin=acquire_pin(s,channel,pin); r=mdi_commit(s,pin<0 ? pin : 0); }
     }
     return r ? r : pin;
@@ -271,7 +271,7 @@ void md_inode_fifo_release(struct mdi_fifo_owner *o) {
 void mdi_fifo_close(struct md_inode_store *s) {
     struct mdi_fifo_owner *o = s->fifos;
     if (!o) return;
-    if (!mdi_begin(s, 1)) {
+    if (!mdi_runtime_begin(s)) {
         sqlite3_stmt *q = NULL;
         int r = mdi_prepare(s, "DELETE FROM fifo_pins WHERE owner=?1", &q);
         if (!r) r = mdi_bind_id(q, 1, o->id);

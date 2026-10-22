@@ -14,7 +14,7 @@ Android Activities, named environments or launcher configuration.
 | SysV IPC namespace | Shared; `CLONE_NEWIPC` creates an empty namespace | `CLONE_NEWIPC` creates an empty namespace and separates semaphore undo | Retained |
 | User namespace | `CLONE_NEWUSER` creates a nested owner | Nested owner with immutable ID maps | Retained |
 | PID identities and child namespace | New TID, shared TGID for threads; `CLONE_NEWPID` selects a new child namespace | Changes only future child admission | Retain TGID; retire former TID on nonleader exec |
-| Process limit | `RLIMIT_NPROC` shared by `CLONE_THREAD`, copied otherwise; each task has one UID charge | User-namespace accounting follows the selected identity | Retained; pending real-UID quota checked before exec |
+| Process limits | `RLIMIT_NPROC` and `RLIMIT_NOFILE` shared by `CLONE_THREAD`, copied otherwise; each task has one UID charge | User-namespace accounting follows the selected identity | Retained; pending real-UID quota checked before exec |
 
 The kernel owns cwd, umask, descriptor tables and open-file descriptions.
 The filesystem context owns guest root selection, optional cwd provenance and the admitted proc-root
@@ -40,7 +40,7 @@ See [namespace execution](namespace-execution.md) for the launch filesystem and
 
 ## Process Limits
 
-`process_limits` owns `RLIMIT_NPROC` and real-UID/user-namespace task counters
+`process_limits` owns guest `RLIMIT_NPROC`, `RLIMIT_NOFILE` and real-UID/user-namespace task counters
 within one supervised launch. It reserves a charge before native clone, transfers
 it only to the confirmed child and releases it on failure or task disposal.
 Threads share the process limit; independent processes inherit a copy. Registry
@@ -58,11 +58,29 @@ exec rejection after a real-UID change follow the Linux model. Application
 seccomp denial still wins. Task-affine memory copies preserve protected-process
 and `EFAULT` behavior; a failed old-limit copy does not undo an applied update.
 
+`NOFILE` separates the logical guest limit from the executor's physical FD budget.
+An update applies `min(guest soft, executor hard)` to the native soft limit before
+publishing guest state. It never lowers the native hard ceiling: a privileged
+guest can lower and later raise its logical hard limit without requiring Android
+root. The initial ceiling is inherited and retained per process; reading a foreign
+process's native limit is not required (Android may forbid that read while allowing
+the update). A failed native update leaves guest state unchanged. Native allocation,
+`dup`, sockets, pipes and received rights still enforce the effective soft limit;
+ordinary reads/writes acquire no new interception or accounting checks.
+
+The read-only guest `fs.nr_open` reports a logical policy ceiling of 1048576,
+independent of the host's sometimes unreadable sysctl. This is not a guarantee of
+1048576 usable physical descriptors. Allocation can exhaust the Android budget
+earlier, with its real error/truncation behavior; native FD-number and poll-vector
+ceilings are not expanded. Existing high-numbered FDs remain usable after lowering
+the limit. No per-application or container-engine limit override is needed to set
+the usual OCI logical limits.
+
 This is not a host-wide quota or a cgroup pids controller. Separate launches have
 separate counters, even if they share a store. Other resource limits, Android's
 physical task ceiling and real-time scheduling permissions remain native. A
 logical capability does not grant Android `CAP_SYS_NICE` or raise host hard limits.
-Coverage: `test_nproc.py`, `test_process_limits`, packaged `test_rtkit.py`, and
+Coverage: `test_nproc.py` (NPROC and NOFILE, both entry modes), `test_process_limits`, packaged `test_rtkit.py`, and
 Fedora `test_os_boot.py --rtkit` with the original service sandbox.
 
 ## Request Context

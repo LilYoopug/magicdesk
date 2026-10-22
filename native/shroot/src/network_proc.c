@@ -111,6 +111,9 @@ static const struct md_control_file_ops ops={.retain=retain,.release=release,.st
     .access=file_access,.read=read_value,.open=open_file,.filesystem=PROC_SUPER_MAGIC};
 struct md_control_file md_network_proc_new(struct md_network_namespace *network,enum md_network_table table) {
     if (!md_network_namespace_managed(network)) { errno=EXDEV; return (struct md_control_file){0}; }
+    /* The managed stack is IPv4-only. Existence of this file advertises
+     * IPv6 socket support even when its contents would be empty. */
+    if (table==MD_NET_TABLE_IF_INET6) { errno=ENOENT; return (struct md_control_file){0}; }
     if ((unsigned)table>MD_NET_TABLE_UDP6) { errno=EINVAL; return (struct md_control_file){0}; }
     struct network_proc *f=calloc(1,sizeof(*f));
     if (!f) return (struct md_control_file){0};

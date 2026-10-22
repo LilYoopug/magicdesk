@@ -58,6 +58,7 @@
 #include <linux/nsfs.h>
 #include "proc_sysctl.h"
 #include "user_sysctl.h"
+#include "proc_devices.h"
 #include "network_proc.h"
 #include "socket_calls.h"
 #include "proc_control.h"
@@ -363,7 +364,6 @@ struct thread {
     struct md_fd_order buffer_descriptor_order;
     unsigned buffer_descriptor_operation;
     unsigned long buffer_descriptor_argument;
-    uint32_t buffer_network_groups;
     int proc_waiting;
     struct md_control_pending *control_pending;
     struct md_fd_closed closed;
@@ -1545,38 +1545,12 @@ static int proc_node_stat(struct proc_owner target, enum md_proc_file_kind kind,
         *node=(struct md_proc_file_node){value->st_dev,value->st_ino,0};
         return 0;
     }
-    snprintf(path,sizeof(path),"/proc/%d/%s",target.pid,md_proc_file_process_name(kind));
-    if (stat(path,value)) return -errno;
-    *node=(struct md_proc_file_node){value->st_dev,value->st_ino,target.pid};
-    int protected=value->st_uid!=getuid();
-    uint32_t uid=target.identity->uid.effective, gid=target.identity->gid.effective;
-    if (protected) {
-        uid=md_user_namespace_into(target.identity->user_namespace,0,0);
-        gid=md_user_namespace_into(target.identity->user_namespace,1,0);
-        if (uid==UINT32_MAX) uid=0;
-        if (gid==UINT32_MAX) gid=0;
-    }
-    if (!md_proc_file_process(kind))
-        value->st_ino=((uint64_t)value->st_ino<<2)|((unsigned)kind+1)|UINT64_C(0x8000000000000000);
-    value->st_mode=S_IFREG|(md_proc_file_process(kind) || md_proc_file_cgroup_kind(kind) ? 0444 : 0644); value->st_nlink=1; value->st_rdev=0;
-    value->st_size=0; value->st_blocks=0; value->st_blksize=getpagesize();
-    value->st_uid=uid; value->st_gid=gid; return 0;
-}
-static int proc_node_access(const struct md_identity *id, const struct stat *st, unsigned mode, int effective) {
-    if (mode&~7U) return -EINVAL;
-    if ((mode&X_OK) && !S_ISDIR(st->st_mode)) return -EACCES;
-    if ((mode&W_OK) && S_ISDIR(st->st_mode)) return -EACCES;
-    if (!(mode&W_OK)) return 0;
-    struct md_identity actor=md_identity_access(id,effective);
-    if (actor.uid.fs==st->st_uid) return 0;
-    return md_identity_capable_in(&actor,NULL,CAP_DAC_OVERRIDE) ? 0 : -EACCES;
+    return md_proc_file_task_stat(target.pid,target.identity,kind,node,value);
 }
 static void proc_metadata_value(struct md_proc_metadata_result *out,const struct stat *st,
         const struct md_proc_file *file) {
     md_fs_stat_info(st,&out->value);
-    struct md_control_file control=md_proc_file_control(file);
-    if (control.ops && control.ops->origin)
-        md_fs_anchor_mount_info(control.ops->origin(control.context),&out->value);
+    md_fs_anchor_mount_info(md_proc_file_origin(file),&out->value);
 }
 static struct md_control_file proc_control_view(struct thread *t,enum md_proc_kind kind,
         pid_t process,const char *interface) {
@@ -1587,13 +1561,14 @@ static struct md_control_file proc_control_view(struct thread *t,enum md_proc_ki
         return md_network_proc_new(target->resources.network,(enum md_network_table)(kind-MD_PROC_NET_TCP));
     }
     if (kind==MD_PROC_MAX_USER_NAMESPACES) return md_user_sysctl_new(t->identity.user_namespace,NULL);
+    if (kind==MD_PROC_DEVICES) return md_proc_devices_new(t->identity.user_namespace,NULL);
     return md_network_sysctl_new(t->resources.network,
         (enum md_network_parameter)(kind-MD_PROC_NET_UNPRIVILEGED_PORT),interface,NULL);
 }
 static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_request *q, struct md_proc_metadata_result *out) {
     *out=(struct md_proc_metadata_result){0};
     struct stat st={0}, *value=&st;
-    if (md_proc_network_control(q->kind) || q->kind==MD_PROC_MAX_USER_NAMESPACES) {
+    if (md_proc_network_control(q->kind) || q->kind==MD_PROC_MAX_USER_NAMESPACES || q->kind==MD_PROC_DEVICES) {
         if (!memchr(q->interface,0,sizeof(q->interface))) return -EINVAL;
         struct md_control_file view=proc_control_view(t,q->kind,q->process,q->interface);
         if (!view.ops) return -errno;
@@ -1679,7 +1654,7 @@ static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_re
         if (q->access&(W_OK|X_OK)) error=-EACCES;
     } else if (!error) error=(md_proc_file_process(kind) || md_proc_file_cgroup_kind(kind)) && (q->access&(W_OK|X_OK)) ? -EACCES
         : sysctl ? md_proc_sysctl_access(kind,&t->identity,q->access,q->effective)
-        : proc_node_access(&t->identity,value,q->access,q->effective);
+        : md_proc_file_task_access(&t->identity,value,q->access,q->effective);
     if (!error) {
         value->st_uid=md_identity_visible_id(&t->identity,0,value->st_uid);
         value->st_gid=md_identity_visible_id(&t->identity,1,value->st_gid);
@@ -1726,7 +1701,7 @@ static int control_file_query(struct md_fd_object *object,unsigned operation,str
     if (operation==MD_FS_MOUNT || operation==MD_FS_OPEN_TREE) {
         if (md_proc_file_filesystem_paths(file)) { *out=(struct md_control_file){0}; return 0; }
         if (!out->ops || !out->ops->descriptor) return -EOPNOTSUPP;
-    } else if (operation!=MD_FS_FDINFO && (md_proc_file_flags(file)&O_PATH)) return -EBADF;
+    } else if (operation!=MD_FS_FDINFO && operation!=MD_FS_FSTAT && (md_proc_file_flags(file)&O_PATH)) return -EBADF;
     return out->ops ? 1 : -EINVAL;
 }
 static int control_file_capture(pid_t actor,const char *path,struct md_fd_object **out) {
@@ -1847,7 +1822,7 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
         }
         else reply.error=-ENOTTY;
     } else if (operation==MD_PROC_FILE_OPEN && (md_proc_network_control(q->data.args[3])
-            || q->data.args[3]==MD_PROC_MAX_USER_NAMESPACES)) {
+            || q->data.args[3]==MD_PROC_MAX_USER_NAMESPACES || q->data.args[3]==MD_PROC_DEVICES)) {
         int flags=(int)q->data.args[4];
         char interface[16]={0};
         if (md_proc_network_interface(q->data.args[3])) {
@@ -1924,7 +1899,7 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
             if (!error && !(flags&O_PATH)) error=control ? md_proc_file_control_access(source,&t->identity,mode)
                 : namespace || md_proc_file_cgroup_kind(file_kind) ? mode==W_OK ? -EACCES : 0
                 : sysctl ? md_proc_sysctl_access(file_kind,&t->identity,mode,1)
-                : proc_node_access(&t->identity,&st,mode,1);
+                : md_proc_file_task_access(&t->identity,&st,mode,1);
             if (!error && (flags&O_NOATIME) && !(flags&O_PATH)) error=md_file_noatime(&st,&t->identity);
             struct md_proc_file *file=NULL;
             if (!error && source) file=md_proc_file_reopen(source,&t->identity,flags);
@@ -2655,9 +2630,9 @@ static void debugger_wait(pid_t pid, const struct user_pt_regs *original, enum m
     }
     if (set_registers(pid,&regs)) resume(pid,0);
 }
-enum { COPY_GROUPS, COPY_CAP_HEADER, COPY_CAP_DATA, COPY_CAP_VERSION, COPY_NPROC_INPUT, COPY_NPROC_OUTPUT };
+enum { COPY_GROUPS, COPY_CAP_HEADER, COPY_CAP_DATA, COPY_CAP_VERSION, COPY_LIMIT_INPUT, COPY_LIMIT_OUTPUT };
 static void identity_copy_next(struct thread *t);
-static int nproc_apply(struct thread *t,const struct rlimit *next,struct rlimit *old) {
+static int process_limit_apply(struct thread *t,const struct rlimit *next,struct rlimit *old) {
     pid_t pid=t->original.regs[8]==SYS_prlimit64 ? (pid_t)t->original.regs[0] : 0;
     if (pid) pid=native_pid(t,pid);
     else pid=t->pid;
@@ -2665,19 +2640,20 @@ static int nproc_apply(struct thread *t,const struct rlimit *next,struct rlimit 
     struct md_task_retired_view retired=md_task_registry_retired(tasks,pid);
     const struct md_identity *id=target ? &target->identity : retired.identity;
     if (!id) return -ESRCH;
-    return md_process_nproc(target ? target->resources.process : retired.process,
-        &t->identity,id,target && target->tgid==t->tgid,next,old);
+    unsigned resource=t->original.regs[t->original.regs[8]==SYS_prlimit64 ? 1 : 0];
+    return md_process_limit(target ? target->resources.process : retired.process,
+        &t->identity,id,target && target->tgid==t->tgid,resource,next,old,pid);
 }
 static void identity_copy_finish(struct thread *t, int error) {
     struct user_pt_regs r = t->original;
-    if (!error && t->identity_stage==COPY_NPROC_INPUT) {
+    if (!error && t->identity_stage==COPY_LIMIT_INPUT) {
         struct rlimit next,old;
         memcpy(&next,t->identity_buffer,sizeof(next));
-        error=nproc_apply(t,t->identity_count ? &next : NULL,&old);
+        error=process_limit_apply(t,t->identity_count ? &next : NULL,&old);
         uintptr_t output=r.regs[8]==SYS_prlimit64 ? r.regs[3] : r.regs[8]==SYS_getrlimit ? r.regs[1] : 0;
         if (!error && (output || r.regs[8]==SYS_getrlimit)) {
             memcpy(t->identity_buffer,&old,sizeof(old));
-            t->identity_stage=COPY_NPROC_OUTPUT; t->identity_loading=0;
+            t->identity_stage=COPY_LIMIT_OUTPUT; t->identity_loading=0;
             t->identity_address=output; t->identity_count=sizeof(old)/sizeof(uint32_t); t->identity_copied=0;
             identity_copy_next(t); return;
         }
@@ -2777,16 +2753,17 @@ static void identity_groups_call(struct thread *t, struct user_pt_regs *r) {
 static int process_limit_call(struct thread *t,struct user_pt_regs *r) {
     if (r->pc == RAW_GATE) return 0;
     long nr=r->regs[8];
+    unsigned resource=r->regs[nr==SYS_prlimit64 ? 1 : 0];
     if (t->phase==IDLE && t->ready
-            && ((nr==SYS_prlimit64 && (unsigned)r->regs[1]==RLIMIT_NPROC)
-                || ((nr==SYS_getrlimit || nr==SYS_setrlimit) && (unsigned)r->regs[0]==RLIMIT_NPROC))) {
+            && (nr==SYS_prlimit64 || nr==SYS_getrlimit || nr==SYS_setrlimit)
+            && (resource==RLIMIT_NPROC || resource==RLIMIT_NOFILE)) {
         t->identity_buffer=calloc(1,sizeof(struct rlimit));
         if (!t->identity_buffer) { return_value(t,r,-ENOMEM); return 1; }
-        t->original=*r; t->identity_stage=COPY_NPROC_INPUT;
+        t->original=*r; t->identity_stage=COPY_LIMIT_INPUT;
         t->identity_address=nr==SYS_prlimit64 ? r->regs[2] : nr==SYS_setrlimit ? r->regs[1] : 0;
         t->identity_count=t->identity_address || nr==SYS_setrlimit ? sizeof(struct rlimit)/sizeof(uint32_t) : 0;
         t->identity_loading=1; t->identity_copied=0;
-        if (save_signal_mask(t,&t->mask,"nproc-copy")
+        if (save_signal_mask(t,&t->mask,"process-limit-copy")
                 && shield(t) && skip(t->pid)) identity_copy_next(t);
         return 1;
     }
@@ -4356,9 +4333,9 @@ static void proc_io_progress(struct thread *t) {
     if (!result) {
         struct md_proc_file_node node=md_proc_file_get_node(t->proc_io.file);
         struct proc_owner owner=proc_owner(node.process);
-        struct rlimit nproc=owner.process ? md_process_nproc_value(owner.process) : (struct rlimit){0};
+        struct md_process_limits limits=owner.process ? md_process_limits_value(owner.process) : (struct md_process_limits){0};
         if (owner.identity) md_proc_file_process_state(t->proc_io.file,owner.identity,owner.pid_namespace,
-            md_debugger_owner(debugger,owner.pid),owner.process ? &nproc : NULL);
+            md_debugger_owner(debugger,owner.pid),owner.process ? &limits : NULL);
         t->proc_io.actor=(struct md_control_actor){.pid=t->pid,.identity=&t->identity,.resources=&t->resources};
         result=md_proc_file_io_execute(&t->proc_io,&t->identity,t->resources.uts,span.data,span.size,(size_t)getpagesize());
     }
@@ -5054,9 +5031,16 @@ static void adapter_progress(void) {
     CHECK(!md_fs_buffer_progress(buffer_service));
     retry_dispatch(0);
 }
-static int network_namespace_capture(void *context,int fd,struct md_network_namespace **out) {
+static int network_namespace_capture(void *context,struct md_network_target_reference reference,
+        struct md_network_namespace **out) {
     struct thread *t=context;
-    struct md_proc_file *file=proc_file_capture(t,fd);
+    if (reference.kind==MD_NETWORK_TARGET_PID) {
+        struct thread *target=find_thread(native_pid(t,reference.value));
+        if (!target || !target->born || !target->resources.network) return -ESRCH;
+        *out=md_network_namespace_retain(target->resources.network); return 0;
+    }
+    if (reference.kind!=MD_NETWORK_TARGET_FD) return -EINVAL;
+    struct md_proc_file *file=proc_file_capture(t,reference.value);
     const struct md_namespace_reference *ref=md_proc_file_namespace_reference(file);
     int error=!ref || ref->kind!=MD_NAMESPACE_NETWORK || (md_proc_file_flags(file)&O_PATH) ? -EINVAL : 0;
     if (!error) *out=md_network_namespace_retain(ref->value.network);
@@ -5094,11 +5078,17 @@ static void buffer_descriptor_start(struct thread *t) {
     } else if (!result && network) {
         unsigned long args[6]; for (unsigned i=0;i<6;++i) args[i]=t->original.regs[i];
         struct md_network_target resolver={.context=t,.resolve=network_namespace_capture};
-        result=md_device_events_is(object)
-            ? t->buffer_network_groups ? -EOPNOTSUPP
-                : md_device_events_call(object,nr,args,span.data,span.size,t->buffer_descriptor_argument,visible_pid(t,t->tgid))
-            : md_network_socket_call(object,&t->identity,nr,args,span.data,span.size,
-                t->buffer_descriptor_argument,visible_pid(t,t->tgid),t->buffer_network_groups,t->resources.pid_group,&resolver);
+        struct md_network_request *request=span.data;
+        int sending=nr==SYS_sendto || nr==SYS_sendmsg;
+        const struct md_network_address *destination=sending ? &request->destination : NULL;
+        if (span.size<sizeof(*request)) result=-EOVERFLOW;
+        else if (md_device_events_is(object)) {
+            uint32_t groups=0;
+            result=md_network_netlink_destination(destination,&groups);
+            if (!result) result=groups ? -EOPNOTSUPP
+                : md_device_events_call(object,nr,args,request->data,sizeof(request->data),t->buffer_descriptor_argument,visible_pid(t,t->tgid));
+        } else result=md_network_socket_call(object,&t->identity,nr,args,request->data,sizeof(request->data),
+            t->buffer_descriptor_argument,visible_pid(t,t->tgid),destination,t->resources.pid_group,&resolver);
     } else if (!result) {
         if (!md_descriptor_inode_is(object)) result=-EBADF;
         else if (nr==SYS_fchown || nr==SYS_fchownat) {
@@ -5436,7 +5426,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         struct md_device_events *events=md_fs_worker_device_events(filesystem);
         result=events && t->original.regs[0]==AF_NETLINK && t->original.regs[2]==NETLINK_KOBJECT_UEVENT
             ? md_device_events_socket(events,(int)t->original.regs[1],&t->buffer_open.object,&t->buffer_open.fd)
-            : md_network_socket_open(t->resources.network,t->identity.uid.fs,(int)t->original.regs[0],
+            : md_network_socket_open(t->resources.network,&t->identity,(int)t->original.regs[0],
                 (int)t->original.regs[1],(int)t->original.regs[2],&t->buffer_open.object,&t->buffer_open.fd);
         if (!result) {
             t->buffer_open.flags=t->original.regs[1]&SOCK_CLOEXEC;
@@ -5445,10 +5435,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         break;
     }
     case MD_BUFFER_NETWORK_CALL: {
-        if (t->phase!=DISPATCHING || !t->buffer.pool || r->regs[1]>MD_NETWORK_BUFFER_SIZE
-                || r->regs[2]>UINT32_MAX || (r->regs[2] && t->original.regs[8]!=SYS_sendto
-                    && t->original.regs[8]!=SYS_sendmsg)) break;
-        t->buffer_network_groups=(uint32_t)r->regs[2];
+        if (t->phase!=DISPATCHING || !t->buffer.pool || r->regs[1]>MD_NETWORK_BUFFER_SIZE || r->regs[2]) break;
         buffer_descriptor_begin(t,r); return;
     }
     case MD_BUFFER_NETWORK_CREDENTIALS: {
@@ -6888,7 +6875,7 @@ static void proc_lookup_start(struct thread *t) {
             struct stat st;
             struct md_proc_file_node node=md_proc_file_get_node(file);
             struct proc_owner owner=proc_owner(node.process);
-            result=md_proc_file_control(file).ops ? md_proc_file_control_stat(file,&st)
+            result=md_proc_file_control(file).ops && !md_proc_file_task(md_proc_file_kind(file)) ? md_proc_file_control_stat(file,&st)
                 : !owner.identity ? -ESRCH : proc_node_stat(owner,md_proc_file_kind(file),&node,&st);
             if (!result) result=md_file_noatime(&st,&t->identity);
         }
@@ -8010,6 +7997,7 @@ int main(int argc, char **argv) {
         broker = md_broker_create(filesystem, statistics != NULL, delegated_notification); CHECK(broker);
         md_broker_completion_handler(broker,completed_notification);
         md_broker_control_factory(broker,md_proc_file_control_object);
+        md_broker_control_query(broker,control_file_query);
         md_broker_native_observer(broker,cooperative_native_observe);
         md_broker_retirement_handler(broker,broker_retire);
         buffer_service=md_fs_buffer_service_new(filesystem,tasks,fd_wakeup,buffer_complete); CHECK(buffer_service);
@@ -8043,9 +8031,9 @@ int main(int argc, char **argv) {
         md_fd_origins_finish(&update,fd);
         md_fd_object_release(pin);
     }
-    struct rlimit nproc;
-    CHECK(!getrlimit(RLIMIT_NPROC,&nproc));
-    thread(leader)->resources.process=md_process_member_new(&thread(leader)->identity,&nproc);
+    struct md_process_limits limits;
+    CHECK(!md_process_limits_read(&limits));
+    thread(leader)->resources.process=md_process_member_new(&thread(leader)->identity,&limits);
     CHECK(thread(leader)->resources.process);
     network_error=md_network_launch_open(&network_profile,launch_identity.user_namespace,&launch_network);
     if (network_error) { errno=-network_error; perror("Shroot network preparation"); return 125; }

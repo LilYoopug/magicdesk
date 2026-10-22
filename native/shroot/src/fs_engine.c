@@ -6,7 +6,9 @@
 #include "fuse_view.h"
 #include "shm_bridge.h"
 #include "fs_native.h"
+#include "fd_filesystem.h"
 #include "proc_fdinfo.h"
+#include "procfs_view.h"
 #include "fs_context.h"
 #include "image_catalogue.h"
 #include "inode_watch.h"
@@ -144,8 +146,8 @@ static void watch_path(struct md_filesystem *fs, const struct md_fs_request *q,
     md_fs_view_then(fs,q,&open,out,output,watch_opened);
 }
 static int reject_native_control(void *context,const struct md_control_file_ops *ops,
-        void *data,const struct md_identity *identity,int flags) {
-    (void)context; (void)ops; (void)data; (void)identity; (void)flags;
+        void *data,const struct md_identity *identity,int flags,struct md_fs_anchor *origin) {
+    (void)context; (void)ops; (void)data; (void)identity; (void)flags; (void)origin;
     /* A typed provider's carrier is not authority for a native path mutation. */
     return -EOPNOTSUPP;
 }
@@ -212,7 +214,8 @@ void md_fs_statfs_result(int fd, unsigned policy, const struct md_inode_lifetime
         out->error=-ERANGE; return;
     }
     struct statfs native;
-    if (fstatfs(fd,&native)) { out->error=-errno; return; }
+    int error=md_fd_filesystem(fd,&native);
+    if (error) { out->error=error; return; }
     struct md_fs_statfs value={.type=native.f_type,.block_size=native.f_bsize,
         .blocks=native.f_blocks,.free_blocks=native.f_bfree,.available_blocks=native.f_bavail,
         .files=native.f_files,.free_files=native.f_ffree,.name_length=native.f_namelen,
@@ -416,13 +419,15 @@ static void context_execute(struct md_fs_context *context,
         int error=md_fs_landlock_delegate(fs,q,boundary.path ? boundary.path : "");
         if (error) out->error=error;
     }
+    if (out->error==-EREMOTE && boundary.proc_entry)
+        md_fs_proc_task(fs,boundary.proc_entry,boundary.path,q,out,output);
     if (out->error==-EXDEV && fs->store->landlock
             && q->operation!=MD_FS_LINK && q->operation!=MD_FS_RENAME) {
         int error=md_fs_landlock_native(fs,q,NULL,q->directory[0]);
         if (error) out->error=error;
     }
+    if (out->error==-EXDEV) md_fs_native_descriptor(fs,q,out,output);
     fs->store->boundary=previous_boundary;
-    if (out->error==-EXDEV) md_fs_native_descriptor(q,out,output);
     if (out->error==-EREMOTE && !fs->store->landlock)
         md_fs_native_boundary(fs,&boundary,q,out,output);
     if (out->error==-EREMOTE && boundary.native_directory && q->resolve) {
@@ -448,11 +453,13 @@ static void context_execute(struct md_fs_context *context,
         if (boundary.path && boundary.capacity) {
             out->error=0; out->host_path=boundary.operand+1; out->size=strlen(boundary.path)+1;
             out->proc_namespace=boundary.proc_namespace;
-            if (proc_link_delegated) out->info.mount_id=boundary.proc_link_mount;
+            if (proc_link_delegated || q->operation==MD_FS_STAT)
+                out->info.mount_id=boundary.proc_link_mount;
         }
     }
     if (!out->error && (q->operation==MD_FS_MOUNT || (q->operation==MD_FS_FSCONFIG
             && q->mode==FSCONFIG_CMD_RECONFIGURE))) md_fs_mount_table_changed(fs);
+    md_fs_anchor_release(boundary.proc_entry);
     fs->store->creation_mask=previous_mask;
     fs->store->root_id=previous_root;
     fs->native_root=previous_native_root;

@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 static void destroy(struct md_fd_object *object) {
@@ -17,7 +18,7 @@ static void destroy(struct md_fd_object *object) {
     if (p->mount && atomic_fetch_sub_explicit(&p->mount->anchors,1,memory_order_acq_rel)==1)
         md_mount_family_retire(p->view);
     md_mount_namespace_release(p->view);
-    md_inode_lifetime_release(p->lifetime); free(p);
+    md_inode_lifetime_release(p->lifetime); free(p->child); free(p);
 }
 static const struct md_fd_object_type type={.destroy=destroy};
 struct md_fd_object *md_fs_anchor_object(struct md_fs_anchor *p) { return p ? &p->object : NULL; }
@@ -30,6 +31,7 @@ struct md_fs_anchor *md_fs_anchor_retain(struct md_fs_anchor *p) {
 void md_fs_anchor_release(struct md_fs_anchor *p) { md_fd_object_release(md_fs_anchor_object(p)); }
 int md_fs_anchor_fd(const struct md_fs_anchor *p) { return p ? p->fd : -1; }
 unsigned md_fs_anchor_kind(const struct md_fs_anchor *p) { return p ? p->kind : 0; }
+int md_fs_anchor_virtual(const struct md_fs_anchor *p) { return p && p->child; }
 int md_fs_anchor_native_leaf(const struct md_fs_anchor *p,const struct md_inode_store *s,int fd) {
     return p && p->native_leaf && fd==p->fd && md_inode_lifetime_same(p->lifetime,md_inode_store_lifetime(s));
 }
@@ -39,11 +41,12 @@ unsigned md_fs_anchor_policy(const struct md_fs_anchor *p) {
 void md_fs_anchor_mount_info(const struct md_fs_anchor *p,struct md_fs_info *info) {
     if (!p || !p->mount) return;
     md_fs_info_mount(info,p->mount->id,
-        p->device==p->mount->native.st_dev && p->inode==p->mount->native.st_ino);
+        !p->child && p->device==p->mount->native.st_dev && p->inode==p->mount->native.st_ino);
 }
 int md_fs_anchor_same(const struct md_fs_anchor *a, const struct md_fs_anchor *b) {
     return a && b && a->view==b->view && a->mount==b->mount
         && a->device==b->device && a->inode==b->inode
+        && (a->child && b->child ? !strcmp(a->child,b->child) : a->child==b->child)
         && md_inode_lifetime_same(a->lifetime,b->lifetime);
 }
 int md_fs_anchor_check_fd(const struct md_fs_anchor *p, int fd) {
@@ -51,6 +54,7 @@ int md_fs_anchor_check_fd(const struct md_fs_anchor *p, int fd) {
     /* The retained anchor owns this descriptor until its final release. Only
      * a separately supplied descriptor needs a kernel identity check. */
     if (fd==p->fd) return 0;
+    if (p->child) return -ESTALE;
     struct stat st;
     if (fstat(fd,&st)) return -errno;
     return (st.st_dev==p->device && st.st_ino==p->inode)
@@ -101,6 +105,16 @@ int md_view_anchor_duplicate(struct md_filesystem *fs,struct md_mount_namespace 
         view,mount,copy,st.st_dev,st.st_ino);
     if (!origin) { int error=-errno; close(copy); return error; }
     *out=origin; return 0;
+}
+int md_view_anchor_child(struct md_filesystem *fs,struct md_mount_namespace *view,
+        struct md_view_mount *mount,int parent,const char *name,struct md_fs_anchor **out) {
+    if (!name || !*name || strchr(name,'/') || !strcmp(name,".") || !strcmp(name,"..")) return -EINVAL;
+    struct md_fs_anchor *p=NULL;
+    int error=md_view_anchor_duplicate(fs,view,mount,parent,&p);
+    if (error) return error;
+    p->child=strdup(name); p->kind=S_IFREG;
+    if (!p->child) { md_fs_anchor_release(p); return -ENOMEM; }
+    *out=p; return 0;
 }
 void md_view_capture(struct md_filesystem *fs, struct md_mount_namespace *view,
         struct md_view_mount *mount, struct md_fs_result *out, const struct md_fs_output *output) {

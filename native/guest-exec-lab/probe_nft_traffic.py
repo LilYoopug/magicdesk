@@ -248,6 +248,7 @@ def guest(observer):
 def main():
     from test_oci_services import Suite
     from docker_network_fixture import Observer
+    from benchmark_cpu import observe_suite_cpu
     build, store = Path(sys.argv[1]), sys.argv[2]
     suite = Suite(Path('build/nft-results'), build)
     observer = Observer()
@@ -260,9 +261,11 @@ def main():
                                suite.base + '/docker_network_fixture.py')
         suite.command(runner + ['--', '/bin/mkdir', target], quiet=True)
         created = True
-        output = suite.command(runner + ['--bind-ro', suite.base, target, '--deadline-seconds', '180', '--',
-                                        '/usr/bin/python3', target + '/probe.py', '--guest', observer.address],
-                               quiet=True, timeout=200)
+        with observe_suite_cpu(suite) as cpu:
+            suite.report['cpuFrequency'] = cpu
+            output = suite.command(runner + ['--bind-ro', suite.base, target, '--deadline-seconds', '180', '--',
+                                            '/usr/bin/python3', target + '/probe.py', '--guest', observer.address],
+                                   quiet=True, timeout=200)
         reports = [line.removeprefix('NFT_TRAFFIC_REPORT ') for line in output.splitlines()
                    if line.startswith('NFT_TRAFFIC_REPORT ')]
         assert len(reports) == 1, output[-3000:]

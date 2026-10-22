@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
 #include "fs_mounts.h"
+#include "fs_mount_internal.h"
+#include "fs_storage.h"
 #include "inode_watch.h"
 #include "inode_internal.h"
 #include "task_registry.h"
@@ -11,6 +13,7 @@
 #include <fcntl.h>
 #include <linux/openat2.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/inotify.h>
 #include <sys/vfs.h>
@@ -58,6 +61,61 @@ static unsigned descriptors(void) {
     unsigned count=0; struct dirent *entry;
     while ((entry=readdir(dir))) if (strcmp(entry->d_name,".") && strcmp(entry->d_name,"..")) ++count;
     closedir(dir); return count;
+}
+static void provider_mount_tables(const char *base) {
+    char store[PATH_MAX],source[2][PATH_MAX],path[PATH_MAX];
+    snprintf(store,sizeof(store),"%s/provider-tables",base);
+    struct md_inode_store *s=NULL; assert(!md_inode_store_open(store,1,&s));
+    const char *dirs[]={"/dev","/dev/shm","/proc","/devices"};
+    for (unsigned i=0;i<4;++i) assert(!md_inode_mkdir(s,-1,dirs[i],0755));
+    for (unsigned i=0;i<2;++i) {
+        snprintf(source[i],sizeof(source[i]),"%s/provider-source-%u",base,i);
+        assert(!mkdir(source[i],0700));
+    }
+    snprintf(path,sizeof(path),"%s/shm",source[0]); assert(!mkdir(path,0700));
+    unsigned native_children[2]={0};
+    for (unsigned mode=0;mode<6;++mode) {
+        struct md_fs_storage_cache storage={0};
+        struct md_filesystem fs={.store=s,.storage=&storage};
+        struct md_fs_attachment mounts[]={{source[0],"/dev",0},{source[1],"/dev/shm",0}};
+        if (mode==2) mounts[0].target="/proc";
+        if (mode==3) mounts[0].target="/dev/shm";
+        if (mode==4) mounts[0].target="/devices";
+        if (mode && mode<5) {
+            assert(!md_fs_mounts_open(&fs,NULL,0));
+            for (unsigned i=0;i<(mode==1 ? 2U : 1U);++i) {
+                struct md_view_location target;
+                assert(!md_view_walk(&fs,-1,NULL,mounts[i].target,1,0,MD_VIEW_MOUNT_TARGET,&target));
+                struct md_mount_source source_mount={.fd=open(mounts[i].source,O_PATH|O_DIRECTORY|O_CLOEXEC),
+                    .backing=MD_MOUNT_NATIVE};
+                assert(source_mount.fd>=0);
+                assert(!md_view_attach_source(&fs,&source_mount,&target,NULL));
+                close(source_mount.fd); md_view_location_close(&target);
+            }
+        }
+        for (unsigned info=0;info<2;++info) {
+            struct md_fs_result r=call(&fs,MD_FS_MOUNT_TABLE,-1,NULL,O_RDONLY,info,NULL,0);
+            assert(!r.error && r.fd>=0);
+            FILE *table=fdopen(r.fd,"r"); assert(table);
+            char *line=NULL; size_t capacity=0;
+            unsigned dev=0,proc=0,shm=0,children=0;
+            while (getline(&line,&capacity,table)>=0) {
+                assert(sscanf(line,info ? "%*u %*u %*s %*s %4095s" : "%*s %4095s",path)==1);
+                dev+=!strcmp(path,"/dev"); proc+=!strcmp(path,"/proc"); shm+=!strcmp(path,"/dev/shm");
+                if (!strncmp(path,"/dev/",5) && strcmp(path,"/dev/shm")) ++children;
+                if (mode==2) assert(strncmp(path,"/proc/",6));
+            }
+            assert(!ferror(table)); free(line); fclose(table);
+            assert(dev==1 && proc==1 && shm==1);
+            if (!mode) native_children[info]=children;
+            else if (mode==1) assert(!children);
+            else assert(children==native_children[info]);
+        }
+        md_fs_mounts_close(&fs);
+        md_fs_storage_close(&storage);
+    }
+    md_inode_store_close(s);
+    puts("PASS mount tables hide covered native providers, retain explicit children and restore the initial view");
 }
 static void nested_mounts(const char *base) {
     char source[3][PATH_MAX], store[PATH_MAX], path[PATH_MAX], bytes[8192];
@@ -324,6 +382,9 @@ static void native_attributes(const char *base) {
     puts("PASS host bind attributes: filtered size, exact buffer, path/FD parity and untouched host labels");
 }
 int main(int argc, char **argv) {
+    if (argc==3 && !strcmp(argv[1],"--provider-tables")) {
+        assert(!mkdir(argv[2],0700)); provider_mount_tables(argv[2]); return 0;
+    }
     if (argc==3 && !strcmp(argv[1],"--native-attributes")) {
         assert(!mkdir(argv[2],0700)); native_attributes(argv[2]); return 0;
     }
@@ -558,6 +619,7 @@ int main(int argc, char **argv) {
     puts("PASS host-boundary symlinks, guest shared memory, resolution constraints and guest mount tables");
     puts("PASS scoped roots, retained attachments and filtered mount tables");
     nested_mounts(argv[1]);
+    provider_mount_tables(argv[1]);
     test_path_walk(argv[1]);
     task_mount_views(argv[1]);
     native_attributes(argv[1]);

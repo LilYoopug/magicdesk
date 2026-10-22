@@ -47,6 +47,16 @@ def guest():
         call(429, fd, '', -100, path, 4)
         os.close(fd)
 
+    def ip(*args):
+        subprocess.run(['/usr/sbin/ip', *args], check=True, capture_output=True, text=True)
+
+    def move_link(index, namespace):
+        with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 0) as route:
+            body = struct.pack('BxHiII', 0, 0, index, 0, 0) + struct.pack('HHi', 8, 28, namespace)
+            route.sendto(struct.pack('IHHII', 16 + len(body), 16, 5, 1, 0) + body, (0, 0))
+            reply = route.recv(4096)
+            assert struct.unpack_from('i', reply, 16)[0] == 0, reply
+
     with tempfile.TemporaryDirectory(prefix='md-sysfs-') as directory, ExitStack() as cleanup:
         cpu_possible = os.environ['MD_TEST_CPU_POSSIBLE']
         root = Path(directory)
@@ -62,13 +72,36 @@ def guest():
         call(97, 0x40000000)  # NEWNET, retaining initial logical user authority.
         first = os.open('/proc/self/ns/net', os.O_RDONLY)
         call(40, 'sysfs', a, 'sysfs', 15, 0)
-        for name in ('block', 'bus', 'dev/block', 'dev/char'):
+        for name in ('block', 'dev/block', 'kernel'):
             assert (a / name).is_dir() and os.listdir(a / name) == [], name
+        render = sorted((Path('/sys/class/drm')).glob('renderD*'))
+        assert sorted(os.listdir(a / 'bus')) == (['platform'] if render else [])
+        assert sorted(os.listdir(a / 'dev/char')) == sorted(
+            '226:' + node.name.removeprefix('renderD') for node in render)
+        if render:
+            assert os.listdir(a / 'devices/platform') == ['shroot-gpu']
+            assert sorted(node.name for node in (a / 'class/drm').iterdir()) == [node.name for node in render]
+            for node in render:
+                assert (a / 'class/drm' / node.name / 'dev').read_text() == node.joinpath('dev').read_text()
+        else:
+            assert not (a / 'devices/platform').exists()
+        # Container managers expose selected sysfs subtrees through separate binds.
+        for name in ('block', 'bus', 'class', 'dev', 'devices', 'kernel'):
+            call(40, a / name, alias, 0, 4096, 0)
+            try:
+                assert os.stat(alias).st_ino == os.stat(a / name).st_ino
+                assert sorted(os.listdir(alias)) == sorted(os.listdir(a / name))
+                fsstat = (ctypes.c_long * 32)()
+                call(43, alias, ctypes.addressof(fsstat))
+                assert fsstat[0] == 0x62656572
+            finally:
+                call(39, alias, 2)
+        assert not (a / 'kernel/debug').exists()
+        assert not (a / 'kernel/tracing').exists()
         assert set(os.listdir(a / 'devices/system')) <= {'cpu', 'node'}
         cpu = a / 'devices/system/cpu/possible'
         assert cpu.read_text() == cpu_possible
         assert not (a / 'devices/system/cpux').exists()
-        assert not (a / 'devices/platform').exists()
         assert not (a / 'class/thermal').exists()
         cpu_fd = os.open(cpu, os.O_RDONLY)
         cpu_duplicate = os.dup(cpu_fd)
@@ -116,6 +149,48 @@ def guest():
         os.close(pathfd)
         print('PASS sysfs shared offsets, positional IO and proc FD reopening', flush=True)
 
+        ip('link', 'add', 'left', 'type', 'veth', 'peer', 'name', 'right')
+        assert sorted(os.listdir(net)) == ['left', 'lo', 'right']
+        left, right = net / 'left', net / 'right'
+        left_index = (left / 'ifindex').read_text()
+        right_index = (right / 'ifindex').read_text()
+        assert (left / 'iflink').read_text() == right_index
+        assert (right / 'iflink').read_text() == left_index
+        assert (left / 'broadcast').read_text() == 'ff:ff:ff:ff:ff:ff\n'
+        assert (left / 'operstate').read_text() == 'down\n'
+        ip('link', 'set', 'left', 'up')
+        assert (left / 'operstate').read_text() == 'lowerlayerdown\n'
+        assert (left / 'carrier').read_text() == '0\n'
+        ip('link', 'set', 'right', 'up')
+        for port in (left, right):
+            assert (port / 'operstate').read_text() == 'up\n'
+            assert (port / 'carrier').read_text() == '1\n'
+        ip('link', 'set', 'right', 'down')
+        assert (left / 'operstate').read_text() == 'lowerlayerdown\n'
+        mtu = os.open(left / 'mtu', os.O_RDONLY)
+        old_inode = os.fstat(mtu).st_ino
+        ip('link', 'set', 'left', 'mtu', '1400')
+        assert os.pread(mtu, 64, 0) == b'1400\n'
+        # Swap names without an intermediate sysfs observation.
+        ip('link', 'set', 'left', 'name', 'swap')
+        ip('link', 'set', 'right', 'name', 'left')
+        ip('link', 'set', 'swap', 'name', 'right')
+        assert (right / 'ifindex').read_text() == left_index
+        assert (right / 'mtu').stat().st_ino == old_inode
+        assert os.pread(mtu, 64, 0) == b'1400\n'
+        assert os.readlink(right) == '../../devices/virtual/net/right'
+        ip('link', 'delete', 'right')
+        assert sorted(os.listdir(net)) == ['lo']
+        denied(lambda: os.pread(mtu, 64, 0), errno.ENODEV)
+        assert os.fstat(mtu).st_ino == old_inode
+        ip('link', 'add', 'right', 'type', 'veth', 'peer', 'name', 'left')
+        assert (right / 'ifindex').read_text() != left_index
+        denied(lambda: os.pread(mtu, 64, 0), errno.ENODEV)
+        os.close(mtu)
+        ip('link', 'delete', 'right')
+        assert sorted(os.listdir(net)) == ['lo']
+        print('PASS sysfs veth creation, peers, live attributes, rename swaps and retired descriptors', flush=True)
+
         context = call(430, 'sysfs', 1)
         retained = os.open(lo / 'flags', os.O_RDONLY)
         link_up()
@@ -135,6 +210,23 @@ def guest():
         assert (b / 'class/net/lo/flags').read_text() == '0x8\n'
         assert os.pread(retained, 64, 0) == b'0x9\n'
         call(268, first, 0x40000000)
+        ip('link', 'add', 'left', 'type', 'veth', 'peer', 'name', 'right')
+        moving = os.open(net / 'right/ifindex', os.O_RDONLY)
+        index = int(os.pread(moving, 64, 0))
+        move_link(index, second)
+        assert sorted(os.listdir(net)) == ['left', 'lo']
+        assert int((b / 'class/net/right/ifindex').read_text()) == index
+        denied(lambda: os.pread(moving, 64, 0), errno.ENODEV)
+        call(268, second, 0x40000000)
+        move_link(index, first)
+        assert sorted(os.listdir(b / 'class/net')) == ['lo']
+        assert int((net / 'right/ifindex').read_text()) == index
+        denied(lambda: os.pread(moving, 64, 0), errno.ENODEV)
+        os.close(moving)
+        call(268, first, 0x40000000)
+        ip('link', 'delete', 'left')
+        assert sorted(os.listdir(net)) == ['lo']
+        print('PASS sysfs namespace moves retire old controls even when the interface returns', flush=True)
         call(40, a, alias, 0, 4096, 0)
         bound = root / 'bound-flags'
         bound.touch()
@@ -227,6 +319,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build', type=Path)
     parser.add_argument('store')
+    parser.add_argument('--base', action='store_true')
     args = parser.parse_args()
     from test_oci_services import Suite
     suite = Suite(args.build, args.build)
@@ -234,6 +327,9 @@ def main():
     cpu_possible = suite.command(['cat', '/sys/devices/system/cpu/possible'], quiet=True)
     prefix = [suite.runner, '--store', args.store, '--user', '0:0',
               '--env', 'MD_TEST_CPU_POSSIBLE=' + cpu_possible]
+    if args.base:
+        prefix += ['--env', 'SHROOT_MACHINE_ENTRY=0']
+    suite.report['entry'] = 'base' if args.base else 'default'
     try:
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/test.py')
         suite.command(prefix + ['--', '/bin/mkdir', target])

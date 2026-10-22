@@ -17,7 +17,19 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-struct proc_policy { unsigned hidepid,pidonly; uint32_t gid; };
+struct proc_policy { unsigned hidepid,pidonly; uint32_t gid; int pressure; };
+static const struct { const char *name; int directory; } kernel_nodes[]={
+    {"sysrq-trigger",0},{"kcore",0},{"kmsg",0},{"keys",0},{"asound",1},{"kallsyms",0}
+};
+const char *md_procfs_static_link(int fd) {
+    struct stat pinned, named;
+    if (fstat(fd,&pinned) || !S_ISLNK(pinned.st_mode)) return NULL;
+    const char *names[]={"/proc/self","/proc/thread-self"};
+    for (size_t i=0;i<sizeof(names)/sizeof(*names);++i)
+        if (!lstat(names[i],&named) && pinned.st_dev==named.st_dev && pinned.st_ino==named.st_ino)
+            return names[i];
+    return NULL;
+}
 static const struct md_provider_tree_ops tree_ops={.filesystem=PROC_SUPER_MAGIC,.release=free};
 static const struct proc_policy *policy(const struct md_view_mount *mount) {
     return md_provider_tree_context(mount->provider,&tree_ops);
@@ -64,6 +76,24 @@ int md_procfs_options(const struct md_view_mount *mount,const struct md_identity
     int n=snprintf(out,size,"%s%s%s",gid,hide,p->pidonly ? ",subset=pid" : "");
     return n<0 || (size_t)n>=size ? -ENAMETOOLONG : 0;
 }
+int md_procfs_pressure_probe(int root) {
+    const char *paths[]={"pressure/cpu","pressure/memory","pressure/io"};
+    for (size_t i=0;i<sizeof(paths)/sizeof(*paths);++i) {
+        int fd=openat(root,paths[i],O_RDONLY|O_CLOEXEC);
+        int error=fd<0 ? errno : 0;
+        if (fd>=0) {
+            char byte;
+            ssize_t size;
+            do size=read(fd,&byte,1); while (size<0 && errno==EINTR);
+            error=size<0 ? errno : !size ? EIO : 0;
+            close(fd);
+        }
+        if (error==ENOENT || error==EACCES || error==EPERM
+                || error==EOPNOTSUPP || error==ENOSYS) return 0;
+        if (error) return -error;
+    }
+    return 1;
+}
 struct md_provider_tree *md_procfs_new(int parent,const char *text,const struct md_identity *id) {
     struct proc_policy *p=malloc(sizeof(*p));
     if (!p) return NULL;
@@ -77,6 +107,11 @@ struct md_provider_tree *md_procfs_new(int parent,const char *text,const struct 
     }
     int lower=open("/proc",O_PATH|O_DIRECTORY|O_CLOEXEC);
     if (lower<0) { error=errno; free(p); errno=error; return NULL; }
+    /* Admit the optional PSI interface as a whole, under the executor's real
+     * access policy. Bind/namespace copies retain this immutable snapshot;
+     * neither lookup nor directory enumeration reprobes the host. */
+    p->pressure=md_procfs_pressure_probe(lower);
+    if (p->pressure<0) { error=-p->pressure; close(lower); free(p); errno=error; return NULL; }
     struct md_provider_tree *tree=md_provider_tree_new(parent,lower,NULL,0,&tree_ops,p);
     error=tree ? 0 : errno;
     close(lower);
@@ -90,9 +125,20 @@ struct md_provider_tree *md_procfs_new(int parent,const char *text,const struct 
         if (fd<0) error=errno; else close(fd);
     }
     if (!error && mkdirat(root,"sys/user",0755)) error=errno;
-    if (!error) {
-        int fd=openat(root,"sys/user/max_user_namespaces",O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600);
+    const char *files[]={"sys/user/max_user_namespaces","devices"};
+    for (size_t i=0;!error && i<sizeof(files)/sizeof(*files);++i) {
+        int fd=openat(root,files[i],O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600);
         if (fd<0) error=errno; else close(fd);
+    }
+    /* Host-global nodes have inert, inaccessible private attachment points.
+     * Container runtimes may open O_PATH before covering them with a mount. */
+    for (size_t i=0;!error && i<sizeof(kernel_nodes)/sizeof(*kernel_nodes);++i) {
+        if (kernel_nodes[i].directory) {
+            if (mkdirat(root,kernel_nodes[i].name,0700)) error=errno;
+        } else {
+            int fd=openat(root,kernel_nodes[i].name,O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0000);
+            if (fd<0) error=errno; else close(fd);
+        }
     }
     if (error) { md_provider_tree_release(tree); errno=error; return NULL; }
     return tree;
@@ -123,6 +169,28 @@ static pid_t visible(const struct md_view_mount *mount,pid_t native) {
     struct md_pid_identity *id=md_pid_namespace_find(mount->pid_namespace,native);
     pid_t result=md_pid_identity_number(id,mount->pid_namespace);
     md_pid_identity_release(id); return result;
+}
+int md_procfs_guest_path(const struct md_view_mount *mount,int fd,char *out,size_t size) {
+    char path[PATH_MAX];
+    int error=md_procfs_path(mount,fd,path,sizeof(path));
+    if (error) return error;
+    if (strncmp(path,"/proc",5) || (path[5] && path[5]!='/')) return -EXDEV;
+    const char *relative=path[5] ? path+5 : "/", *tail;
+    pid_t native=decimal(relative+1,&tail);
+    int length;
+    if (!native || (*tail && *tail!='/')) length=snprintf(out,size,"%s",relative);
+    else {
+        pid_t pid=visible(mount,native);
+        if (!pid) return -ENOENT;
+        const char *end;
+        pid_t thread=!strncmp(tail,"/task/",6) ? decimal(tail+6,&end) : 0;
+        if (thread && (!*end || *end=='/')) {
+            thread=visible(mount,thread);
+            if (!thread) return -ENOENT;
+            length=snprintf(out,size,"/%d/task/%d%s",pid,thread,end);
+        } else length=snprintf(out,size,"/%d%s",pid,tail);
+    }
+    return length<0 || (size_t)length>=size ? -ERANGE : 0;
 }
 static int inspect(struct md_filesystem *fs,pid_t native) {
     if (!fs->actor || !fs->store->identity) return 0;
@@ -213,30 +281,58 @@ static int control(const char *path,const char *name) {
          * whole suffix would lose openat2's traversal boundary. */
         if (process_directory(parent)) {
             if (!strcmp(last,"/net")) return !strcmp(name,"tcp") || !strcmp(name,"tcp6")
-                || !strcmp(name,"udp") || !strcmp(name,"udp6");
+                || !strcmp(name,"udp") || !strcmp(name,"udp6") || !strcmp(name,"if_inet6");
             return strcmp(name,".") && strcmp(name,"..");
         }
     }
-    return !strcmp(path,"/proc/sys/kernel") || !strcmp(path,"/proc/sys/user")
-        || !strcmp(path,"/proc/sys/fs/inotify") || !strcmp(path,"/proc/sys/net/bridge")
-        || (!strcmp(path,"/proc/sys/net/ipv4") && strcmp(name,"conf"))
-        || (!strcmp(path,"/proc") && !strcmp(name,"cgroups"));
+    if (!strncmp(path,"/proc/sys/",10)) {
+        /* Only virtual controls cross the adapter boundary. Ordinary sysctl
+         * directories and files must retain the selected proc mount. */
+        char child[PATH_MAX];
+        int n=snprintf(child,sizeof(child),"%s/%s",path,name);
+        return n>0 && (size_t)n<sizeof(child)
+            && md_proc_path_for(child,0,0).kind!=MD_PROC_NONE;
+    }
+    return !strcmp(path,"/proc") && (!strcmp(name,"cgroups") || !strcmp(name,"devices"));
 }
 static int kernel_global(const char *name) {
     /* A mounted guest proc has no host reboot, raw kernel memory, kernel log,
      * kernel symbols, ALSA hardware or global key inventory provider.
      * Keep lookup and enumeration consistent;
      * never turn unrelated native permission failures into missing files. */
-    return !strcmp(name,"sysrq-trigger") || !strcmp(name,"kcore")
-        || !strcmp(name,"kmsg") || !strcmp(name,"keys") || !strcmp(name,"asound")
-        || !strcmp(name,"kallsyms");
+    for (size_t i=0;i<sizeof(kernel_nodes)/sizeof(*kernel_nodes);++i)
+        if (!strcmp(name,kernel_nodes[i].name)) return 1;
+    return 0;
 }
-static int omitted(const struct proc_policy *p,const char *name) {
-    return kernel_global(name) || (p && p->pidonly && !decimal(name,NULL)
+int md_procfs_masked(const char *path) {
+    return !strncmp(path,"/proc/",6) && kernel_global(path+6);
+}
+static int omitted(const struct md_view_mount *mount,const struct proc_policy *p,const char *name) {
+    return (!mount->provider && kernel_global(name)) || (p && !p->pressure && !strcmp(name,"pressure"))
+        || (p && p->pidonly && !decimal(name,NULL)
         && strcmp(name,".") && strcmp(name,"..") && strcmp(name,"self") && strcmp(name,"thread-self"));
 }
 static const char network_conf[]="/proc/sys/net/ipv4/conf";
 static int network_directory(struct md_filesystem *fs,const char *path) {
+    const char *last=strrchr(path,'/');
+    if (last && !strcmp(last,"/net") && fs->actor) {
+        char table[PATH_MAX];
+        int size=snprintf(table,sizeof(table),"%s/if_inet6",path);
+        if (size>0 && (size_t)size<sizeof(table)) {
+            struct md_proc_path ref=md_proc_path_for(table,fs->actor->tid,fs->actor->tgid);
+            enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
+            if (kind==MD_PROC_NET_IF_INET6) {
+                if (ref.process==fs->actor->tid || ref.process==fs->actor->tgid)
+                    return md_network_namespace_managed(fs->actor->network) ? 4 : 0;
+                struct md_task_snapshot target;
+                if (!md_task_registry_read(fs->tasks,ref.process,0,&target)) {
+                    int managed=md_network_namespace_managed(target.network);
+                    md_task_snapshot_release(&target);
+                    return managed ? 4 : 0;
+                }
+            }
+        }
+    }
     if (!fs->actor || !md_network_namespace_managed(fs->actor->network)) return 0;
     if (!strcmp(path,"/proc/sys/net/bridge")) return 3;
     size_t length=sizeof(network_conf)-1;
@@ -246,6 +342,7 @@ static int network_entry(struct md_filesystem *fs,const char *path,const char *n
     if (!strcmp(name,".") || !strcmp(name,"..")) return 1;
     int directory=network_directory(fs,path);
     if (!directory) return 1;
+    if (directory==4) return strcmp(name,"if_inet6")!=0;
     if (directory==3) return !strcmp(name,"bridge-nf-call-iptables");
     uint64_t scope;
     const char *interface=directory==1 ? name : path+sizeof(network_conf);
@@ -287,11 +384,12 @@ static int magic_link(enum md_proc_kind kind) {
     return kind==MD_PROC_FD || kind==MD_PROC_ROOT || kind==MD_PROC_CWD || kind==MD_PROC_EXE
         || (kind>=MD_PROC_NS_USER && kind<=MD_PROC_NS_CGROUP) || kind==MD_PROC_NS_UNSUPPORTED;
 }
-int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
+int md_procfs_step(struct md_filesystem *fs,struct md_mount_namespace *view,struct md_view_mount *mount,int fd,
         const char *name,const char *tail,int follow_final,uint64_t resolve) {
     char path[PATH_MAX], mapped[32];
     int r=md_procfs_path(mount,fd,path,sizeof(path));
     if (r) return r;
+    if (md_procfs_masked(path)) return -EACCES;
     if (network_directory(fs,path)) {
         r=network_entry(fs,path,name);
         if (r<=0) return r ? r : -ENOENT;
@@ -313,7 +411,7 @@ int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
     pid_t group=directory(path);
     int no_links=md_view_nosymfollow(mount) || (resolve&RESOLVE_NO_SYMLINKS);
     const struct proc_policy *p=policy(mount);
-    if (group==-1 && omitted(p,name)) return -ENOENT;
+    if (group==-1 && omitted(mount,p,name)) return -ENOENT;
     if (group==-1 && (!strcmp(name,"self") || !strcmp(name,"thread-self"))) {
         if (follow_final || *tail) {
             if (no_links) return -ELOOP;
@@ -344,6 +442,12 @@ int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
          * descriptions can retain the selected mount's live policy. */
         struct md_proc_path selected=md_proc_path_for(boundary->path,0,0);
         enum md_proc_kind kind=selected.kind==MD_PROC_FOREIGN ? selected.foreign_kind : selected.kind;
+        if (md_proc_file_task((enum md_proc_file_kind)(kind-MD_PROC_UID_MAP))) {
+            if (*tail) return -ENOTDIR;
+            md_fs_anchor_release(boundary->proc_entry); boundary->proc_entry=NULL;
+            int error=md_view_anchor_child(fs,view,mount,fd,name,&boundary->proc_entry);
+            return error ? error : -EREMOTE;
+        }
         if (no_links || (resolve&RESOLVE_NO_MAGICLINKS)) {
             if (magic_link(kind) && (follow_final || (selected.tail && *selected.tail))) return -ELOOP;
             /* Unclassified task-affine suffixes cannot discard the selected
@@ -353,6 +457,10 @@ int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
         int sysctl=md_proc_file_sysctl((enum md_proc_file_kind)(kind-MD_PROC_UID_MAP));
         int link_inode=magic_link(kind) && !follow_final && selected.tail && !*selected.tail;
         boundary->proc_link_mount=link_inode ? mount->id : 0;
+        /* Namespace links exist in the guest even when CONFIG_*_NS is absent
+         * on Android. Their no-follow metadata belongs to the same provider
+         * as their target, never to a coincidentally present host proc link. */
+        if (kind>=MD_PROC_NS_USER && kind<=MD_PROC_NS_CGROUP) return -EREMOTE;
         if (link_inode && boundary->proc_link_descriptor) {
             int captured=(int)(boundary->proc_link_descriptor-1);
             char actual[PATH_MAX];
@@ -364,7 +472,7 @@ int md_procfs_step(struct md_filesystem *fs,struct md_view_mount *mount,int fd,
             int copy=fcntl(captured,F_DUPFD_CLOEXEC,3);
             return copy<0 ? -errno : copy;
         }
-        if (!link_inode && !sysctl && kind!=MD_PROC_MAX_USER_NAMESPACES
+        if (!link_inode && !sysctl && kind!=MD_PROC_MAX_USER_NAMESPACES && kind!=MD_PROC_DEVICES
                 && (!fs->actor || !md_network_namespace_managed(fs->actor->network)
                 || !md_proc_network_sysctl(kind))) return -EREMOTE;
     }
@@ -405,8 +513,21 @@ ssize_t md_procfs_getdents(struct md_filesystem *fs,const struct md_view_mount *
     char path[PATH_MAX];
     int error=md_procfs_path(mount,fd,path,sizeof(path));
     if (error) return error;
+    if (md_procfs_masked(path)) return -EACCES;
     error=md_procfs_check(fs,mount,path,1);
     if (error) return error;
+    struct md_proc_path ref=md_proc_path_for(path,0,0);
+    enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
+    struct md_task_credentials task;
+    if (kind==MD_PROC_NS_DIRECTORY && !md_task_registry_credentials(fs->tasks,ref.process,&task)) {
+        struct stat st;
+        if (fstat(fd,&st)) return -errno;
+        int64_t position=lseek(fd,0,SEEK_CUR);
+        if (position<0) return -errno;
+        ssize_t size=md_proc_file_namespace_entries(st.st_ino,&position,data,capacity);
+        if (size>=0 && lseek(fd,position,SEEK_SET)<0) return -errno;
+        return size;
+    }
     const struct proc_policy *p=policy(mount);
     pid_t group=directory(path);
     int net=network_directory(fs,path);
@@ -469,7 +590,7 @@ ssize_t md_procfs_getdents(struct md_filesystem *fs,const struct md_view_mount *
             }
             int allowed=net ? network_entry(fs,path,name) : native && number ? permitted(fs,p,native,2) : 1;
             if (allowed<0) return allowed;
-            if (allowed && (!native || number) && !(group==-1 && omitted(p,name))) {
+            if (allowed && (!native || number) && !(group==-1 && omitted(mount,p,name))) {
                 size_t record=md_directory_record_write((char *)data+written,capacity-written,
                     name,strlen(name),entry.inode,entry.next,entry.type);
                 if (!record) {

@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <linux/rtnetlink.h>
+#include <linux/fib_rules.h>
 #include <linux/veth.h>
 #include <net/if.h>
 #include <netinet/in.h>
@@ -40,8 +41,10 @@ static int ack(struct md_network_namespace *n,const struct md_identity *id,struc
     } else assert(out->nlmsg_flags&NLM_F_CAPPED);
     return error;
 }
-static int resolve(void *context,int fd,struct md_network_namespace **out) {
-    if (fd!=7) return -EBADF;
+static int resolve(void *context,struct md_network_target_reference ref,struct md_network_namespace **out) {
+    if (ref.kind==MD_NETWORK_TARGET_FD) { if (ref.value!=7) return -EBADF; }
+    else if (ref.kind==MD_NETWORK_TARGET_PID) { if (ref.value!=42) return -ESRCH; }
+    else return -EINVAL;
     *out=md_network_namespace_retain(context); return 0;
 }
 static int reject_response(void *context,const void *data,size_t size) {
@@ -100,7 +103,7 @@ void test_network_route(void) {
     h=request(&p,RTM_NEWLINK,0);
     ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_index=endpoint;
     attr(h,IFLA_IFNAME,"eth0",4); unsigned fd=7;
-    attr(h,IFLA_NET_NS_FD,&fd,sizeof(fd));
+    struct rtattr *selection=attr(h,IFLA_NET_NS_FD,&fd,sizeof(fd));
     struct md_network_target target={.context=child,.resolve=resolve};
     assert(md_network_route(n,&root,h,h->nlmsg_len,91,0,&target,rejected.bytes,sizeof(rejected),&refusal)==-EAGAIN);
     assert(md_network_interface_find(n,endpoint,NULL) && !md_network_interface_find(child,endpoint,NULL));
@@ -117,6 +120,16 @@ void test_network_route(void) {
     assert(current_policy.st_ino!=original_policy.st_ino);
     assert(reopened.ops->read(reopened.context,&actor,value,sizeof(value),0)==2 && !memcmp(value,"0\n",2));
     md_control_file_release(reopened); md_control_file_release(sysctl);
+    assert(!ack(n,&root,h,&target));
+    assert(!md_network_interface_move(child,endpoint,n,"veth-guest"));
+    selection->rta_type=IFLA_NET_NS_PID;
+    unsigned pid=999; memcpy(RTA_DATA(selection),&pid,sizeof(pid));
+    assert(ack(n,&root,h,&target)==-ESRCH && md_network_interface_find(n,endpoint,NULL));
+    pid=42; memcpy(RTA_DATA(selection),&pid,sizeof(pid));
+    unsigned prior=h->nlmsg_len;
+    attr(h,IFLA_NET_NS_FD,&fd,sizeof(fd));
+    assert(ack(n,&root,h,&target)==-EINVAL && md_network_interface_find(n,endpoint,NULL));
+    h->nlmsg_len=prior;
     assert(!ack(n,&root,h,&target));
     h=request(&p,RTM_NEWLINK,0);
     struct ifinfomsg *link=NLMSG_DATA(h);
@@ -148,6 +161,31 @@ void test_network_route(void) {
         else { assert(item->nlmsg_type==NLMSG_DONE); ++done; }
     }
     assert(!length && links==4 && done==1 && bridges==1);
+    h=request(&p,RTM_GETRULE,NLM_F_DUMP);
+    h->nlmsg_len=NLMSG_LENGTH(sizeof(struct fib_rule_hdr));
+    length=md_network_route(n,&user,h,h->nlmsg_len,91,MD_NETWORK_ROUTE_STRICT,NULL,reply.bytes,sizeof(reply),NULL);
+    unsigned rules=0;
+    for (struct nlmsghdr *item=&reply.align;NLMSG_OK(item,length);item=NLMSG_NEXT(item,length)) {
+        if (item->nlmsg_type==NLMSG_DONE) continue;
+        assert(item->nlmsg_type==RTM_NEWRULE);
+        const struct fib_rule_hdr *rule=NLMSG_DATA(item);
+        int left=item->nlmsg_len-NLMSG_LENGTH(sizeof(*rule)),protocols=0;
+        for (const struct rtattr *a=(const void *)(rule+1);RTA_OK(a,left);a=RTA_NEXT(a,left))
+            if (a->rta_type==FRA_PROTOCOL) {
+                assert(RTA_PAYLOAD(a)==1 && *(const unsigned char *)RTA_DATA(a)==RTPROT_KERNEL);
+                ++protocols;
+            }
+        assert(!left && protocols==1); ++rules;
+    }
+    assert(!length && rules==3);
+    h=request(&p,RTM_GETNEXTHOP,NLM_F_DUMP);
+    h->nlmsg_len=NLMSG_LENGTH(8); /* struct nhmsg */
+    length=md_network_route(n,&user,h,h->nlmsg_len,91,MD_NETWORK_ROUTE_STRICT,NULL,reply.bytes,sizeof(reply),NULL);
+    assert(length==(long)NLMSG_LENGTH(sizeof(int)) && reply.align.nlmsg_type==NLMSG_DONE);
+    assert(*(int *)NLMSG_DATA(&reply.align)==0);
+    h=request(&p,RTM_NEWNEXTHOP,0);
+    h->nlmsg_len=NLMSG_LENGTH(8);
+    assert(ack(n,&root,h,NULL)==-EOPNOTSUPP);
     for (unsigned bad=0;bad<4;++bad) {
         h=request(&p,RTM_GETLINK,NLM_F_DUMP);
         struct ifinfomsg *body=NLMSG_DATA(h);
@@ -175,11 +213,27 @@ void test_network_route(void) {
         length=md_network_route(n,&user,h,h->nlmsg_len,91,0,NULL,reply.bytes,sizeof(reply),NULL);
         assert(length>0);
         done=0;
+        unsigned addresses=0;
         for (struct nlmsghdr *item=(void *)reply.bytes;NLMSG_OK(item,length);item=NLMSG_NEXT(item,length)) {
             assert(item->nlmsg_type!=NLMSG_ERROR && item->nlmsg_seq==71);
             if (item->nlmsg_type==NLMSG_DONE) ++done;
+            if (item->nlmsg_type==RTM_NEWADDR) {
+                const struct ifaddrmsg *address=NLMSG_DATA(item);
+                int left=IFA_PAYLOAD(item),found=0;
+                for (const struct rtattr *a=IFA_RTA(address);RTA_OK(a,left);a=RTA_NEXT(a,left))
+                    if (a->rta_type==IFA_FLAGS) {
+                        uint32_t value;
+                        assert(RTA_PAYLOAD(a)==sizeof(value));
+                        memcpy(&value,RTA_DATA(a),sizeof(value));
+                        assert(value==IFA_F_PERMANENT && value==address->ifa_flags);
+                        ++found;
+                    }
+                assert(!left && found==1);
+                ++addresses;
+            }
         }
         assert(!length && done==1);
+        if (queries[q]==RTM_GETADDR) assert(addresses==2);
     }
     h=request(&p,RTM_NEWLINK,NLM_F_CREATE|NLM_F_EXCL);
     info=attr(h,IFLA_LINKINFO,NULL,0);
@@ -190,7 +244,7 @@ void test_network_route(void) {
     attr(h,IFLA_INFO_KIND,"veth",5);
     peer_info->rta_len=(char *)h+h->nlmsg_len-(char *)peer_info;
     attr(h,IFLA_IFNAME,"eth1",5);
-    attr(h,IFLA_NET_NS_FD,&fd,sizeof(fd));
+    selection=attr(h,IFLA_NET_NS_FD,&fd,sizeof(fd));
     uint32_t peer_mtu=1400;
     const unsigned char peer_mac[6]={2,1,2,3,4,5};
     attr(h,IFLA_MTU,&peer_mtu,sizeof(peer_mtu));
@@ -204,6 +258,10 @@ void test_network_route(void) {
     assert(md_network_route(n,&root,h,h->nlmsg_len,91,0,&target,rejected.bytes,sizeof(rejected),&refusal)==-EAGAIN);
     assert(n->count==before && child->count==child_before && n->fabric->next_index==original_index);
     assert(!md_network_interface_find(child,0,"eth1"));
+    selection->rta_type=IFLA_NET_NS_PID;
+    pid=999; memcpy(RTA_DATA(selection),&pid,sizeof(pid));
+    assert(ack(n,&root,h,&target)==-ESRCH && n->count==before && child->count==child_before);
+    pid=42; memcpy(RTA_DATA(selection),&pid,sizeof(pid));
     assert(!ack(n,&root,h,&target));
     struct md_network_interface *generated=md_network_interface_find(n,0,"veth0");
     struct md_network_interface *direct=md_network_interface_find(child,0,"eth1");
@@ -218,12 +276,15 @@ void test_network_route(void) {
     struct rtattr *prot=attr(h,IFLA_PROTINFO|NLA_F_NESTED,NULL,0);
     unsigned char enabled=1;
     struct rtattr *mode=attr(h,IFLA_BRPORT_MODE,&enabled,1);
+    attr(h,IFLA_BRPORT_ISOLATED,&enabled,1);
     prot->rta_len=(char *)h+h->nlmsg_len-(char *)prot;
     assert(ack(n,&user,h,NULL)==-EPERM);
     assert(md_network_route(n,&root,h,h->nlmsg_len,91,0,NULL,rejected.bytes,sizeof(rejected),&refusal)==-EAGAIN);
     assert(!md_network_interface_find(n,generated_index,NULL)->hairpin);
+    assert(!md_network_interface_find(n,generated_index,NULL)->isolated);
     assert(!ack(n,&root,h,NULL));
     assert(md_network_interface_find(n,generated_index,NULL)->hairpin);
+    assert(md_network_interface_find(n,generated_index,NULL)->isolated);
     h=request(&p,RTM_GETLINK,NLM_F_DUMP);
     ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_family=AF_BRIDGE;
     length=md_network_route(n,&user,h,h->nlmsg_len,91,0,NULL,reply.bytes,sizeof(reply),NULL);
@@ -239,6 +300,10 @@ void test_network_route(void) {
                 const struct rtattr *mode=RTA_DATA(a);
                 assert(mode->rta_type==IFLA_BRPORT_MODE && RTA_PAYLOAD(mode)==1);
                 assert(*(const unsigned char *)RTA_DATA(mode)==1); ++found;
+                int nested=RTA_PAYLOAD(a);
+                mode=RTA_NEXT(mode,nested);
+                assert(RTA_OK(mode,nested) && mode->rta_type==IFLA_BRPORT_ISOLATED && RTA_PAYLOAD(mode)==1);
+                assert(*(const unsigned char *)RTA_DATA(mode)==1);
             }
         assert(found==1); ++links;
     }
@@ -254,6 +319,9 @@ void test_network_route(void) {
     *(unsigned char *)RTA_DATA(mode)=2;
     assert(ack(n,&root,h,NULL)==-EINVAL);
     assert(md_network_interface_find(n,generated_index,NULL)->hairpin);
+    mode->rta_type=IFLA_BRPORT_ISOLATED;
+    assert(ack(n,&root,h,NULL)==-EINVAL);
+    assert(md_network_interface_find(n,generated_index,NULL)->isolated);
     direct=md_network_interface_find(child,0,"eth1"); assert(direct);
     direct->ipv4=htonl(0x0a590002); direct->prefix=24; direct->info.flags|=IFF_UP;
     h=request(&p,RTM_NEWROUTE,NLM_F_CREATE|NLM_F_EXCL);

@@ -82,6 +82,13 @@ existing clone/identity/exit events, task-affine ABI copies and typed proc files
 Its user-namespace accounting follows Linux 5.15 semantics and introduces no new
 host syscall, kernel feature or shared-startup probe. `test_nproc.py` covers
 native and PID-scoped guest views, protected copies, quota/reaping and seccomp.
+The same owner virtualizes `RLIMIT_NOFILE`, applying native soft-limit changes
+with baseline `prlimit64` while retaining the inherited executor hard ceiling.
+Foreign-limit reads may be denied by Android SELinux and are not required.
+Native write failures propagate without publishing the logical update. A
+read-only guest `fs.nr_open` describes the logical ceiling, not host capacity.
+The fixture also covers lower/re-raise, foreign protected targets, exec/thread
+inheritance, FD exhaustion and received-rights truncation in both entry modes.
 Native real-time scheduling and other host resource ceilings remain authoritative;
 the packaged RTKit fixture records scheduler `EPERM` rather than masking it.
 
@@ -575,6 +582,18 @@ they do not open privileged host netlink sockets or require newer kernel APIs.
 ancillary metadata, membership and unsupported operations. Default systemd boot
 and the Podman probe exercise stock NetworkManager and netavark clients.
 
+Classic socket filters use baseline `SO_ATTACH_FILTER`, `SO_GET_FILTER`,
+`SO_DETACH_FILTER` and `SO_LOCK_FILTER` on private AF_UNIX queues. `socket_filter`
+validates and translates their payload offsets once, retaining kernel execution
+and permission errors. Packet sockets in `network_ethernet` use the same queues
+and virtual interface model; no host AF_PACKET or CAP_NET_RAW is acquired.
+`PACKET_IGNORE_OUTGOING` is a guest setting (introduced upstream before 5.15),
+not a newer host requirement. `test_socket_filter.c`, `test_netlink_filter.py`
+and `test_network_ethernet.{c,py}` exercise admission, filtering, descriptor
+lifetime, virtual delivery and negative namespace/capability cases. Queue buffer
+force options retain the host kernel's capability checks, including EPERM under
+shell identity; an emulated guest capability cannot enlarge the host limit.
+
 Namespace-handle bind mounts use retained typed providers, baseline sealed
 memfd carriers, O_PATH and descriptor duplication. They do not call host mount
 or setns and introduce no post-5.15 dependency. Carrier reads are never reopened
@@ -592,11 +611,22 @@ and `fsopen` capture under UID 2000.
 Logical cgroup-device BPF uses the userspace ABI available before 5.15, sealed
 memfd carriers and the existing control-FD delivery/ownership contract. It never
 calls host bpf or requires CAP_BPF, native cgroup hooks, BTF or a newer kernel.
-`cgroup_program`, `namespace_bpf` and `fs_bpf` own this permissive bookkeeping;
-unsupported commands/features fail explicitly rather than falling through to
+`cgroup_program`, `bpf_map`, `bpf_handle`, `namespace_bpf` and `fs_bpf` own this permissive bookkeeping.
+Hash-map CRUD, key iteration, map-ID lookup and program-held map references use
+the pre-5.15 BPF ABI. Bounded map memory belongs to the launch's cgroup registry;
+descriptor duplication and SCM_RIGHTS use the same sealed control carriers as
+programs. Map lookups and stack instructions are admitted as program metadata,
+not executed in Android or advertised as device-policy enforcement.
+Instruction queries retain the admitted bytecode with map IDs rather than host
+pointers; variable-length replies copy only the requested prefix. Metadata-only
+queries do not transfer instructions. This uses the pre-5.15 program-info ABI,
+not host JIT or BTF support.
+Unsupported commands/features fail explicitly rather than falling through to
 Android. `test_cgroup_bpf.py` covers program/attachment lifetime, protected exec,
 SCM_RIGHTS, readonly policy, failed FD publication, invalid attributes and exact
-warmed descriptor cleanup under UID 2000.
+warmed descriptor cleanup under UID 2000, plus map capacity/flags, key iteration,
+bad-pointer returns, shared descriptor identity, program-held map lifetime and
+two-stage instruction queries with short buffers, short ABI and invalid pointers.
 
 The descriptor mount API (`fsopen`, `fsconfig`, `fsmount`, `move_mount`,
 `mount_setattr`) follows
@@ -672,6 +702,7 @@ retain native errors; arbitrary new guest syscalls are not runtime requirements.
 | --- | --- | --- | --- |
 | `DMA_BUF_IOCTL_EXPORT_SYNC_FILE` / `DMA_BUF_IOCTL_IMPORT_SYNC_FILE` | 6.0 | Graphics DMA-BUF fence bridge; `render_device.c` probes allocation/export/poll/import once for a Turnip-enabled launch. `test_render.py` checks admission and typed descriptor behavior; `test_egl_dmabuf.c` and `test_egl_gbm.c` verify GPU completion and exact pixels. Hosted-runtime DMA-BUF tests cover consumption. | A failed probe leaves the optional discovery node absent; the graphics importer rejects unsupported synchronization. Existing SHM paths remain independent. No Shroot startup requirement or raised 5.15 baseline. Kernel version alone does not admit the node. |
 | `PIDFD_THREAD` | 6.9 | `task_descriptor.c` owns descriptor capture; `task_lifetime.c` owns exact-thread liveness for restricted proc roots. | Try flags zero for the same task. A non-leader rejected with EINVAL is reported as ENOTSUP and uses task-affine SCM_RIGHTS export. Liveness retains `/proc/<tid>/stat` instead: a flags-zero pidfd observes group death, not exact-thread death. Never substitute the leader's file table. |
+| `pidfs` filesystem identity | 6.9 | `fd_filesystem.c` supplies statfs metadata for an actual retained pidfd when Android denies native fstatfs. It identifies the kernel object and compares its superblock with anon_inodefs; it does not grant process access. `test_kernel_baseline.c` compares native and denial-injected results; `test_proc_root_guest.py` covers proc aliases, duplicates, peer pidfds and protected callers. | Older pidfds retain ANON_INODE_FS_MAGIC; no pidfs ioctl, release check or new startup requirement. Non-pidfd denials remain errors. |
 | `SECCOMP_IOCTL_NOTIF_SET_FLAGS` / `SECCOMP_USER_NOTIF_FD_SYNC_WAKE_UP` | 6.6 | `namespace_broker.c`: optional notification scheduling hint. | Failed ioctl leaves normal notification wakeups enabled; no permission or affinity change. Success does not guarantee CPU co-location: the scheduler still owns placement, and not every FD-install completion uses this hint. |
 | `fchmodat2` | 6.5; `AT_EMPTY_PATH` in 6.6 | `namespace.c` translates store metadata through the worker. `file_calls.c` also has a native direct-backend path. | Logical store metadata does not require this host syscall. Native passthrough retains ENOSYS/flag errors; no fake success or unconditional startup requirement. |
 | `SO_PEERPIDFD` | 6.5 | `test_proc_root_guest.py`: optional coverage of native peer-pidfd fields in logical fdinfo. | ENOPROTOOPT/EINVAL/ENOSYS skips only this optional acquisition; baseline pidfd_open and fdinfo assertions still run. This is not a runtime prerequisite. |

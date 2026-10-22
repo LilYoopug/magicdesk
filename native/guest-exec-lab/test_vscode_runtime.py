@@ -75,7 +75,7 @@ def main():
             'LIBGL_ALWAYS_SOFTWARE=1', '/opt/md-vscode/code', '--ozone-platform=x11',
             '--enable-logging=stderr', '--skip-welcome', '--skip-release-notes', '--disable-workspace-trust',
             '--password-store=basic', '--user-data-dir=' + project + '/data',
-            '--extensions-dir=' + home + '/extensions', '--extensionDevelopmentPath=' + extension, project])
+            '--extensions-dir=' + home + '/.vscode/extensions', '--extensionDevelopmentPath=' + extension, project])
         recipe = subprocess.check_output(['java', '-cp', str(args.recipes),
             'io.github.mekhontsev.magicdesk.GraphicalRecipe', 'routed', 'x11', args.store, home,
             'exec ' + program, 'mdcode'], text=True)

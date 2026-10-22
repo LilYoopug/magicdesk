@@ -114,9 +114,14 @@ int md_ipc_capsules_publish(struct md_ipc_capsules *s, const struct md_ipc_bindi
     for (unsigned i=0;!error && i<count;++i) {
         if (fds[i]<0) error=-EBADF;
         else if (origins[i]) {
-            if (md_fifo_description_is(origins[i])) anonymous=1;
+            int fifo=md_fifo_description_is(origins[i]);
+            if (fifo) anonymous=1;
             struct md_fs_anchor *anchor=md_fs_anchor_from_object(origins[i]);
-            if (anchor) {
+            /* A typed provider's placement is not its native carrier inode.
+             * Keep its exact authority in local custody, never flatten it into
+             * a portable path. FIFO descriptions have their own wire format. */
+            if (anchor && origins[i]!=md_fs_anchor_object(anchor) && !fifo) local=1;
+            else if (anchor) {
                 error=md_fs_anchor_check_fd(anchor,fds[i]);
                 if (!md_fs_anchor_portable(anchor)) local=1;
             }
@@ -236,7 +241,8 @@ int md_ipc_capsules_receive(struct md_ipc_capsules *s, const struct md_ipc_bindi
     for (unsigned i=0;!error && p.kind!=PORTABLE_TYPED && i<p.route.count;++i) {
         objects[i]=local ? md_fd_message_origins(local)[i] : md_fs_anchor_object(entries[i]);
         struct md_fs_anchor *anchor=md_fs_anchor_from_object(objects[i]);
-        if (anchor) error=md_fs_anchor_check_fd(anchor,received->fds[i]);
+        if (anchor && (objects[i]==md_fs_anchor_object(anchor) || md_fifo_description_is(objects[i])))
+            error=md_fs_anchor_check_fd(anchor,received->fds[i]);
     }
     if (!error && p.kind!=PORTABLE_TYPED) {
         error=md_received_fds_annotate(received,objects,p.route.count);

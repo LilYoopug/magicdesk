@@ -6,5 +6,5 @@ long md_descriptor_kind(int fd);
 /* Interception requirements come from the typed owner, not its proc kind. */
 long md_descriptor_duplicate(const struct md_fs *, long nr, const unsigned long *);
 long md_descriptor_pair(long nr, const unsigned long *);
-long md_descriptor_metadata(int fd, long nr, const unsigned long *);
+long md_descriptor_metadata(const struct md_fs *, int fd, long nr, const unsigned long *);
 #endif

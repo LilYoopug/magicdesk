@@ -361,14 +361,15 @@ int md_interception_install(int inherited) {
             NATIVE(read) NATIVE(write) NATIVE(readv) NATIVE(writev)
             NATIVE(pread64) NATIVE(pwrite64)
             NATIVE(futex) NATIVE(set_robust_list) NATIVE(get_robust_list)
-            /* Adapter/loader mappings use already admitted objects, not a
-             * second application operation or a new address-space turn. */
+            /* Internal mappings and descriptor-capacity queries use the
+             * native resources, not a second guest operation. */
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
-            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(gate>>32),0,11),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(gate>>32),0,13),
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
-            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)gate,0,9),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)gate,0,11),
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
             NATIVE(mmap) NATIVE(munmap) NATIVE(mremap) NATIVE(mprotect)
+            NATIVE(prlimit64)
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
             /* File mappings require their descriptor's live mount policy.
              * Anonymous non-replacing mappings and ordinary data IO stay native. */
@@ -396,16 +397,17 @@ int md_interception_install(int inherited) {
             NATIVE(clock_nanosleep) NATIVE(nanosleep)
             NATIVE(eventfd2) NATIVE(timerfd_create) NATIVE(timerfd_settime) NATIVE(timerfd_gettime)
             NATIVE(exit) NATIVE(exit_group) NATIVE(set_tid_address)
-            /* Only UID-accounted limits need adaptation; all other limits keep
+            /* Only guest-owned limits need adaptation; all other limits keep
              * their native behavior and application seccomp still takes precedence. */
-#define NPROC(n, index) \
-            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_##n,0,4), \
+#define LIMIT(n, index) \
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_##n,0,5), \
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[index])), \
-            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,RLIMIT_NPROC,0,1), \
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,RLIMIT_NPROC,1,0), \
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,RLIMIT_NOFILE,0,1), \
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_IDENTITY), \
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
-            NPROC(getrlimit,0) NPROC(setrlimit,0) NPROC(prlimit64,1)
-#undef NPROC
+            LIMIT(getrlimit,0) LIMIT(setrlimit,0) LIMIT(prlimit64,1)
+#undef LIMIT
             MD_DOMAIN_KERNEL_CALLS(NATIVE)
             /* Compare the full policy argument, not only its low kernel int. */
 #define NATIVE_ARGUMENT(n, index, value) \

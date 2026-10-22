@@ -10,6 +10,7 @@
 #include "inode_store.h"
 #include "raw.h"
 #include "task_status.h"
+#include "filesystem_ioctl.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/stat.h>
@@ -108,7 +109,8 @@ static long open_operand(const struct md_fs *fs, struct md_namespace_operand ope
          * absolute host /proc path would cross a different mount (or escape
          * the original dirfd). Keep caller-side content/credential handling,
          * but do not replace the resolved guest scope with that host scope. */
-        int resolved=out.result.proc_namespace && md_proc_regular(kind);
+        int resolved=out.result.proc_namespace && (md_proc_regular(kind)
+            || (kind>=MD_PROC_NS_USER && kind<=MD_PROC_NS_CGROUP));
         if (how->resolve && !resolved) {
             /* A retained native proc/dev dirfd is already the kernel scope.
              * Preserve that pair, including BENEATH/IN_ROOT, instead of
@@ -157,6 +159,14 @@ long md_namespace_inspect(const struct md_fs *fs, struct md_namespace_operand op
 static int copy_directory(void *target, const void *data, size_t size) {
     return (int)md_write_memory(target,data,size);
 }
+long md_namespace_fstatfs(const struct md_fs *fs,int fd,void *target) {
+    if (!fs->endpoint[0]) return RAW2(fstatfs,fd,target);
+    struct md_fs_request q={.operation=MD_FS_STATFS,.directory={fd,-1}};
+    struct md_fs_response out;
+    long r=md_namespace_request(fs,&q,&out);
+    if (r==-EXDEV) return RAW2(fstatfs,fd,target);
+    return r<0 ? r : md_write_memory(target,out.data,out.result.size);
+}
 static long descriptor_call(const struct md_fs *fs, long nr, const unsigned long *a) {
     if ((int)a[0] < 0)
         return -EBADF;
@@ -175,12 +185,7 @@ static long descriptor_call(const struct md_fs *fs, long nr, const unsigned long
     }
     struct md_fs_response out;
     struct stat st;
-    if (nr==SYS_fstatfs) {
-        struct md_fs_request q={.operation=MD_FS_STATFS,.directory={(int)a[0],-1}};
-        long r=md_namespace_request(fs,&q,&out);
-        if (r==-EXDEV) return RAW2(fstatfs,a[0],a[1]);
-        return r<0 ? r : md_write_memory((void *)a[1],out.data,out.result.size);
-    }
+    if (nr==SYS_fstatfs) return md_namespace_fstatfs(fs,(int)a[0],(void *)a[1]);
     if (nr == SYS_getdents64) {
         /* The namespace validates the descriptor and advances its cursor in
          * one operation; a preliminary metadata RPC adds no authority. */
@@ -270,8 +275,11 @@ long md_namespace_call(const struct md_fs *fs, const char *exe, long nr, const u
         if (flags<0) return flags;
         if (flags&O_PATH) return -EBADF;
         struct md_fs_request q={.operation=MD_FS_IOCTL,.directory={(int)a[0],-1},.mode=(unsigned)a[1]};
+        int opens=md_filesystem_ioctl_opens(q.mode);
+        if (opens) q.flags=(unsigned)a[2];
         struct md_fs_response out;
         long result=md_namespace_request(fs,&q,&out);
+        if (!result && opens) return md_namespace_open_result(&out.result,q.flags);
         return result==-EXDEV ? RAW3(ioctl,a[0],a[1],a[2]) : result;
     }
     if (nr == SYS_fchdir) {

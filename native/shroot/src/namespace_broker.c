@@ -70,6 +70,7 @@ struct operation {
     struct md_fs_result result;
     struct md_notification_result completion;
     struct md_fd_object *output_object;
+    struct md_fd_object *control_input;
     int control_descriptor;
     int64_t position;
     int listener, directory, undelivered, owned_open, executed, recovering;
@@ -85,6 +86,7 @@ struct md_namespace_broker {
     void (*delegate)(const struct seccomp_notif *);
     void (*recover)(pid_t,struct md_broker_completion *);
     md_control_factory control;
+    md_control_query control_query;
     int (*native_observe)(pid_t,struct md_entry_native *);
     int (*retire)(const struct md_broker_retirement *);
     struct md_resource_wakeup *wakeup;
@@ -266,6 +268,7 @@ void md_broker_completion_handler(struct md_namespace_broker *b,void (*recover)(
     b->recover=recover;
 }
 void md_broker_control_factory(struct md_namespace_broker *b,md_control_factory factory) { b->control=factory; }
+void md_broker_control_query(struct md_namespace_broker *b,md_control_query query) { b->control_query=query; }
 void md_broker_native_observer(struct md_namespace_broker *b,int (*observe)(pid_t,struct md_entry_native *)) {
     b->native_observe=observe;
 }
@@ -378,11 +381,11 @@ static int deliver_bytes(struct operation *op, uintptr_t pointer, const void *da
     return n == (ssize_t)size ? 0 : -EFAULT;
 }
 static int control_open(void *context,const struct md_control_file_ops *ops,void *data,
-        const struct md_identity *identity,int flags) {
+        const struct md_identity *identity,int flags,struct md_fs_anchor *origin) {
     struct operation *op=context;
     if (!op->owner->control) return -EOPNOTSUPP;
     if (op->output_object) return -EBUSY;
-    op->output_object=op->owner->control(ops,data,identity,flags,&op->control_descriptor);
+    op->output_object=op->owner->control(ops,data,identity,flags,origin,&op->control_descriptor);
     return op->output_object ? 0 : -errno;
 }
 static void execute(struct operation *op,
@@ -449,6 +452,7 @@ static int recycle(struct md_namespace_broker *b, struct operation *op) {
     if (op->control_descriptor>=0) close(op->control_descriptor);
     op->control_descriptor=-1;
     md_fd_object_release(op->output_object); op->output_object=NULL;
+    md_fd_object_release(op->control_input); op->control_input=NULL;
     if (op->result.open_completion.kind == MD_OPEN_PIPE) close(op->result.open_completion.control);
     op->directory = op->result.fd = -1;
     op->result.open_completion = (struct md_open_completion){0};
@@ -613,6 +617,14 @@ static int capture(struct operation *op) {
              * stream. Typed IO must keep the descriptor owner's cursor. */
             int unsupported=object && (!*origin || (op->request.operation==MD_FS_GETDENTS
                 && (md_fd_object_selectors(object)&(1U<<MD_FD_SELECTOR_PROC))));
+            if (!unsupported && !i && md_fs_anchor_virtual(*origin)) {
+                if (op->request.operation==MD_FS_FSTAT && op->owner->control_query) {
+                    int found=op->owner->control_query(object,op->request.operation,&op->request.control);
+                    if (found<0) { md_fd_object_release(object); return found; }
+                    unsupported=!found;
+                    if (found) { op->control_input=object; object=NULL; }
+                } else unsupported=1;
+            }
             md_fd_object_release(object);
             if (unsupported) return 0;
             /* The table turn authenticates the number; the retained anchor
@@ -1646,6 +1658,7 @@ void md_broker_destroy(struct md_namespace_broker *b) {
         if (md_notification_result_clear(&op->completion)) abort();
         if (op->control_descriptor>=0) close(op->control_descriptor);
         md_fd_object_release(op->output_object);
+        md_fd_object_release(op->control_input);
         if (op->directory >= 0) close(op->directory);
         if (op->result.fd >= 0) close(op->result.fd);
         if (op->result.open_completion.kind == MD_OPEN_PIPE) close(op->result.open_completion.control);

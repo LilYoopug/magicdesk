@@ -3,6 +3,7 @@
 #include "linux_abi.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -32,5 +33,11 @@ int md_task_descriptor_copy(pid_t actor, int number, int *process) {
         if (*process<0) return *process;
     }
     int fd=(int)syscall(SYS_pidfd_getfd,*process,number,0);
+    return fd<0 ? -errno : fd;
+}
+int md_task_descriptor_pin(pid_t actor,int number) {
+    if (actor<=0 || number<0) return -EINVAL;
+    char path[64]; snprintf(path,sizeof(path),"/proc/%d/fd/%d",actor,number);
+    int fd=open(path,O_PATH|O_CLOEXEC);
     return fd<0 ? -errno : fd;
 }

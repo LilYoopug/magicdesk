@@ -52,9 +52,61 @@ int md_fs_native_mount(struct md_filesystem *fs, uint64_t native, uint64_t *gues
     return 0;
 }
 
+struct table_path { const struct md_view_mount *mount; char *path; };
+static void paths_release(struct table_path *paths,unsigned count) {
+    for (unsigned i=0;i<count;++i) free(paths[i].path);
+    free(paths);
+}
+static int paths_capture(struct md_filesystem *fs,const struct md_view_mount *selected,
+        struct table_path **out,unsigned *count) {
+    struct md_fs_mounts *tree=fs->mounts->tree;
+    *out=NULL; *count=0;
+    if (!tree) return 0;
+    struct table_path *paths=calloc(tree->count+1,sizeof(*paths));
+    if (!paths) return -ENOMEM;
+    int r=0;
+    for (unsigned i=0;!r && i<=tree->count;++i) {
+        const struct md_view_mount *m=i ? &tree->mounts[i-1] : &fs->mounts->base;
+        if (m->detached || m==selected || !m->parent) continue;
+        char path[PATH_MAX]; r=md_view_path(fs,m->target,m->parent,path,sizeof(path));
+        if (r==-ENOENT && (fs->store->root_id || fs->native_root)) { r=0; continue; }
+        if (r) break;
+        paths[*count]=(struct table_path){.mount=m,.path=strdup(path)};
+        if (!paths[*count].path) r=-ENOMEM;
+        else ++*count;
+    }
+    if (r) { paths_release(paths,*count); *count=0; }
+    else *out=paths;
+    return r;
+}
+static int native_covered(const struct md_filesystem *fs,const struct table_path *paths,
+        unsigned count,const char *path) {
+    for (unsigned i=0;i<count;++i) {
+        if (paths[i].mount->parent!=&fs->mounts->base) continue;
+        size_t n=strlen(paths[i].path);
+        if (!strncmp(path,paths[i].path,n) && (!path[n] || path[n]=='/')) return 1;
+    }
+    return 0;
+}
+static int native_path(char *path) {
+    char *out=path;
+    for (const char *in=path;*in;++in) {
+        unsigned char c=*in;
+        if (c=='\\') {
+            if (in[1]<'0' || in[1]>'3' || in[2]<'0' || in[2]>'7' || in[3]<'0' || in[3]>'7') return -EPROTO;
+            c=(unsigned char)((in[1]-'0')*64+(in[2]-'0')*8+in[3]-'0');
+            if (!c) return -EPROTO;
+            in+=3;
+        }
+        *out++=(char)c;
+    }
+    *out=0; return 0;
+}
+
 /* Native mounts retain kernel IO and authority, but IDs identify instances in
  * the selected view, as for logical mounts. statx uses this same map. */
-static int native_entries(struct md_filesystem *fs, FILE *out, unsigned info, unsigned *dev_id) {
+static int native_entries(struct md_filesystem *fs, FILE *out, unsigned info, unsigned *dev_id,
+        const struct table_path *paths,unsigned count) {
     const char *bytes; size_t size;
     int r=md_native_mounts_read(&fs->mounts->native_mounts,&bytes,&size);
     if (r) return r;
@@ -66,6 +118,12 @@ static int native_entries(struct md_filesystem *fs, FILE *out, unsigned info, un
         char device[64], root[PATH_MAX], path[PATH_MAX], options[1024];
         if (sscanf(line,"%llu %llu %n%63s %4095s %4095s %1023s",
                 &raw,&parent,&rest,device,root,path,options)!=6) { r=-EPROTO; break; }
+        char decoded[PATH_MAX]; strcpy(decoded,path);
+        r=native_path(decoded);
+        if (r) break;
+        /* Initial native providers are not placements below a guest overmount.
+         * Do not advertise hidden host children as movable guest mounts. */
+        if (native_covered(fs,paths,count,decoded)) continue;
         uint64_t id, owner=fs->mounts->base.id;
         r=md_fs_native_mount(fs,raw,&id);
         if (!r && strcmp(path,"/dev") && strcmp(path,"/proc"))
@@ -139,7 +197,8 @@ static int filesystem_options(struct md_filesystem *fs,const struct md_view_moun
     if (mount && mount->backing==MD_MOUNT_PROC) return md_procfs_options(mount,fs->store->identity,out,size);
     if (mount && md_fuse_view_matches(mount->provider))
         return md_fuse_view_options(mount->provider,fs->store->identity,out,size);
-    snprintf(out,size,"%s",mount && mount->cgroup && md_cgroup_devices(mount->cgroup) ? ",devices" : "");
+    if (mount && mount->cgroup) return md_cgroup_options(mount->cgroup,out,size);
+    snprintf(out,size,"%s","");
     return 0;
 }
 int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
@@ -159,6 +218,8 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
     r=root_fd<0 ? root_fd : fstat(root_fd,&root) ? -errno : 0;
     if (root_fd>=0) close(root_fd);
     const struct md_view_mount *selected=md_view_root_mount(fs);
+    struct table_path *paths=NULL; unsigned count=0;
+    if (!r) r=paths_capture(fs,selected,&paths,&count);
     unsigned dev_id=fs->mounts->base.id;
     int readonly=super_readonly(fs,selected);
     if (!r && readonly<0) r=readonly;
@@ -172,16 +233,13 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
         } else entry(stream,info,fs->mounts->base.id,fs->mounts->base.id,root.st_dev,"/","guestfs","guest",
             md_mount_policy_flags(&fs->mounts->base.policy),readonly,"",&fs->mounts->base.links,&members);
         if (!fs->store->root_id && !fs->native_root && selected==&fs->mounts->base) {
-            r=native_entries(fs,stream,info,&dev_id);
-            if (!r) entry(stream,info,fs->mounts->shm_id,dev_id,root.st_dev,"/dev/shm","guestfs","guest",0,readonly,"",NULL,&members);
+            r=native_entries(fs,stream,info,&dev_id,paths,count);
+            if (!r && !native_covered(fs,paths,count,"/dev/shm"))
+                entry(stream,info,fs->mounts->shm_id,dev_id,root.st_dev,"/dev/shm","guestfs","guest",0,readonly,"",NULL,&members);
         }
     }
-    struct md_fs_mounts *tree=fs->mounts ? fs->mounts->tree : NULL;
-    if (tree) for (unsigned i=0; !r && i<=tree->count; ++i) {
-        const struct md_view_mount *m=i ? &tree->mounts[i-1] : &fs->mounts->base;
-        if (m->detached || m==selected || !m->parent) continue;
-        char path[PATH_MAX]; r=md_view_path(fs,m->target,m->parent,path,sizeof(path));
-        if (r == -ENOENT && (fs->store->root_id || fs->native_root)) { r=0; continue; }
+    for (unsigned i=0; !r && i<count; ++i) {
+        const struct md_view_mount *m=paths[i].mount;
         struct stat st=m->native;
         if (md_fuse_view_matches(m->provider)) st.st_dev=md_fuse_view_device(m->provider);
         if (!r && m->file.ops) r=m->file.ops->stat(m->file.context,&st);
@@ -189,9 +247,10 @@ int md_fs_mount_table(struct md_filesystem *fs, unsigned info, unsigned flags) {
         char options[128];
         if (!r) r=filesystem_options(fs,m,options,sizeof(options));
         if (!r) entry(stream,info,m->id,m->parent ? m->parent->id : fs->mounts->base.id,
-            st.st_dev,path,filesystem_type(m),
+            st.st_dev,paths[i].path,filesystem_type(m),
             md_view_inode(m) ? "guest" : "attachment",md_mount_policy_flags(&m->policy),readonly,options,&m->links,&members);
     }
+    paths_release(paths,count);
     if (!r && (fflush(stream) || ferror(stream))) r=-EIO;
     int readable=-1;
     if (!r) {

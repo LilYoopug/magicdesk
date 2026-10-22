@@ -18,6 +18,7 @@ struct md_inode_boundary {
     int mount_root, native_directory;
     uint64_t proc_namespace, proc_link_mount;
     unsigned proc_link_descriptor; /* Optional caller-captured no-follow FD + 1. */
+    struct md_fs_anchor *proc_entry;
 };
 
 #define MDI_ROOT "00000000000000000000000000000000"
@@ -158,6 +159,9 @@ enum { MDI_RESERVE_BATCH = 32 };
  * No live backing is recycled. The caller still syncs its final attributes. */
 int mdi_reserve_file(struct md_inode_store *, char id[33], int flags, mode_t mode);
 int mdi_begin(struct md_inode_store *, int write);
+/* Runtime custody only: no guest inode, name, attribute or content changes.
+ * Channel lifetime remains writable on readonly guest mounts/superblocks. */
+int mdi_runtime_begin(struct md_inode_store *);
 /* Promote the sole read snapshot under its already-held exclusive store gate.
  * Never releases the gate, re-resolves the pathname, or replays an operation. */
 int mdi_write(struct md_inode_store *);

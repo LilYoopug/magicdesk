@@ -40,6 +40,7 @@ static enum md_proc_kind network_table(const char **p) {
     if (word(p,"tcp6")) return MD_PROC_NET_TCP6;
     if (word(p,"udp")) return MD_PROC_NET_UDP;
     if (word(p,"udp6")) return MD_PROC_NET_UDP6;
+    if (word(p,"if_inet6")) return MD_PROC_NET_IF_INET6;
     return MD_PROC_NONE;
 }
 struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
@@ -58,6 +59,10 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
         out.process=tgid;
         out.kind = MD_PROC_FD;
     } else if (word(&p, "proc")) {
+        if (word(&p,"devices")) {
+            out.kind=MD_PROC_DEVICES; out.process=tid;
+            out.tail=p; out.anchor_length=(size_t)(p-path); return out;
+        }
         if (word(&p,"net")) {
             out.kind=network_table(&p); out.process=tid;
             out.tail=p; out.anchor_length=(size_t)(p-path); return out;
@@ -71,6 +76,10 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
         }
         if (word(&p,"sys")) {
             if (word(&p,"fs")) {
+                if (word(&p,"nr_open")) {
+                    out.kind=MD_PROC_NR_OPEN;
+                    out.process=tid; out.tail=p; out.anchor_length=(size_t)(p-path); return out;
+                }
                 if (!word(&p,"inotify")) return out;
                 if (word(&p,"max_user_instances")) out.kind=MD_PROC_INOTIFY_INSTANCES;
                 else if (word(&p,"max_user_watches")) out.kind=MD_PROC_INOTIFY_WATCHES;
@@ -120,8 +129,8 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
             out.process=tid;
             out.tail=p; out.anchor_length=(size_t)(p-path); return out;
         }
-        if (word(&p,"self")) out.process=tgid;
-        else if (word(&p,"thread-self")) out.process=tid;
+        if (word(&p,"self")) { out.process=tgid; out.ordinary_link=!*p; }
+        else if (word(&p,"thread-self")) { out.process=tid; out.ordinary_link=!*p; }
         else {
             long pid = number(&p);
             if (pid < 0) return out;

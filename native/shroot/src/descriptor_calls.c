@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "descriptor_calls.h"
+#include "namespace.h"
 #include "file_metadata.h"
 #include "adapter_buffer.h"
 #include "fd_client.h"
@@ -68,12 +69,15 @@ long md_descriptor_pair(long nr, const unsigned long *a) {
     if (result<0) for (unsigned i=0;i<2;++i) if (ends[i]>=0) RAW1(close,ends[i]);
     return result;
 }
-long md_descriptor_metadata(int fd, long nr, const unsigned long *a) {
+long md_descriptor_metadata(const struct md_fs *fs,int fd, long nr, const unsigned long *a) {
     long flags=RAW2(fcntl,fd,F_GETFL);
     if (flags<0) return flags;
     if ((flags&O_PATH) && (nr==SYS_fchown || nr==SYS_fchmod)) return -EBADF;
     if (nr==SYS_getdents64 || nr==SYS_fchdir) return -ENOTDIR;
-    if (nr==SYS_fstatfs || nr==SYS_statfs) return RAW2(fstatfs,fd,a[1]);
+    if (nr==SYS_fstatfs || nr==SYS_statfs) {
+        long result=RAW2(fstatfs,fd,a[1]);
+        return result==-EACCES || result==-EPERM ? md_namespace_fstatfs(fs,fd,(void *)a[1]) : result;
+    }
     if (nr!=SYS_fstat && nr!=SYS_newfstatat && nr!=SYS_statx && nr!=SYS_fchown && nr!=SYS_fchownat
             && nr!=SYS_fchmod && nr!=SYS_fchmodat && nr!=SYS_fchmodat2) return -EOPNOTSUPP;
     if (nr==SYS_fchownat && (a[4]&~(AT_EMPTY_PATH|AT_SYMLINK_NOFOLLOW))) return -EINVAL;

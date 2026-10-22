@@ -65,9 +65,9 @@ long md_proc_control_open(const struct md_proc_path *ref, int flags, uint64_t vi
 long md_proc_control_reopen(int process, int fd, int flags) {
     return control_open(MD_PROC_FILE_REOPEN,process,fd,flags,0,NULL);
 }
-long md_proc_control_metadata(const struct md_proc_path *ref, long nr, const unsigned long *a) {
+long md_proc_control_link_metadata(const struct md_proc_path *ref,long nr,const unsigned long *a,uint64_t mount) {
 #ifdef MD_USE_LIBC
-    (void)ref; (void)nr; (void)a; return -ENOTSUP;
+    (void)ref; (void)nr; (void)a; (void)mount; return -ENOTSUP;
 #else
     int process=ref->process, fd=ref->descriptor;
     enum md_proc_kind kind=ref->kind==MD_PROC_FOREIGN ? ref->foreign_kind : ref->kind;
@@ -95,6 +95,7 @@ long md_proc_control_metadata(const struct md_proc_path *ref, long nr, const uns
             result=md_write_memory((void *)a[nr==SYS_fstat ? 1 : 2],&st,sizeof(st));
         else if (nr==SYS_statx) {
             struct statx value;
+            if (query.nofollow && namespace && mount) metadata.value.mount_id=mount;
             md_fs_info_statx(&metadata.value,&value);
             result=md_write_memory((void *)a[4],&value,sizeof(value));
         } else if (nr==SYS_statfs || nr==SYS_fstatfs) {
@@ -134,6 +135,9 @@ long md_proc_control_metadata(const struct md_proc_path *ref, long nr, const uns
     long released=md_adapter_buffer_release();
     return result ? result : released;
 #endif
+}
+long md_proc_control_metadata(const struct md_proc_path *ref,long nr,const unsigned long *a) {
+    return md_proc_control_link_metadata(ref,nr,a,0);
 }
 long md_proc_control_call(long nr, const unsigned long *a) {
 #ifdef MD_USE_LIBC

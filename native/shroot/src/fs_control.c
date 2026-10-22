@@ -14,7 +14,7 @@ int md_fs_control_publish(int carrier,struct md_control_file file,struct md_fs_a
     int error=0;
     if (file.ops) {
         if (!output || !output->control) { out->requires_control=1; error=-EOPNOTSUPP; }
-        else error=output->control(output->control_context,file.ops,file.context,identity,flags);
+        else error=output->control(output->control_context,file.ops,file.context,identity,flags,origin);
     }
     if (error) close(carrier);
     else {

@@ -9,6 +9,7 @@ fixtures do not define a separate runtime or installation interface.
 
 | Contract | Guide |
 | --- | --- |
+| Per-recipe application results, open failures and planned system workloads | [Distribution validation matrix](validation-matrix.md) |
 | Bubblewrap, namespaces, credentials and application filters | [Namespace fixtures](namespaces.md) |
 | SteamOS, X11/Wayland desktops, audio and GPU | [Desktop workflows](desktop-workflows.md) |
 | OCI images, mounts, filesystem operations and watches | [Filesystem workflows](filesystem-workflows.md) |

@@ -292,6 +292,18 @@ int md_task_registry_credentials(struct md_task_registry *r,pid_t tid,struct md_
     pthread_mutex_unlock(&r->lock);
     return found ? 0 : -ESRCH;
 }
+int md_task_registry_proc(struct md_task_registry *r,pid_t tid,struct md_task_snapshot *out) {
+    *out=(struct md_task_snapshot){0};
+    if (!r || tid<=0) return -ESRCH;
+    pthread_mutex_lock(&r->lock);
+    struct entry *e=r->entries[(unsigned)tid%BUCKETS];
+    while (e && e->tid!=tid) e=e->next;
+    int found=e!=NULL;
+    if (e) *out=(struct md_task_snapshot){.tid=tid,.tgid=e->tgid,.identity=md_identity_copy(&e->value),
+        .pid=md_pid_identity_retain(e->pid),.cgroup=md_cgroup_member_retain(e->cgroup)};
+    pthread_mutex_unlock(&r->lock);
+    return found ? 0 : -ESRCH;
+}
 long md_task_snapshot_umask(const struct md_task_snapshot *snapshot) {
     if (!snapshot->owner) return md_task_umask(snapshot->tid);
     atomic_int *slot=&snapshot->owner->status_fd;

@@ -3,6 +3,7 @@
 #include "fs_mount_internal.h"
 #include "mount_graph.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -22,12 +23,20 @@ int md_mount_family_collect(struct md_filesystem *fs) {
     md_mount_members_release(&members); return error;
 }
 
+struct relocation {
+    unsigned slot;
+    int target;
+    struct stat guest;
+    struct md_view_mount *parent;
+    struct relocation *next;
+};
 struct draft {
     struct md_mount_namespace *view;
     struct md_view_mount *base;
     struct md_view_mount *entries;
     unsigned count;
     unsigned char created[MD_FS_MOUNTS_MAX];
+    struct relocation *relocations;
 };
 static struct md_view_mount *node(struct md_view_mount *base,struct md_view_mount *entries,unsigned n) {
     return n ? &entries[n-1] : base;
@@ -39,6 +48,26 @@ struct mapping {
 };
 static int vacant(struct draft *d) {
     return md_view_mount_vacant(d->entries,&d->count);
+}
+static int stack_replica(struct draft *d,unsigned slot) {
+    struct md_view_mount *mounted=&d->entries[slot];
+    for (unsigned i=0;i<d->count;++i) {
+        struct md_view_mount *old=&d->entries[i];
+        if (i==slot || !old->id || old->detached || old->parent!=mounted->parent
+                || !md_view_same(&old->guest,&mounted->guest)) continue;
+        struct relocation *r=malloc(sizeof(*r));
+        if (!r) return -ENOMEM;
+        int target=fcntl(mounted->source,F_DUPFD_CLOEXEC,3);
+        if (target<0) { int error=-errno; free(r); return error; }
+        *r=(struct relocation){i,old->target,old->guest,old->parent,d->relocations};
+        d->relocations=r;
+        /* Propagation inserts beneath an existing mount at the destination,
+         * not as an unreachable sibling. Keep its old top visible. */
+        old->target=target; old->guest=mounted->native;
+        old->parent=&d->view->tree->mounts[slot];
+        break;
+    }
+    return 0;
 }
 static int group(struct mapping **map,struct md_mount_group *parent,unsigned source,
         struct md_mount_group **out) {
@@ -87,6 +116,10 @@ static int replica(struct md_filesystem *fs,struct draft *d,struct md_view_mount
             ? (struct md_mount_links){md_mount_group_retain(g),md_mount_group_retain(md_mount_group_parent(g)),0}
             : (struct md_mount_links){NULL,md_mount_group_retain(g),0};
         if (md_mount_namespace_owner(d->view)!=md_mount_namespace_owner(source_view)) b->locked=1;
+        if (source==root) {
+            r=stack_replica(d,(unsigned)index);
+            if (r) return r;
+        }
         (void)fs;
     }
     return 0;
@@ -106,7 +139,7 @@ static int attach(struct md_filesystem *fs,struct md_view_mount *base,struct md_
         free(drafts); free(changes); md_mount_members_release(&members);
         md_cost_end(cost,start); return -ENOMEM;
     }
-    drafts[0]=(struct draft){fs->mounts,base,entries,count,{0}};
+    drafts[0]=(struct draft){.view=fs->mounts,.base=base,.entries=entries,.count=count};
     struct mapping *map=NULL;
     for (unsigned i=0;!r && shared && i<created;++i) {
         struct md_view_mount *m=node(base,entries,slots[i]);
@@ -139,7 +172,7 @@ static int attach(struct md_filesystem *fs,struct md_view_mount *base,struct md_
                 struct md_view_mount *copy=md_view_mount_array_new();
                 if (!copy) { r=-ENOMEM; break; }
                 memcpy(copy,view->tree->mounts,original*sizeof(*copy));
-                drafts[used++]=(struct draft){view,&view->base,copy,original,{0}};
+                drafts[used++]=(struct draft){.view=view,.base=&view->base,.entries=copy,.count=original};
             }
             r=replica(fs,&drafts[d],p,fs->mounts,entries,base,slots,created,root,&map);
         }
@@ -174,7 +207,21 @@ static int attach(struct md_filesystem *fs,struct md_view_mount *base,struct md_
             }
             d->view->tree->count=d->count;
             atomic_store_explicit(&d->view->managed_paths,1,memory_order_release);
-        } else for (unsigned j=0;j<d->count;++j) if (d->created[j]) md_view_mount_close(&d->entries[j]);
+        }
+        while (d->relocations) {
+            struct relocation *change=d->relocations;
+            struct md_view_mount *next=&d->entries[change->slot];
+            if (!r) {
+                struct md_view_mount *old=&d->view->tree->mounts[change->slot];
+                old->target=next->target; old->guest=next->guest; old->parent=next->parent;
+                close(change->target);
+            } else {
+                close(next->target); next->target=change->target;
+                next->guest=change->guest; next->parent=change->parent;
+            }
+            d->relocations=change->next; free(change);
+        }
+        if (r) for (unsigned j=0;j<d->count;++j) if (d->created[j]) md_view_mount_close(&d->entries[j]);
     }
     if (!r) for (unsigned i=1;i<used;++i) {
         struct md_filesystem selected=*fs; selected.mounts=drafts[i].view;
@@ -239,8 +286,7 @@ static int beneath_mount(const struct md_view_mount *mount,const struct md_view_
     return 0;
 }
 int md_view_mount_propagate_detach(struct md_filesystem *fs,struct md_view_mount *root,int lazy) {
-    struct md_mount_group *source=root->links.shared;
-    if (!root->parent || !root->parent->links.shared || !source) return md_view_mount_detach(fs,root);
+    if (!root->parent || !root->parent->links.shared) return md_view_mount_detach(fs,root);
     struct md_mount_members members={0};
     int r=md_mount_family_capture(fs->mounts,&members);
     if (r) return r;
@@ -258,7 +304,6 @@ int md_view_mount_propagate_detach(struct md_filesystem *fs,struct md_view_mount
             if (!m->id || m->detached || !m->parent || (m!=root
                     && ((m->parent->links.shared!=root->parent->links.shared
                             && !md_mount_group_contains(m->parent->links.master,root->parent->links.shared))
-                        || (m->links.shared!=source && !md_mount_group_contains(m->links.master,source))
                         || !md_view_same(&m->guest,&root->guest)))) continue;
             if (!lazy) {
                 int children=0;

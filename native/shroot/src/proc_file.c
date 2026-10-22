@@ -6,8 +6,12 @@
 #include "fd_selector.h"
 #include "cgroup.h"
 #include "task_resources.h"
+#include "process_limits.h"
 #include "file_permissions.h"
 #include "directory_record.h"
+#include "fs_anchor.h"
+#include "mount_policy.h"
+#include <linux/magic.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -26,8 +30,8 @@ struct md_proc_file {
     struct md_identity process_identity;
     pid_t tracer;
     int process_state;
-    struct rlimit nproc;
-    int nproc_valid;
+    struct md_process_limits limits;
+    int limits_valid;
     enum md_proc_file_kind kind;
     atomic_int flags;
     int64_t position;
@@ -43,10 +47,14 @@ struct md_proc_file {
     void *control_context;
     int control_directory;
     struct md_cgroup_member *cgroup;
+    struct md_fs_anchor *placement;
+    struct stat metadata;
 };
+static const struct md_control_file_ops task_ops;
 static void destroy(struct md_fd_object *object) {
     struct md_proc_file *f=(void *)object;
     if (f->control) f->control->release(f->control_context);
+    md_fs_anchor_release(f->placement);
     md_cgroup_member_release(f->cgroup);
     md_resource_queue_destroy(&f->operations);
     md_pid_namespace_release(f->pid_view); free(f->content);
@@ -62,9 +70,17 @@ static unsigned selectors(const struct md_fd_object *object) {
 static struct md_control_file readiness(struct md_fd_object *object) {
     return md_proc_file_control((void *)object);
 }
+struct md_fs_anchor *md_proc_file_origin(const struct md_proc_file *f) {
+    if (!f) return NULL;
+    return f->placement ? f->placement
+        : f->control && f->control->origin ? f->control->origin(f->control_context) : NULL;
+}
 static struct md_fs_anchor *origin(struct md_fd_object *object) {
     struct md_proc_file *f=(void *)object;
-    return f->control && f->control->origin ? f->control->origin(f->control_context) : NULL;
+    /* A device's anonymous IO carrier is not its path inode. Only providers
+     * with a path-backed descriptor may export placement as FD authority. */
+    return f->control ? (f->control->origin ? f->control->origin(f->control_context) : NULL)
+        : f->placement;
 }
 static long closed(struct md_fd_object *object,const struct md_control_actor *actor,struct md_control_pending **pending) {
     struct md_proc_file *f=(void *)object;
@@ -74,7 +90,7 @@ static long closed(struct md_fd_object *object,const struct md_control_actor *ac
 static const struct md_fd_object_type type={.destroy=destroy,.selectors=1U<<MD_FD_SELECTOR_PROC,
     .selector_mask=selectors,.readiness=readiness,.origin=origin,.close=closed};
 struct md_fd_object *md_proc_file_control_object(const struct md_control_file_ops *ops,void *context,
-        const struct md_identity *id,int flags,int *descriptor) {
+        const struct md_identity *id,int flags,struct md_fs_anchor *placement,int *descriptor) {
     struct md_proc_file *file=md_proc_file_open_control(ops,context,id,flags);
     if (!file) return NULL;
     if (ops->descriptor && !(flags&O_PATH)) {
@@ -82,6 +98,7 @@ struct md_fd_object *md_proc_file_control_object(const struct md_control_file_op
         if (fd<0) { md_proc_file_release(file); errno=-fd; return NULL; }
         *descriptor=fd;
     }
+    if (placement) md_proc_file_place(file,placement,&file->metadata);
     return md_proc_file_object(file);
 }
 struct md_fd_object *md_proc_file_object(struct md_proc_file *f) {
@@ -117,6 +134,7 @@ struct md_proc_file *md_proc_file_open(struct md_user_namespace *target,
 }
 struct md_proc_file *md_proc_file_open_control(const struct md_control_file_ops *ops,void *context,
         const struct md_identity *id,int flags) {
+    if (ops==&task_ops) return md_proc_file_reopen(context,id,flags);
     int mode=(flags&O_PATH) ? 0 : (flags&O_ACCMODE)==O_RDWR ? R_OK|W_OK
         : (flags&O_ACCMODE)==O_WRONLY ? W_OK : R_OK;
     if (!(flags&O_PATH) && (flags&O_TRUNC)) mode|=W_OK;
@@ -155,7 +173,10 @@ int md_proc_file_control_stat(const struct md_proc_file *f,struct stat *st) {
     return f && f->control ? f->control->stat(f->control_context,st) : -EINVAL;
 }
 struct md_control_file md_proc_file_control(const struct md_proc_file *f) {
-    return f ? (struct md_control_file){f->control,f->control_context} : (struct md_control_file){0};
+    if (!f) return (struct md_control_file){0};
+    return f->control ? (struct md_control_file){f->control,f->control_context}
+        : md_proc_file_task(f->kind) ? (struct md_control_file){&task_ops,(void *)f}
+        : (struct md_control_file){0};
 }
 unsigned long md_proc_file_filesystem(const struct md_proc_file *f) {
     return f && f->control ? f->control->filesystem : 0;
@@ -209,12 +230,12 @@ void md_proc_file_pid_view(struct md_proc_file *f, struct md_pid_namespace *view
     f->pid_view=md_pid_namespace_retain(view); md_pid_namespace_release(old);
 }
 void md_proc_file_process_state(struct md_proc_file *f,const struct md_identity *identity,
-        struct md_pid_namespace *space,pid_t tracer,const struct rlimit *nproc) {
+        struct md_pid_namespace *space,pid_t tracer,const struct md_process_limits *limits) {
     if (!md_proc_file_process(f->kind) || f->content) return;
     if (f->process_state) md_identity_release(&f->process_identity);
     f->process_identity=md_identity_copy(identity); f->process_state=1; f->tracer=tracer;
-    f->nproc_valid=nproc!=NULL;
-    if (nproc) f->nproc=*nproc;
+    f->limits_valid=limits!=NULL;
+    if (limits) f->limits=*limits;
     struct md_pid_namespace *old=f->process_pid_namespace;
     f->process_pid_namespace=md_pid_namespace_retain(space); md_pid_namespace_release(old);
 }
@@ -229,11 +250,75 @@ int md_proc_file_filesystem_paths(const struct md_proc_file *f) {
 }
 struct md_proc_file *md_proc_file_reopen(const struct md_proc_file *f,
         const struct md_identity *opener, int flags) {
+    if (f->placement && !f->control && !(flags&O_PATH)) {
+        unsigned mode=(flags&O_ACCMODE)==O_RDWR ? R_OK|W_OK : (flags&O_ACCMODE)==O_WRONLY ? W_OK : R_OK;
+        if (flags&O_TRUNC) mode|=W_OK;
+        int error=(mode&W_OK) && (md_fs_anchor_policy(f->placement)&MD_MOUNT_READONLY) ? -EROFS
+            : md_proc_file_task_access(opener,&f->metadata,mode,1);
+        if (error) { errno=-error; return NULL; }
+    }
     struct md_proc_file *next=f->control ? md_proc_file_open_control(f->control,f->control_context,opener,flags)
         : md_proc_file_open(f->target,f->kind,opener,flags);
-    if (next) { next->node=f->node; md_proc_file_pid_view(next,f->pid_view); md_proc_file_cgroup(next,f->cgroup); }
+    if (next) {
+        next->node=f->node; md_proc_file_pid_view(next,f->pid_view); md_proc_file_cgroup(next,f->cgroup);
+        md_proc_file_place(next,f->placement,&f->metadata);
+    }
     return next;
 }
+void md_proc_file_place(struct md_proc_file *f,struct md_fs_anchor *placement,const struct stat *metadata) {
+    struct md_fs_anchor *old=f->placement;
+    f->placement=md_fs_anchor_retain(placement); f->metadata=*metadata;
+    md_fs_anchor_release(old);
+}
+int md_proc_file_task_stat(int pid,const struct md_identity *identity,enum md_proc_file_kind kind,
+        struct md_proc_file_node *node,struct stat *value) {
+    char path[64];
+    snprintf(path,sizeof(path),"/proc/%d/%s",pid,md_proc_file_process_name(kind));
+    if (stat(path,value)) return -errno;
+    *node=(struct md_proc_file_node){value->st_dev,value->st_ino,pid};
+    int protected=value->st_uid!=getuid();
+    uint32_t uid=identity->uid.effective, gid=identity->gid.effective;
+    if (protected) {
+        uid=md_user_namespace_into(identity->user_namespace,0,0);
+        gid=md_user_namespace_into(identity->user_namespace,1,0);
+        if (uid==UINT32_MAX) uid=0;
+        if (gid==UINT32_MAX) gid=0;
+    }
+    if (!md_proc_file_process(kind))
+        value->st_ino=((uint64_t)value->st_ino<<2)|((unsigned)kind+1)|UINT64_C(0x8000000000000000);
+    value->st_mode=S_IFREG|(md_proc_file_process(kind) || md_proc_file_cgroup_kind(kind) ? 0444 : 0644);
+    value->st_nlink=1; value->st_rdev=0; value->st_size=0; value->st_blocks=0; value->st_blksize=getpagesize();
+    value->st_uid=uid; value->st_gid=gid; return 0;
+}
+int md_proc_file_task_access(const struct md_identity *id,const struct stat *st,unsigned mode,int effective) {
+    if (mode&~7U) return -EINVAL;
+    if ((mode&X_OK) && !S_ISDIR(st->st_mode)) return -EACCES;
+    if ((mode&W_OK) && S_ISDIR(st->st_mode)) return -EACCES;
+    if (!(mode&W_OK)) return 0;
+    struct md_identity actor=md_identity_access(id,effective);
+    if (actor.uid.fs==st->st_uid) return 0;
+    return md_identity_capable_in(&actor,NULL,CAP_DAC_OVERRIDE) ? 0 : -EACCES;
+}
+static void *task_retain(void *context) { return md_proc_file_retain(context); }
+static void task_release(void *context) { md_proc_file_release(context); }
+static struct md_fs_anchor *task_origin(void *context) { return ((struct md_proc_file *)context)->placement; }
+static int task_stat(void *context,struct stat *st) {
+    struct md_proc_file *f=context;
+    if (f->placement) *st=f->metadata;
+    else {
+        *st=(struct stat){.st_dev=f->node.device,.st_ino=f->node.inode,.st_mode=S_IFREG|0444,.st_nlink=1};
+        if (!md_proc_file_process(f->kind)) st->st_ino=(f->node.inode<<2)|((unsigned)f->kind+1)|UINT64_C(0x8000000000000000);
+    }
+    return 0;
+}
+static int task_access(void *context,const struct md_identity *id,unsigned mode) {
+    struct md_proc_file *f=context;
+    if ((mode&W_OK) && (md_fs_anchor_policy(f->placement)&MD_MOUNT_READONLY)) return -EROFS;
+    struct stat st; task_stat(f,&st);
+    return md_proc_file_task_access(id,&st,mode,1);
+}
+static const struct md_control_file_ops task_ops={.retain=task_retain,.release=task_release,
+    .origin=task_origin,.stat=task_stat,.access=task_access,.filesystem=PROC_SUPER_MAGIC};
 int md_proc_file_descriptor(const struct md_proc_file *f) {
     if (!f) return -EINVAL;
     if (f->control && f->control->descriptor) return f->control->descriptor(f->control_context,f->flags);
@@ -356,13 +441,16 @@ static int process_content(struct md_proc_file *f) {
         while (*line) {
             char *end=strchr(line,'\n');
             if (!end) { error=-EIO; break; }
-            if (f->nproc_valid && !strncmp(line,"Max processes ",14)) {
+            int nproc=!strncmp(line,"Max processes ",14), nofile=!strncmp(line,"Max open files ",15);
+            if (f->limits_valid && (nproc || nofile)) {
+                struct rlimit value=nproc ? f->limits.nproc : f->limits.nofile;
                 char soft[32],hard[32];
-                if (f->nproc.rlim_cur==RLIM_INFINITY) strcpy(soft,"unlimited");
-                else snprintf(soft,sizeof(soft),"%llu",(unsigned long long)f->nproc.rlim_cur);
-                if (f->nproc.rlim_max==RLIM_INFINITY) strcpy(hard,"unlimited");
-                else snprintf(hard,sizeof(hard),"%llu",(unsigned long long)f->nproc.rlim_max);
-                fprintf(out,"%-25s %-20s %-20s %-10s\n","Max processes",soft,hard,"processes");
+                if (value.rlim_cur==RLIM_INFINITY) strcpy(soft,"unlimited");
+                else snprintf(soft,sizeof(soft),"%llu",(unsigned long long)value.rlim_cur);
+                if (value.rlim_max==RLIM_INFINITY) strcpy(hard,"unlimited");
+                else snprintf(hard,sizeof(hard),"%llu",(unsigned long long)value.rlim_max);
+                fprintf(out,"%-25s %-20s %-20s %-10s\n",nproc ? "Max processes" : "Max open files",
+                    soft,hard,nproc ? "processes" : "files");
             } else fwrite(line,1,end+1-line,out);
             line=end+1;
         }
@@ -487,6 +575,7 @@ static struct md_user_authority authority(const struct md_identity *id) {
 long md_proc_file_write_at(struct md_proc_file *f, const struct md_identity *writer, struct md_uts_namespace *uts,
         const void *data, size_t size, int64_t offset, size_t page_size) {
     if (!f || !writer || (f->flags&O_PATH) || (f->flags&O_ACCMODE)==O_RDONLY) return -EBADF;
+    if (md_fs_anchor_policy(f->placement)&MD_MOUNT_READONLY) return -EROFS;
     if (md_proc_file_namespace(f->kind)) return -EINVAL;
     if (md_proc_file_sysctl(f->kind)) return md_proc_sysctl_write(uts,f->kind,writer,data,size,&offset);
     if (offset || size>=(f->kind==MD_PROC_FILE_SETGROUPS ? 8 : page_size)) return -EINVAL;
@@ -565,8 +654,19 @@ static int process_directory(struct md_proc_file *f,const char *path) {
     if (r) { free(f->directory); f->directory=NULL; f->directory_size=f->directory_capacity=0; }
     return r;
 }
-static long directory_entries(struct md_proc_file_io *io, void *bytes, size_t capacity) {
+long md_proc_file_namespace_entries(uint64_t inode,int64_t *position,void *bytes,size_t capacity) {
     static const char *const names[]={".","..","user","mnt","uts","ipc","pid","pid_for_children","net","cgroup"};
+    if (*position<0) return -EINVAL;
+    size_t size=0;
+    for (int64_t i=*position;i<(int64_t)(sizeof(names)/sizeof(*names));++i) {
+        size_t record=md_directory_record_write((char *)bytes+size,capacity-size,names[i],strlen(names[i]),
+            i ? (inode<<4)|(uint64_t)i : inode,i+1,i<2 ? DT_DIR : DT_LNK);
+        if (!record) return size ? (long)size : -EINVAL;
+        size+=record; *position=i+1;
+    }
+    return (long)size;
+}
+static long directory_entries(struct md_proc_file_io *io, void *bytes, size_t capacity) {
     struct md_proc_file *f=io->file;
     char path[64]; snprintf(path,sizeof(path),"/proc/%d%s",f->node.process,
         f->kind==MD_PROC_FILE_NS_DIRECTORY ? "/ns" : "");
@@ -593,13 +693,7 @@ static long directory_entries(struct md_proc_file_io *io, void *bytes, size_t ca
         }
         return (long)size;
     }
-    for (int64_t i=io->offset; i<(int64_t)(sizeof(names)/sizeof(*names)); ++i) {
-        size_t record=md_directory_record_write((char *)bytes+size,capacity-size,names[i],strlen(names[i]),
-            i ? (f->node.inode<<4)|(uint64_t)i : f->node.inode,i+1,i<2 ? DT_DIR : DT_LNK);
-        if (!record) return size ? (long)size : -EINVAL;
-        size+=record; io->next_position=i+1;
-    }
-    return (long)size;
+    return md_proc_file_namespace_entries(f->node.inode,&io->next_position,bytes,capacity);
 }
 long md_proc_file_io_execute(struct md_proc_file_io *io, const struct md_identity *writer, struct md_uts_namespace *uts,
         void *bytes, size_t capacity, size_t page_size) {

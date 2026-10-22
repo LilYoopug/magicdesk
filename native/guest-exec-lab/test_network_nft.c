@@ -640,7 +640,7 @@ void test_network_nft(void) {
     /* Kernel queue framing and capabilities are identical to the other netlink
      * owners, including poll readiness and retained creation namespace. */
     struct md_fd_object *socket=NULL; int fd=-1;
-    assert(!md_network_socket_open(child,0,AF_NETLINK,SOCK_RAW,NETLINK_NETFILTER,&socket,&fd));
+    assert(!md_network_socket_open(child,&root,AF_NETLINK,SOCK_RAW,NETLINK_NETFILTER,&socket,&fd));
     o.size=0; add(&o,(NFNL_SUBSYS_NFTABLES<<8)|NFT_MSG_GETGEN,0,AF_UNSPEC);
     unsigned long args[6]={0};
     assert(md_network_socket_call(socket,&root,SYS_sendto,args,o.data,o.capacity,o.size,92,0,NULL,NULL)==(long)o.size);

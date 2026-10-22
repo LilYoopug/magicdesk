@@ -20,6 +20,7 @@
 #include "ipc_capsule.h"
 #include "descriptor_inode.h"
 #include "proc_paths.h"
+#include "procfs_view.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -463,11 +464,11 @@ int md_fs_buffer_inspect_take(struct md_fs_buffer_request *r, struct md_received
     *out=r->expanded; r->expanded=NULL; return 1;
 }
 static int control_open(void *context,const struct md_control_file_ops *ops,void *data,
-        const struct md_identity *identity,int flags) {
+        const struct md_identity *identity,int flags,struct md_fs_anchor *origin) {
     struct md_fs_buffer_request *r=context;
     if (!r->service->control) return -EOPNOTSUPP;
     if (r->opened.object) return -EBUSY;
-    r->opened.object=r->service->control(ops,data,identity,flags,&r->control_descriptor);
+    r->opened.object=r->service->control(ops,data,identity,flags,origin,&r->control_descriptor);
     return r->opened.object ? 0 : -errno;
 }
 void md_fs_buffer_control_factory(struct md_fs_buffer_service *s,md_control_factory factory) {
@@ -689,7 +690,19 @@ static void prepare_open(struct md_fs_buffer_request *r,struct md_filesystem *fs
                 int source=md_inode_descriptor_source(fs->store,r->opened.fd,
                     r->output->source,sizeof(r->output->source));
                 if (source) {
-                    if (source==-EXDEV) r->output->transfer=MD_FS_BUFFER_RIGHTS;
+                    if (source==-EXDEV && !S_ISLNK(st.st_mode)) {
+                        /* A native pin may retain NOFOLLOW even though it is
+                         * not a link. Admission already checked that component;
+                         * reopen the exact pin, not a mutable native name. */
+                        r->opened.flags&=~O_NOFOLLOW;
+                        r->output->source_flags&=~O_NOFOLLOW;
+                        snprintf(r->output->source,sizeof(r->output->source),
+                            "/proc/%d/fd/%d",getpid(),r->opened.fd);
+                    } else if (source==-EXDEV) {
+                        const char *link=md_procfs_static_link(r->opened.fd);
+                        if (link) snprintf(r->output->source,sizeof(r->output->source),"%s",link);
+                        else r->output->transfer=MD_FS_BUFFER_RIGHTS;
+                    }
                     else { r->error=source; return; }
                 }
             }
@@ -1079,6 +1092,11 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
             }
             if (base==AT_FDCWD) r->input[i]=md_fs_anchor_retain(r->context.task.cwd);
             else if (base>=0) r->input[i]=md_fd_origins_get(r->files.table,base,NULL);
+            if (!i && r->request.operation==MD_FS_FSTAT && md_fs_anchor_virtual(r->input[i])) {
+                r->control_input=md_fd_origins_object(r->files.table,base,NULL);
+                int found=s->control_query ? s->control_query(r->control_input,r->request.operation,&r->request.control) : 0;
+                if (found<=0) { error=found ? found : -EOPNOTSUPP; break; }
+            }
             if (!i && base>=0 && !r->input[i] && r->request.operation==MD_FS_MOUNT && s->control_query) {
                 struct md_fd_object *object=md_fd_origins_object(r->files.table,base,NULL);
                 struct md_control_file file={0};
@@ -1108,6 +1126,12 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
                         : fcntl(pin,F_DUPFD_CLOEXEC,3);
                     if (pin>=0 && fd<0) fd=-errno;
                     md_fd_object_release(object);
+                    if (md_task_descriptor_needs_export(fd) && r->request.operation==MD_FS_FSTAT) {
+                        /* O_PATH proc symlinks may be withheld from SCM_RIGHTS
+                         * by Android. Stat needs identity, not the source OFD. */
+                        int path=md_task_descriptor_pin(r->actor,base);
+                        if (path>=0) fd=path;
+                    }
                     if (fd>=0) r->request.directory[i]=r->captured[i]=fd;
                     else if (md_task_descriptor_needs_export(fd))
                         r->export_mask|=1U<<i;

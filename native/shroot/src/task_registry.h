@@ -65,6 +65,9 @@ int md_task_registry_files(struct md_task_registry *,pid_t tid,pid_t peer,struct
  * pins or allocations; release the returned identity with md_identity_release. */
 struct md_task_credentials { pid_t group; int retired; struct md_identity identity; };
 int md_task_registry_credentials(struct md_task_registry *,pid_t,struct md_task_credentials *);
+/* Proc opens need only identity, PID and cgroup, including unreaped tasks.
+ * Release with md_task_snapshot_release; no live filesystem resources pinned. */
+int md_task_registry_proc(struct md_task_registry *,pid_t,struct md_task_snapshot *);
 /* Retains only the proc handle with this generation, never the observed mask. */
 long md_task_snapshot_umask(const struct md_task_snapshot *);
 void md_task_snapshot_release(struct md_task_snapshot *);

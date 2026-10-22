@@ -55,6 +55,11 @@ static int valid_name(const char *name) {
         if (name[i]=='/' || name[i]==':' || name[i]==' ' || name[i]=='\t' || name[i]=='\n') return 0;
     return 1;
 }
+int md_network_bridge_forward(const struct md_network_interface *in,const struct md_network_interface *out) {
+    if (!out || !out->master) return 0;
+    if (!in) return 1;
+    return in->master==out->master && (in!=out || out->hairpin) && !(in->isolated && out->isolated);
+}
 int md_network_interface_add(struct md_network_namespace *n,enum md_network_link_kind kind,const char *name,unsigned *index) {
     if (!valid_name(name)) return -EINVAL;
     if (md_network_interface_find(n,0,name)) return -EEXIST;
@@ -78,7 +83,7 @@ int md_network_interface_add(struct md_network_namespace *n,enum md_network_link
 }
 static void remove_one(struct md_network_namespace *n,unsigned index) {
     for (unsigned i=0;i<n->count;++i) {
-        if (n->links[i].master==index) n->links[i].master=0;
+        if (n->links[i].master==index) n->links[i].master=n->links[i].hairpin=n->links[i].isolated=0;
         if (n->links[i].info.index==index) {
             memmove(n->links+i,n->links+i+1,(n->count-i-1)*sizeof(*n->links));
             --n->count; --i;
@@ -113,7 +118,7 @@ int md_network_interface_move(struct md_network_namespace *from,unsigned index,s
     struct md_network_interface moved=*link;
     moved.policy=to->defaults;
     moved.policy_id=++to->next_policy;
-    moved.master=0; memcpy(moved.info.name,renamed,IFNAMSIZ);
+    moved.master=moved.hairpin=moved.isolated=0; memcpy(moved.info.name,renamed,IFNAMSIZ);
     remove_one(from,index); to->links[to->count++]=moved;
     return 0;
 }
@@ -179,6 +184,7 @@ void md_network_namespace_release(struct md_network_namespace *n) {
     struct md_network_namespace **at=&f->spaces;
     while (*at && *at!=n) at=&(*at)->next;
     if (*at) *at=n->next;
+    md_network_forward_changed(f);
     pthread_mutex_unlock(&f->lock);
     if (atomic_fetch_sub_explicit(&f->references,1,memory_order_acq_rel)==1) {
         md_network_forward_shutdown(f);
@@ -190,22 +196,50 @@ void md_network_namespace_release(struct md_network_namespace *n) {
 uint64_t md_network_namespace_inode(const struct md_network_namespace *n) { return n->inode; }
 const struct md_user_namespace *md_network_namespace_owner(const struct md_network_namespace *n) { return n->owner; }
 int md_network_namespace_managed(const struct md_network_namespace *n) { return n && n->mode!=MD_NETWORK_NATIVE; }
+static int veth_carrier(struct md_network_namespace *n,const struct md_network_interface *link) {
+    struct md_network_namespace *owner=md_network_interface_owner(n->fabric,link->peer);
+    struct md_network_interface *peer=owner ? md_network_interface_find(owner,link->peer,NULL) : NULL;
+    return (link->info.flags&IFF_UP) && peer && (peer->info.flags&IFF_UP);
+}
+struct md_network_link md_network_interface_snapshot(struct md_network_namespace *n,const struct md_network_interface *link) {
+    struct md_network_link out=link->info;
+    int carrier=!!(out.flags&IFF_UP);
+    if (link->kind==MD_LINK_VETH) carrier=veth_carrier(n,link);
+    else if (link->kind==MD_LINK_BRIDGE) {
+        carrier=0;
+        if (out.flags&IFF_UP) for (unsigned i=0;i<n->count;++i)
+            if (n->links[i].master==out.index && veth_carrier(n,&n->links[i])) { carrier=1; break; }
+    }
+    out.state=!(out.flags&IFF_UP) ? IF_OPER_DOWN
+        : carrier ? (link->kind==MD_LINK_LOOPBACK ? IF_OPER_UNKNOWN : IF_OPER_UP)
+        : link->kind==MD_LINK_VETH ? IF_OPER_LOWERLAYERDOWN : IF_OPER_DOWN;
+    out.flags&=~(IFF_RUNNING|IFF_LOWER_UP);
+    if (carrier) out.flags|=IFF_RUNNING|IFF_LOWER_UP;
+    out.peer=link->peer;
+    out.lifetime=link->policy_id;
+    return out;
+}
 int md_network_link_info(const struct md_network_namespace *n,unsigned index,struct md_network_link *out) {
     if (!md_network_namespace_managed(n)) return -EOPNOTSUPP;
     pthread_mutex_lock(&n->fabric->lock);
     struct md_network_interface *link=md_network_interface_find((struct md_network_namespace *)n,index,NULL);
-    if (link) {
-        *out=link->info;
-        out->state=(out->flags&IFF_UP) ? IF_OPER_UNKNOWN : IF_OPER_DOWN;
-    }
+    if (link) *out=md_network_interface_snapshot((struct md_network_namespace *)n,link);
     pthread_mutex_unlock(&n->fabric->lock);
     return link ? 0 : -ENODEV;
 }
 int md_network_link_list(struct md_network_namespace *n,struct md_network_link *out,unsigned capacity) {
+    return md_network_link_snapshot(n,NULL,out,capacity);
+}
+int md_network_link_snapshot(struct md_network_namespace *n,uint64_t *generation,
+        struct md_network_link *out,unsigned capacity) {
     if (!md_network_namespace_managed(n)) return -EXDEV;
     pthread_mutex_lock(&n->fabric->lock);
-    int result=n->count>capacity ? -ENOSPC : (int)n->count;
-    if (result>=0) for (unsigned i=0;i<n->count;++i) out[i]=n->links[i].info;
+    int result=generation && *generation==n->fabric->policy_generation ? 0
+        : n->count>capacity ? -ENOSPC : (int)n->count;
+    if (result>0) {
+        for (unsigned i=0;i<n->count;++i) out[i]=md_network_interface_snapshot(n,&n->links[i]);
+        if (generation) *generation=n->fabric->policy_generation;
+    }
     pthread_mutex_unlock(&n->fabric->lock); return result;
 }
 int md_network_ingress(struct md_network_namespace *n,const struct md_network_interface *in,uint32_t source,uint32_t destination) {

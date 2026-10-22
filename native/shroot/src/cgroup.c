@@ -23,6 +23,7 @@
 
 enum { PROCS, THREADS, EVENTS, CONTROLLERS, SUBTREE, TYPE, FREEZE,
     ALLOW, DENY, LIST, TASKS, NOTIFY, RELEASE, PIDS_MAX, PIDS_CURRENT, PIDS_EVENTS, FILES };
+enum { NS_DELEGATE=1, MEMORY_RECURSIVE_PROT=2 };
 struct control { const char *name; mode_t mode; unsigned views; };
 static const struct control controls[FILES]={
     [PROCS]={"cgroup.procs",0644,3}, [THREADS]={"cgroup.threads",0644,1},
@@ -54,6 +55,7 @@ struct world {
     struct md_cgroup_member *members;
     struct md_cgroup_view *views[2];
     struct md_cgroup_programs *programs;
+    int namespace_created;
 };
 struct md_cgroup_view {
     struct world *world;
@@ -61,6 +63,7 @@ struct md_cgroup_view {
     struct group *groups,*root;
     struct md_watch_source *events;
     uint64_t next_event_id;
+    unsigned options;
 };
 struct md_cgroup_member {
     atomic_uint refs;
@@ -76,6 +79,7 @@ struct md_cgroup_namespace {
     uint64_t inode;
     struct md_user_namespace *owner;
     struct world *world;
+    int initial;
     /* NULL captures the hierarchy root before its first mount, not the
      * member's future position. Groups live as long as their world. */
     struct group *roots[2];
@@ -88,6 +92,8 @@ struct opened {
     unsigned file;
     struct stat stat;
     struct md_fs_anchor *origin;
+    struct md_cgroup_namespace *namespace;
+    struct md_identity opener;
     struct md_watch_listener *listener;
     uint64_t observed;
 };
@@ -142,6 +148,8 @@ struct md_cgroup_namespace *md_cgroup_namespace_new(struct md_cgroup_member *m,s
     if (r) { free(ns); errno=-r; return NULL; }
     atomic_init(&ns->refs,1); ns->owner=md_user_namespace_retain(owner); ns->world=retain(m->world);
     pthread_mutex_lock(&m->world->lock);
+    ns->initial=!m->world->namespace_created;
+    m->world->namespace_created=1;
     memcpy(ns->roots,m->groups,sizeof(ns->roots));
     pthread_mutex_unlock(&m->world->lock); return ns;
 }
@@ -241,11 +249,39 @@ static int populate(struct md_cgroup_view *v,struct group *g) {
 static void depopulate(struct group *g) {
     for (unsigned i=0;i<FILES;++i) if (g->files[i].st_ino) unlinkat(g->fd,controls[i].name,0);
 }
-struct md_cgroup_view *md_cgroup_mount(struct md_cgroup_member *member,int parent,int devices,const struct md_identity *id) {
-    if (!member || !id || devices<0 || devices>1) { errno=EINVAL; return NULL; }
+int md_cgroup_parse_options(const char *options,unsigned *out) {
+    unsigned flags=0;
+    for (const char *at=options;at && *at;) {
+        size_t size=strcspn(at,",");
+        if (size==10 && !memcmp(at,"nsdelegate",10)) flags|=NS_DELEGATE;
+        else if (size==20 && !memcmp(at,"memory_recursiveprot",20)) flags|=MEMORY_RECURSIVE_PROT;
+        else return -EINVAL;
+        at+=size;
+        if (*at) ++at;
+    }
+    *out=flags; return 0;
+}
+int md_cgroup_options(struct md_cgroup_view *v,char *out,size_t size) {
+    pthread_mutex_lock(&v->world->lock);
+    unsigned flags=v->options;
+    pthread_mutex_unlock(&v->world->lock);
+    int length=snprintf(out,size,"%s%s%s",v->devices ? ",devices" : "",
+        flags&NS_DELEGATE ? ",nsdelegate" : "",
+        flags&MEMORY_RECURSIVE_PROT ? ",memory_recursiveprot" : "");
+    return length<0 ? -EIO : (size_t)length>=size ? -ENAMETOOLONG : 0;
+}
+struct md_cgroup_view *md_cgroup_mount(struct md_cgroup_member *member,int parent,int devices,const struct md_identity *id,
+        const struct md_cgroup_namespace *ns,const char *options) {
+    if (!member || !id || !ns || ns->world!=member->world || devices<0 || devices>1) { errno=EINVAL; return NULL; }
+    unsigned flags=0;
+    int parsed=devices ? options && !strcmp(options,"devices") ? 0 : -EINVAL
+        : md_cgroup_parse_options(options,&flags);
+    if (parsed) { errno=-parsed; return NULL; }
     struct world *w=member->world; pthread_mutex_lock(&w->lock);
     if (w->views[devices]) {
-        struct md_cgroup_view *v=md_cgroup_retain(w->views[devices]); pthread_mutex_unlock(&w->lock); return v;
+        struct md_cgroup_view *v=md_cgroup_retain(w->views[devices]);
+        if (ns->initial) v->options=flags;
+        pthread_mutex_unlock(&w->lock); return v;
     }
     struct md_cgroup_view *v=calloc(1,sizeof(*v));
     struct group *g=calloc(1,sizeof(*g));
@@ -257,6 +293,7 @@ struct md_cgroup_view *md_cgroup_mount(struct md_cgroup_member *member,int paren
     if (!error && (g->fd=openat(v->storage,"cgroup",O_RDONLY|O_DIRECTORY|O_CLOEXEC))<0) error=-errno;
     if (!error) { g->uid=id->uid.fs; g->gid=id->gid.fs; error=populate(v,g); }
     if (!error) {
+        if (ns->initial) v->options=flags;
         v->root=v->groups=g; w->views[devices]=v;
         for (struct md_cgroup_member *m=w->members;m;m=m->next) {
             m->groups[devices]=g;
@@ -460,6 +497,7 @@ static void opened_release(void *ctx) {
         *link=o->next;
         pthread_mutex_unlock(&o->view->world->lock);
         md_watch_source_unsubscribe(o->listener);
+        md_cgroup_namespace_release(o->namespace); md_identity_release(&o->opener);
         md_fs_anchor_release(o->origin); md_cgroup_release(o->view); free(o);
     }
 }
@@ -592,10 +630,15 @@ static long control_write(void *ctx,const struct md_control_actor *actor,const v
     if (!actor->resources->cgroup || actor->resources->cgroup->world!=v->world) return -EXDEV;
     if (md_fs_anchor_policy(o->origin)&MD_MOUNT_READONLY) return -EROFS;
     char text[4096]; memcpy(text,data,size); text[size]=0;
-    if (memchr(text,0,size)) return -EINVAL;
-    size_t n=size; while (n && (text[n-1]==' ' || text[n-1]=='\n' || text[n-1]=='\t')) text[--n]=0;
+    /* kernfs supplies a NUL-terminated string to cgroup text handlers. A
+     * caller may include the terminator in its byte count (for example LXC). */
+    size_t n=strlen(text); while (n && (text[n-1]==' ' || text[n-1]=='\n' || text[n-1]=='\t')) text[--n]=0;
     pthread_mutex_lock(&v->world->lock);
     int r=retired(o) ? -ENODEV : md_file_permissions(&o->group->files[o->file],W_OK,actor->identity);
+    struct group *boundary=o->namespace->roots[v->devices];
+    if (!boundary) boundary=v->root;
+    if (!r && !v->devices && (v->options&NS_DELEGATE) && !o->namespace->initial
+            && o->group==boundary && o->file!=PROCS && o->file!=THREADS && o->file!=SUBTREE) r=-EPERM;
     if (!r) switch (o->file) {
     case PROCS: case THREADS: case TASKS: {
         if (!n || strspn(text,"0123456789")!=n) { r=-EINVAL; break; }
@@ -610,6 +653,13 @@ static long control_write(void *ctx,const struct md_control_actor *actor,const v
                 target=m; break;
             }
         if (!target) { r=-ESRCH; break; }
+        if (!v->devices) {
+            struct group *source=target->groups[0],*common=source;
+            while (common && !below(o->group,common)) common=common->parent;
+            r=common ? md_file_permissions(&common->files[PROCS],W_OK,&o->opener) : -EXDEV;
+            if (!r && (v->options&NS_DELEGATE) && (!below(source,boundary) || !below(o->group,boundary))) r=-ENOENT;
+            if (r) break;
+        }
         if (!v->devices && o->group->parent && o->group->subtree) { r=-EBUSY; break; }
         for (struct md_cgroup_member *m=v->world->members;m;m=m->next)
             if (m==target || (o->file==PROCS && m->tid && m->tgid==target->tgid)) {
@@ -684,9 +734,10 @@ static const struct md_control_file_ops ops[3]={
         .filesystem=CGROUP2_SUPER_MAGIC,.access=opened_access,.origin=opened_origin,
         .poll_descriptor=events_poll_descriptor,.poll=events_poll}
 };
-int md_cgroup_open(struct md_cgroup_view *v,int fd,int flags,const struct md_identity *id,struct md_fs_anchor *origin,
+int md_cgroup_open(struct md_cgroup_view *v,int fd,int flags,const struct md_identity *id,struct md_cgroup_namespace *ns,struct md_fs_anchor *origin,
         const struct md_control_file_ops **out,void **context) {
     *out=NULL; *context=NULL;
+    if (!ns || ns->world!=v->world) return -EXDEV;
     struct stat st; if (fstat(fd,&st)) return -errno;
     pthread_mutex_lock(&v->world->lock); unsigned file;
     struct group *g=lookup(v,&st,&file);
@@ -706,6 +757,7 @@ int md_cgroup_open(struct md_cgroup_view *v,int fd,int flags,const struct md_ide
             if (!o) r=-ENOMEM;
             else {
                 atomic_init(&o->refs,1); o->view=md_cgroup_retain(v); o->group=g; o->file=file;
+                o->namespace=md_cgroup_namespace_retain(ns); o->opener=md_identity_copy(id);
                 o->stat=g->files[file]; o->observed=g->generation;
                 o->next=g->opened; g->opened=o;
                 o->origin=md_fs_anchor_retain(origin); *out=&ops[file==EVENTS ? 2 : v->devices]; *context=o;

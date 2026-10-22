@@ -102,6 +102,9 @@ static int open_context(struct md_filesystem *fs,const struct md_fs_request *q,
     return r;
 }
 static int parameter(struct filesystem_context *c,const struct md_fs_request *q) {
+    /* No current provider takes an FD-valued parameter. Validate the captured
+     * FD at admission, then report the unsupported parameter type as EINVAL. */
+    if (q->mode!=FSCONFIG_SET_FLAG && q->mode!=FSCONFIG_SET_STRING) return -EINVAL;
     const char *key=q->path[0],*value=q->value;
     int string=q->mode==FSCONFIG_SET_STRING;
     if (!strcmp(key,"source")) return !string ? -EINVAL : c->phase==MOUNTED ? -EOPNOTSUPP : 0;
@@ -124,6 +127,11 @@ static int parameter(struct filesystem_context *c,const struct md_fs_request *q)
         known=!strcmp(key,"mode") || !strcmp(key,"ptmxmode") || !strcmp(key,"uid") || !strcmp(key,"gid") || !strcmp(key,"newinstance");
         expect_string=strcmp(key,"newinstance")!=0; break;
     case MD_FS_MOUNT_CGROUP: known=!strcmp(key,"devices"); expect_string=0; break;
+    case MD_FS_MOUNT_CGROUP2: {
+        unsigned flags;
+        known=*key && !strchr(key,',') && !md_cgroup_parse_options(key,&flags);
+        expect_string=0; break;
+    }
     default: break;
     }
     /* Unknown filesystem options are EINVAL, including optional newer-kernel

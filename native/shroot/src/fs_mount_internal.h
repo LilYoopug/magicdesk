@@ -161,6 +161,8 @@ struct md_fs_anchor {
      * path descriptor above remains authoritative for metadata and names. */
     struct md_fd_identity endpoint;
     struct mdi_fifo_owner *fifo_custody;
+    /* A provider-only leaf pins its real parent, never an inert carrier. */
+    char *child;
 };
 static inline int md_view_same(const struct stat *a,const struct stat *b) {
     return a->st_dev==b->st_dev && a->st_ino==b->st_ino;
@@ -219,6 +221,8 @@ struct md_fs_anchor *md_view_anchor_import(struct md_inode_lifetime *, struct md
 /* Retains an already selected provider descriptor; does not resolve its name. */
 int md_view_anchor_duplicate(struct md_filesystem *,struct md_mount_namespace *,struct md_view_mount *,
         int fd,struct md_fs_anchor **);
+int md_view_anchor_child(struct md_filesystem *,struct md_mount_namespace *,struct md_view_mount *,
+        int parent,const char *name,struct md_fs_anchor **);
 void md_view_capture(struct md_filesystem *, struct md_mount_namespace *, struct md_view_mount *,
         struct md_fs_result *, const struct md_fs_output *);
 #endif

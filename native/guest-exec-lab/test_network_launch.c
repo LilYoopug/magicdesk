@@ -5,6 +5,7 @@
 #include "network_endpoint.h"
 #include "network_flow.h"
 #include "network_filter.h"
+#include "network_forward.h"
 #include "network_nft_objects.h"
 #include "network_nft_expression.h"
 #include <assert.h>
@@ -156,4 +157,86 @@ static void partial_rollback(void) {
     md_network_launch_close(&launch);
     puts("PASS partial multi-port reservation rollback and retry");
 }
-void test_network_launch(void) { parsing(); routes(); ports(); partial_rollback(); }
+static void port_state(const struct sockaddr_in *address,int listening) {
+    int fd=socket(AF_INET,SOCK_STREAM|SOCK_CLOEXEC,0); assert(fd>=0);
+    struct timeval timeout={.tv_sec=2};
+    assert(!setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout)));
+    /* EVENT_WAIT: native TCP handshake; a timeout is a failed assertion. */
+    int r=connect(fd,(const void *)address,sizeof(*address));
+    assert(listening ? !r : r==-1 && errno==ECONNREFUSED);
+    close(fd);
+    fd=socket(AF_INET,SOCK_STREAM|SOCK_CLOEXEC,0); assert(fd>=0);
+    assert(bind(fd,(const void *)address,sizeof(*address))==-1 && errno==EADDRINUSE);
+    close(fd);
+}
+static void reserved_publication(void) {
+    struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
+    assert(n);
+    int held=-1,token=0;
+    unsigned number=reserve(&held); close(held);
+    struct sockaddr_in address={.sin_family=AF_INET,.sin_addr.s_addr=htonl(INADDR_LOOPBACK),.sin_port=htons(number)};
+    struct md_network_filter_table table={.handle=1,.family=NFPROTO_IPV4};
+    struct md_filter_chain chain={.table=1,.handle=2,.hook=NF_INET_PRE_ROUTING,.nat=1,.policy=NF_ACCEPT};
+    struct md_filter_rule rule={.chain=2,.count=8};
+    struct md_filter_expression *e=rule.expressions;
+    e[0]=(struct md_filter_expression){.code=MD_FILTER_PAYLOAD,.key=NFT_PAYLOAD_NETWORK_HEADER,.aux=16,.size=4};
+    e[1]=(struct md_filter_expression){.code=MD_FILTER_COMPARE,.operation=NFT_CMP_EQ,.size=4};
+    memcpy(e[1].value,&address.sin_addr.s_addr,4);
+    e[2]=(struct md_filter_expression){.code=MD_FILTER_META,.key=NFT_META_L4PROTO,.size=1};
+    e[3]=(struct md_filter_expression){.code=MD_FILTER_COMPARE,.operation=NFT_CMP_EQ,.size=1,.value={IPPROTO_TCP}};
+    e[4]=(struct md_filter_expression){.code=MD_FILTER_PAYLOAD,.key=NFT_PAYLOAD_TRANSPORT_HEADER,.aux=2,.size=2};
+    e[5]=(struct md_filter_expression){.code=MD_FILTER_COMPARE,.operation=NFT_CMP_EQ,.size=2};
+    memcpy(e[5].value,&address.sin_port,2);
+    e[6]=(struct md_filter_expression){.code=MD_FILTER_IMMEDIATE,.dst=4,.size=4};
+    memcpy(e[6].value,&address.sin_addr.s_addr,4);
+    e[7]=(struct md_filter_expression){.code=MD_FILTER_NAT,.operation=NFT_NAT_DNAT,.key=1,.dst=4};
+    struct md_network_filter f={.tables=&table,.count=1,.chains=&chain,.chain_count=1,.rules=&rule,.rule_count=1};
+    struct md_network_port_reservation *reservation=NULL;
+    struct md_network_forward_update *update=NULL;
+    pthread_mutex_lock(&n->fabric->lock);
+    assert(!md_network_forward_bind(n,&token,SOCK_STREAM,&address,&reservation));
+    md_network_forward_bound(reservation,1);
+    port_state(&address,0);
+    assert(!md_network_forward_prepare(n,&f,&update));
+    md_network_forward_abort(update);
+    port_state(&address,0);
+    int occupied=-1;
+    unsigned busy=reserve(&occupied);
+    struct md_filter_rule rules[2]={rule,rule};
+    uint16_t port=htons(busy);
+    memcpy(rules[1].expressions[5].value,&port,2);
+    f.rules=rules; f.rule_count=2;
+    assert(md_network_forward_prepare(n,&f,&update)==-EADDRINUSE && !update);
+    port_state(&address,0);
+    close(occupied); f.rules=&rule; f.rule_count=1;
+    for (unsigned i=0;i<3;++i) {
+        assert(!md_network_forward_prepare(n,&f,&update));
+        md_network_forward_commit(update);
+        port_state(&address,1);
+        assert(!md_network_forward_prepare(n,NULL,&update));
+        md_network_forward_commit(update);
+        port_state(&address,0);
+    }
+    assert(!md_network_forward_prepare(n,&f,&update));
+    md_network_forward_commit(update);
+    assert(!md_network_forward_listen(n,&token,4));
+    assert(!md_network_forward_prepare(n,NULL,&update));
+    md_network_forward_commit(update);
+    port_state(&address,1);
+    md_network_forward_endpoint_closed(n,&token);
+    /* A guest may reserve a port after NAT publication, then outlive it. */
+    assert(!md_network_forward_prepare(n,&f,&update));
+    md_network_forward_commit(update);
+    assert(!md_network_forward_bind(n,&token,SOCK_STREAM,&address,&reservation));
+    md_network_forward_bound(reservation,1);
+    assert(!md_network_forward_prepare(n,NULL,&update));
+    md_network_forward_commit(update);
+    port_state(&address,0);
+    md_network_forward_endpoint_closed(n,&token);
+    pthread_mutex_unlock(&n->fabric->lock);
+    md_network_namespace_release(n);
+    held=socket(AF_INET,SOCK_STREAM|SOCK_CLOEXEC,0); assert(held>=0);
+    assert(!bind(held,(const void *)&address,sizeof(address))); close(held);
+    puts("PASS bound-only TCP: NAT admission, abort, removal, guest listen, late bind and port release");
+}
+void test_network_launch(void) { parsing(); routes(); ports(); partial_rollback(); reserved_publication(); }

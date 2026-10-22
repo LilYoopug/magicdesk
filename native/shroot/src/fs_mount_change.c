@@ -520,7 +520,7 @@ static int unmount(struct md_filesystem *fs, const struct md_fs_request *q,
         if (!fs->mounts->base.detached && fs->mounts->base.parent==target->mount) return -EBUSY;
         for (unsigned i=0;i<tree->count;++i)
             if (!tree->mounts[i].detached && tree->mounts[i].parent==target->mount) return -EBUSY;
-        int r=target->mount->links.shared && target->mount->parent && target->mount->parent->links.shared
+        int r=target->mount->parent && target->mount->parent->links.shared
             ? 0 : md_mount_graph_exclude(fs->mounts,target->mount,&lease);
         if (r) return r;
     }

@@ -672,7 +672,7 @@ static void hybrid(const char *path) {
         .value=&acl,.value_size=sizeof(acl),.capacity=sizeof(acl)};
     struct md_fs_result result={0}; md_inode_acl(s,&q,&result,NULL); assert(!result.error);
     assert(!mdi_begin(s,1)); struct mdi_node node; assert(!mdi_fd(s,regular,&node));
-    assert(!mdi_overlay_attribute_set(s,&node,"user.overlay.whiteout","y",1)); assert(!mdi_finish(s,0));
+    assert(!mdi_xattr_virtual_set(s,&node,"user.overlay.whiteout","y",1)); assert(!mdi_finish(s,0));
     assert(!md_inode_link(s,dir,"regular",dir,"alias",0));
     assert(!native_node(s,regular)); assert(!md_inode_object_id(s,regular,later) && !strcmp(id,later));
     assert(!md_inode_fstat(s,regular,&st) && st.st_nlink==2);

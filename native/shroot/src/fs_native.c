@@ -3,12 +3,15 @@
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
 #include "proc_paths.h"
+#include "procfs_view.h"
+#include <linux/magic.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/openat2.h>
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 
 void md_fs_directory_read(const struct md_fs_request *q, struct md_fs_result *out,
@@ -32,13 +35,40 @@ void md_fs_directory_read(const struct md_fs_request *q, struct md_fs_result *ou
     if (!error) out->size=(size_t)n;
 }
 
-void md_fs_native_descriptor(const struct md_fs_request *q, struct md_fs_result *out,
+static ssize_t native_directory(void *context,int fd,void *data,size_t size) {
+    struct statfs type;
+    if (fstatfs(fd,&type)) return -errno;
+    if (type.f_type==PROC_SUPER_MAGIC) {
+        /* An implicit proc directory retains the native PID view, but its
+         * entries still belong to the selected guest network namespace. */
+        const struct md_view_mount proc={.backing=MD_MOUNT_PROC};
+        return md_procfs_getdents(context,&proc,fd,data,size);
+    }
+    ssize_t n=syscall(SYS_getdents64,fd,data,size);
+    return n<0 ? -errno : n;
+}
+void md_fs_native_descriptor(struct md_filesystem *fs,const struct md_fs_request *q, struct md_fs_result *out,
         const struct md_fs_output *output) {
     if (q->operation==MD_FS_FSTAT) {
         struct stat st;
         out->error=fstat(q->directory[0],&st) ? -errno : 0;
         if (!out->error) md_fs_stat_info(&st,&out->info);
-    } else if (q->operation==MD_FS_GETDENTS) md_fs_directory_read(q,out,output,NULL,NULL);
+    } else if (q->operation==MD_FS_STATFS && (!q->path[0] || !*q->path[0])) {
+        out->error=0;
+        md_fs_statfs_result(q->directory[0],0,NULL,out,output);
+    } else if (q->operation==MD_FS_GETDENTS) md_fs_directory_read(q,out,output,native_directory,fs);
+    else if (q->operation==MD_FS_READLINK) {
+        struct statfs type;
+        if (fstatfs(q->directory[0],&type)) { out->error=-errno; return; }
+        if (type.f_type!=PROC_SUPER_MAGIC) return;
+        if (!output || !output->data || !output->capacity) { out->error=-EINVAL; return; }
+        /* A pinned proc link has the same target semantics with or without
+         * an explicit guest proc mount. Never expose its storage backing. */
+        const struct md_view_mount proc={.backing=MD_MOUNT_PROC};
+        ssize_t n=md_procfs_readlink(fs,&proc,q->directory[0],output->data,output->capacity);
+        out->error=n<0 ? (int)n : 0;
+        if (n>=0) out->size=(size_t)n;
+    }
 }
 
 static int task_relative(struct md_filesystem *fs, const char *path,
@@ -149,7 +179,7 @@ void md_fs_native_boundary(struct md_filesystem *fs, const struct md_inode_bound
             else {
                 struct md_fs_request query={.operation=MD_FS_FSTAT,.directory={target,-1},.origin={origin,NULL}};
                 md_fs_view_execute(fs,&query,out,output);
-                if (out->error==-EXDEV) md_fs_native_descriptor(&query,out,output);
+                if (out->error==-EXDEV) md_fs_native_descriptor(fs,&query,out,output);
                 close(target);
             }
         }

@@ -124,7 +124,14 @@ void md_fs_fdinfo(struct md_filesystem *fs,const struct md_fs_request *q,
             .directory={origin ? md_fs_anchor_fd(origin) : q->directory[1],-1},
             .origin={origin,NULL},.mode=MD_FS_STAT_MOUNT};
         struct md_fs_result info={.error=-EXDEV};
-        if (!control.ops || origin) md_fs_view_execute(fs,&metadata,&info,NULL);
+        if (control.ops) {
+            struct stat st;
+            info.error=control.ops->stat(control.context,&st);
+            if (!info.error) {
+                md_fs_stat_info(&st,&info.info);
+                md_fs_anchor_mount_info(origin,&info.info);
+            }
+        } else md_fs_view_execute(fs,&metadata,&info,NULL);
         if (info.error && info.error!=-EXDEV) result->error=info.error;
         if (!info.error) { f->mount_id=info.info.mount_id; f->inode=info.info.inode; }
         struct statx native;

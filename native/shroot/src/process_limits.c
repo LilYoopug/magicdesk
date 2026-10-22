@@ -22,7 +22,7 @@ struct accounting {
     struct scope *scopes;
     struct account *accounts[BUCKETS];
 };
-struct limits { unsigned references; struct rlimit nproc; };
+struct limits { unsigned references; struct md_process_limits value; rlim_t native_nofile_max; };
 struct md_process_member {
     unsigned references;
     struct accounting *owner;
@@ -87,14 +87,18 @@ static void accounting_release(struct accounting *owner) {
     }
     free(owner);
 }
-struct md_process_member *md_process_member_new(const struct md_identity *identity,const struct rlimit *limit) {
+int md_process_limits_read(struct md_process_limits *limits) {
+    if (getrlimit(RLIMIT_NPROC,&limits->nproc) || getrlimit(RLIMIT_NOFILE,&limits->nofile)) return -errno;
+    return 0;
+}
+struct md_process_member *md_process_member_new(const struct md_identity *identity,const struct md_process_limits *limit) {
     struct md_process_member *m=calloc(1,sizeof(*m));
     if (!m) return NULL;
     m->references=1;
     m->owner=calloc(1,sizeof(*m->owner));
     m->limits=calloc(1,sizeof(*m->limits));
     if (m->owner) m->owner->members=1;
-    if (m->limits) *m->limits=(struct limits){1,*limit};
+    if (m->limits) *m->limits=(struct limits){1,*limit,limit->nofile.rlim_max};
     if (!m->owner || !m->limits || md_process_member_identity(m,identity)) {
         md_process_member_release(m); return NULL;
     }
@@ -115,18 +119,18 @@ int md_process_member_identity(struct md_process_member *m,const struct md_ident
     if (!m || (m->account && m->account->uid==identity->uid.real
             && m->account->scope->key.device==key.device && m->account->scope->key.inode==key.inode
             && m->account->scope->key.generation==key.generation)) return 0;
-    struct account *next=account_get(m->owner,identity->user_namespace,identity->uid.real,m->limits->nproc.rlim_cur);
+    struct account *next=account_get(m->owner,identity->user_namespace,identity->uid.real,m->limits->value.nproc.rlim_cur);
     if (!next) return -ENOMEM;
     int changed=m->account && m->account->uid!=identity->uid.real;
     charge(next,1); charge(m->account,-1); m->account=next;
-    if (changed) m->exec_check=identity->uid.real && overlimit(next,m->limits->nproc.rlim_cur,0);
+    if (changed) m->exec_check=identity->uid.real && overlimit(next,m->limits->value.nproc.rlim_cur,0);
     return 0;
 }
 int md_process_member_fork(struct md_process_member *parent,const struct md_identity *identity,
         unsigned long flags,struct md_process_member **out) {
     *out=NULL;
     if (!parent) return -EINVAL;
-    if (overlimit(parent->account,parent->limits->nproc.rlim_cur,1)
+    if (overlimit(parent->account,parent->limits->value.nproc.rlim_cur,1)
             && identity->uid.real && !md_identity_capable_in(identity,NULL,CAP_SYS_RESOURCE)
             && !md_identity_capable_in(identity,NULL,CAP_SYS_ADMIN)) return -EAGAIN;
     struct md_process_member *m=calloc(1,sizeof(*m));
@@ -135,7 +139,7 @@ int md_process_member_fork(struct md_process_member *parent,const struct md_iden
     if (flags&CLONE_THREAD) { m->limits=parent->limits; ++m->limits->references; }
     else {
         m->limits=malloc(sizeof(*m->limits));
-        if (m->limits) *m->limits=(struct limits){1,parent->limits->nproc};
+        if (m->limits) *m->limits=(struct limits){1,parent->limits->value,parent->limits->native_nofile_max};
     }
     if (!m->limits) { md_process_member_release(m); return -ENOMEM; }
     m->account=parent->account; charge(m->account,1);
@@ -144,21 +148,33 @@ int md_process_member_fork(struct md_process_member *parent,const struct md_iden
 void md_process_member_forked(struct md_process_member *m) { if (m) m->exec_check=0; }
 int md_process_member_exec(struct md_process_member *m) {
     if (!m || !m->exec_check) return 0;
-    if (overlimit(m->account,m->limits->nproc.rlim_cur,0)) return -EAGAIN;
+    if (overlimit(m->account,m->limits->value.nproc.rlim_cur,0)) return -EAGAIN;
     m->exec_check=0; return 0;
 }
-struct rlimit md_process_nproc_value(const struct md_process_member *m) { return m->limits->nproc; }
-int md_process_nproc(struct md_process_member *m,const struct md_identity *actor,
-        const struct md_identity *target,int same_group,const struct rlimit *next,struct rlimit *old) {
+struct md_process_limits md_process_limits_value(const struct md_process_member *m) { return m->limits->value; }
+int md_process_limit(struct md_process_member *m,const struct md_identity *actor,
+        const struct md_identity *target,int same_group,unsigned resource,
+        const struct rlimit *next,struct rlimit *old,pid_t native_pid) {
     if (!m) return -ESRCH;
+    struct rlimit *value=resource==RLIMIT_NPROC ? &m->limits->value.nproc
+        : resource==RLIMIT_NOFILE ? &m->limits->value.nofile : NULL;
+    if (!value) return -EINVAL;
     if (next && next->rlim_cur>next->rlim_max) return -EINVAL;
     if (!same_group && !md_identity_capable_in(actor,target->user_namespace,CAP_SYS_RESOURCE)
             && !(actor->uid.real==target->uid.real && actor->uid.real==target->uid.effective
                 && actor->uid.real==target->uid.saved && actor->gid.real==target->gid.real
                 && actor->gid.real==target->gid.effective && actor->gid.real==target->gid.saved)) return -EPERM;
-    if (next && next->rlim_max>m->limits->nproc.rlim_max
+    if (next && resource==RLIMIT_NOFILE && next->rlim_max>MD_PROCESS_NOFILE_MAX) return -EPERM;
+    if (next && next->rlim_max>value->rlim_max
             && !md_identity_capable_in(actor,NULL,CAP_SYS_RESOURCE)) return -EPERM;
-    if (old) *old=m->limits->nproc;
-    if (next) m->limits->nproc=*next;
+    if (next && resource==RLIMIT_NOFILE) {
+        struct rlimit native={.rlim_max=m->limits->native_nofile_max};
+        /* Retain the executor's hard ceiling so a guest hard-limit reduction
+         * remains reversible. The kernel still enforces every FD allocation. */
+        native.rlim_cur=next->rlim_cur<native.rlim_max ? next->rlim_cur : native.rlim_max;
+        if (prlimit(native_pid,RLIMIT_NOFILE,&native,NULL)) return -errno;
+    }
+    if (old) *old=*value;
+    if (next) *value=*next;
     return 0;
 }

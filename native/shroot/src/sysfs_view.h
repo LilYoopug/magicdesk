@@ -13,9 +13,15 @@ struct md_sysfs *md_sysfs_retain(struct md_sysfs *);
 void md_sysfs_release(struct md_sysfs *);
 int md_sysfs_root(const struct md_sysfs *);
 struct md_provider_tree *md_sysfs_provider(const struct md_sysfs *);
-/* Borrowed immutable node index; -EXDEV selects native lower-tree handling. */
-int md_sysfs_node(const struct md_sysfs *,int fd);
-int md_sysfs_node_stat(const struct md_sysfs *,int node,struct stat *);
-int md_sysfs_node_open(struct md_sysfs *,int node,int flags,const struct md_identity *,
+/* Owned metadata values survive interface rename, removal and namespace moves. */
+struct md_sysfs_node {
+    struct stat stat;
+    unsigned attribute,interface;
+    uint64_t lifetime;
+};
+int md_sysfs_refresh(struct md_sysfs *);
+/* -EXDEV selects native lower-tree handling. */
+int md_sysfs_node(struct md_sysfs *,int fd,struct md_sysfs_node *);
+int md_sysfs_node_open(struct md_sysfs *,const struct md_sysfs_node *,int flags,const struct md_identity *,
     struct md_fs_anchor *,const struct md_control_file_ops **,void **);
 #endif

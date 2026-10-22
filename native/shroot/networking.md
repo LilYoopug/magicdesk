@@ -88,6 +88,33 @@ control sockets used by libc's `if_nametoindex`.
 Control descriptor selection joins the close/dup table turn, including capture
 of a namespace FD, and ends before guest output copying.
 
+Classic `SO_ATTACH_FILTER` programs are validated by the kernel and translated
+once by `socket_filter` to account for the private message envelope. Payload
+loads, lengths, branches and truncation retain guest-visible offsets; the kernel
+filters subsequent deliveries without a supervisor callback. Original-program
+queries, replacement, detach and locking belong to the socket description and
+survive dup/fork. Unsupported ancillary pseudo-loads and programs requiring an
+unavailable scratch register fail explicitly; translation beyond the kernel's
+instruction bound is rejected. `test_socket_filter.c` compares native filtering
+and `test_netlink_filter.py` checks the guest ABI.
+
+`network_ethernet` supplies CAP_NET_RAW-checked `AF_PACKET` raw/datagram sockets
+on the logical fabric. It reuses control queues, BPF and native guest-thread
+readiness; it never opens Android packet sockets. Veth, loopback and bridge
+forwarding publish real frames with `sockaddr_ll` provenance. An iterative walk
+visits each interface at most once per direction, bounding cyclic topologies.
+Link-local bridge control frames are not flooded to other ports. Protocol-zero
+sockets remain inactive until a protocol is selected. Bindings and memberships
+retain interface lifetimes across renames, but not namespace removal/recreation.
+Virtual Ethernet links have no hardware multicast filter; memberships are
+reference-counted with the socket, as on a software veth device. No FDB learning,
+packet mmap/rings, host-interface capture or reconstruction of translated TCP/UDP
+as Ethernet frames is claimed. Unimplemented packet options return an error.
+These queues are independent of the ordinary TCP/UDP endpoint fast path.
+`test_network_ethernet.py` covers raw/cooked delivery, filtering, source identity,
+permissions and retained namespace authority with Base and lazy entry;
+`test_network_ethernet.c` covers bridge cycles and binding retirement.
+
 Default launches use native networking. Opt-in `--network routed` creates a
 launch-owned fabric with an IPv4 uplink in its initial namespace. Children start
 offline; configured bridge/veth routes grant connectivity. `network_endpoint`
@@ -119,7 +146,7 @@ IPv4 `IP_PKTINFO` uses logical interface and destination addresses on receive,
 including a missing `msg_name` and truncated ancillary buffers. Send accepts
 local source/interface selection consistent with the supported route; unknown
 interfaces, nonlocal sources and unsupported routing return explicit errors.
-Native TTL/TOS ancillary settings remain available. IPv6, raw packets, multicast
+Native TTL/TOS ancillary settings remain available. IPv6, raw IP sockets, multicast
 subscriptions/broadcast, device-bound sockets, routed recvmmsg and other outgoing
 ancillary types are unsupported.
 This is not packet-level isolation: native ephemeral backing ports remain
@@ -192,7 +219,12 @@ NAT publications are inferred from finite port predicates by abstract evaluation
 not a trial packet with guessed source fields. Unbounded publication is rejected.
 Every real flow still evaluates the full predicates, including source addresses.
 Port reservations are prepared before ACK; failed encoding/publication rolls
-them back. Podman reservations and NAT share the same frontend lifetime.
+them back. A bound-only TCP socket retains its native reservation while NAT
+uses a separate acceptor at that address. Rollback or rule removal closes the
+acceptor and restores bind-only state without releasing the port. A real guest
+`listen` independently retains acceptance after NAT removal. Both bind-before-NAT
+and NAT-before-bind use this common frontend lifetime; no per-application path
+or extra per-payload syscall is involved.
 
 Direct unfiltered TCP and outgoing native UDP keep native connected IO only when
 neither direction has potentially denying hooks. Installing a policy that
@@ -226,8 +258,14 @@ The native model tests, stock nft traffic fixture and Podman bridge fixture
 separately verify rules, data IO and lifecycle. Docker 29's nftables backend runs
 through these same operations with userland-proxy disabled; its explicit
 iptables-disabled userland-proxy profile remains a separate comparison.
-`AF_BRIDGE` link queries expose bridge ports and their hairpin state. Hairpin
-forwarding uses that state, not an engine-specific exemption.
+`AF_BRIDGE` link queries expose bridge ports, hairpin mode and port isolation.
+Ethernet forwarding and routed IP flows share the same bridge-port admission:
+two isolated ports cannot exchange traffic, while delivery to the bridge host
+and non-isolated ports remains available. Retained mediated flows recheck both
+directions after policy changes. An update that would revoke an already opened
+native direct stream fails atomically with EBUSY; it never reports an unenforced
+policy as installed. Ordinary unfiltered, non-isolated streams retain native IO.
+Detaching a port or moving it to another namespace clears its bridge settings.
 
 ## Namespace-Owned Sysctls
 
@@ -293,10 +331,18 @@ keeps the native proc path and its permission failures.
 
 `sysfs_view` retains the network namespace selected at legacy mount or fsopen.
 Mount authorization belongs to that network namespace's user owner. The limited
-offline tree contains `class/net/lo`, its relative device/subsystem links,
+tree contains the selected namespace's `class/net` inventory, relative device/subsystem links,
 identity/MTU/flags/operstate/carrier attributes and `fs/cgroup` for separate mounts.
-`network_namespace` supplies the same atomic link snapshot to sysfs, ioctl and
-netlink. Mounted views do not follow the reader's later setns.
+`network_model` supplies the same atomic link snapshot to sysfs, ioctl and
+netlink, including veth peer indices and operational state. A veth has carrier
+only when both ends are up; a bridge needs an active port. Loopback retains
+Linux's UNKNOWN state while up. Link-state changes notify affected peers and
+bridges through the existing netlink source. Mounted views do not follow the reader's later setns.
+Topology revisions refresh names during sysfs lookup/enumeration, without a
+background observer or changes to ordinary filesystem paths. Rename preserves
+attribute inode identities; removal and namespace moves retire open controls,
+even when an interface with the same index later returns. Retired descriptors
+retain metadata but return ENODEV for data. Only live links occupy the inventory.
 
 The private name tree supplies stable native inode identities and ordinary
 directory enumeration, not attribute data or Android device access. Typed control

@@ -21,6 +21,7 @@ static int duplicate(int fd) { int copy = fcntl(fd, F_DUPFD_CLOEXEC, 3); return 
 int md_view_descriptor(struct md_filesystem *fs, int fd, const struct md_fs_anchor *origin,
         struct md_view_location *out) {
     *out=(struct md_view_location){.parent=-1,.fd=-1};
+    if (origin && origin->child) return -EOPNOTSUPP;
     int r=origin ? md_view_anchor_check(fs,fd,origin) : 0;
     if (r) return r;
     struct md_mount_namespace *view=origin ? origin->view : fs->mounts;
@@ -166,6 +167,7 @@ static int component(struct path_walk *w,struct md_mount_namespace *view,
         return r;
     }
     if (mount && mount->provider) {
+        if (mount->sysfs && (r=md_sysfs_refresh(mount->sysfs))) return r;
         const struct md_control_actor actor={.identity=w->fs->store->identity,.wakeup=w->fs->wakeup,
             .pid=w->fs->actor ? w->fs->actor->tid : 0};
         return point_native(next,md_provider_tree_lookup(mount->provider,current->fd,name,&actor,w->pending));
@@ -278,6 +280,7 @@ static int walk_path(struct md_filesystem *fs, int base, const struct md_fs_anch
     }
     r = !from_root && origin ? md_view_anchor_check(fs,base,origin) : 0;
     if (r) return r;
+    if (!from_root && origin && origin->child) return -ENOTDIR;
     r=point_native(&current,from_root ? md_view_root_fd(fs) : duplicate(base));
     if (r) { point_close(&current); return r; }
     view = !from_root && origin ? origin->view : fs->mounts;
@@ -362,7 +365,7 @@ static int walk_path(struct md_filesystem *fs, int base, const struct md_fs_anch
         }
         else {
             if (mount && mount->backing==MD_MOUNT_PROC)
-                r=point_native(&next,md_procfs_step(fs,mount,current.fd,name,todo,
+                r=point_native(&next,md_procfs_step(fs,view,mount,current.fd,name,todo,
                     follow>0 || (trailing && follow==0 && todo[strlen(todo)-1]=='/'),resolve));
             else if (mount && mount->backing==MD_MOUNT_DEVPTS)
                 r=point_native(&next,md_devpts_step(mount->devpts,current.fd,name));

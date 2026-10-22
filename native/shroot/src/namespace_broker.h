@@ -38,6 +38,7 @@ void md_broker_completion_handler(struct md_namespace_broker *,void (*)(pid_t,st
  * a kernel restart delegates without executing the operation a second time. */
 void md_broker_completion_taken(struct md_namespace_broker *,pid_t);
 void md_broker_control_factory(struct md_namespace_broker *,md_control_factory);
+void md_broker_control_query(struct md_namespace_broker *,md_control_query);
 struct md_entry_native;
 /* Only the supervisor reads/changes stopped registers. The worker retains
  * resource ownership until the native journal has an authoritative result. */

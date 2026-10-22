@@ -1,6 +1,7 @@
 #include "network_internal.h"
 #include <assert.h>
 #include <errno.h>
+#include <net/if.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -33,11 +34,29 @@ void test_network_model(void) {
     assert(!md_network_interface_find(root,second,NULL));
     assert(md_network_interface_find(child,second,NULL)->peer==first);
     assert(md_network_interface_owner(root->fabric,second)==child);
+    a=md_network_interface_find(root,first,NULL);
+    b=md_network_interface_find(child,second,NULL);
+    struct md_network_interface *master=md_network_interface_find(root,bridge,NULL);
+    assert(md_network_interface_snapshot(root,a).state==IF_OPER_DOWN);
+    a->info.flags|=IFF_UP; master->info.flags|=IFF_UP;
+    assert(md_network_interface_snapshot(root,a).state==IF_OPER_LOWERLAYERDOWN);
+    assert(!(md_network_interface_snapshot(root,a).flags&IFF_RUNNING));
+    assert(md_network_interface_snapshot(root,master).state==IF_OPER_DOWN);
+    b->info.flags|=IFF_UP;
+    assert(md_network_interface_snapshot(root,a).state==IF_OPER_UP);
+    assert(md_network_interface_snapshot(child,b).state==IF_OPER_UP);
+    assert(md_network_interface_snapshot(root,master).state==IF_OPER_UP);
+    assert(md_network_interface_snapshot(root,a).flags&IFF_RUNNING);
+    b->info.flags&=~IFF_UP;
+    assert(md_network_interface_snapshot(root,master).state==IF_OPER_DOWN);
+    a->hairpin=a->isolated=1;
     assert(md_network_interface_add(root,MD_LINK_BRIDGE,"bad/name",&bridge)==-EINVAL);
     assert(md_network_interface_add(root,MD_LINK_BRIDGE,"bridge0",&bridge)==-EEXIST);
     assert(md_network_interface_remove(child,1)==-EOPNOTSUPP);
     assert(!md_network_interface_remove(root,bridge));
-    assert(!md_network_interface_find(root,first,NULL)->master);
+    a=md_network_interface_find(root,first,NULL);
+    assert(!a->master);
+    assert(!a->hairpin && !a->isolated);
     pthread_mutex_unlock(&root->fabric->lock);
     md_network_namespace_release(child);
     pthread_mutex_lock(&root->fabric->lock);

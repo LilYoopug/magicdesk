@@ -33,21 +33,27 @@ int md_network_parameter_write(struct md_network_namespace *,enum md_network_par
 struct md_control_file md_network_sysctl_new(struct md_network_namespace *,enum md_network_parameter,const char *,struct md_fs_anchor *);
 struct md_network_link {
     unsigned index, flags, mtu, type, state, tx_queue_length;
+    unsigned peer;
+    uint64_t lifetime;
     char name[16];
     unsigned char address[6];
 };
 /* One control-plane snapshot for ioctl, netlink and namespace-mounted sysfs. */
 int md_network_link_info(const struct md_network_namespace *, unsigned, struct md_network_link *);
 int md_network_link_list(struct md_network_namespace *,struct md_network_link *,unsigned capacity);
+/* Zero means unchanged; publish the generation only after consuming the snapshot. */
+int md_network_link_snapshot(struct md_network_namespace *,uint64_t *generation,
+    struct md_network_link *,unsigned capacity);
 struct md_fd_object *md_network_socket_new(struct md_network_namespace *);
 int md_network_socket_offline(const struct md_fd_object *);
 int md_network_socket_control(const struct md_fd_object *);
 struct md_network_namespace *md_network_socket_namespace(const struct md_fd_object *);
 int md_network_interface_ioctl(unsigned long);
-int md_network_socket_open(struct md_network_namespace *, uint32_t uid, int family, int type, int protocol,
+int md_network_netlink_destination(const struct md_network_address *,uint32_t *groups);
+int md_network_socket_open(struct md_network_namespace *, const struct md_identity *, int family, int type, int protocol,
     struct md_fd_object **, int *fd);
 long md_network_socket_call(struct md_fd_object *, const struct md_identity *, long nr,
-    const unsigned long *, void *data, size_t capacity, size_t size, pid_t pid,uint32_t groups,
+    const unsigned long *, void *data, size_t capacity, size_t size, pid_t pid,const struct md_network_address *,
     const struct md_pid_identity *,
     const struct md_network_target *);
 #endif

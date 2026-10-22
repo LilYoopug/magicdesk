@@ -5,7 +5,7 @@
 
 struct md_network_flow_step {
     uint64_t space;
-    unsigned hook, hairpin_port;
+    unsigned hook, bridge_ingress, bridge_egress;
     struct md_filter_packet packet;
     struct md_filter_rewrite after;
 };

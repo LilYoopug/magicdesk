@@ -26,11 +26,12 @@ static long receive_credentials(struct md_network_packet *packet) {
     long released=md_adapter_buffer_release();
     return result ? result : released;
 }
-static long address(void *target,socklen_t capacity,void *length,const struct md_network_packet *packet) {
+static long address(void *target,socklen_t capacity,void *length,const struct md_network_packet *packet,int ethernet) {
     struct sockaddr_nl source={.nl_family=AF_NETLINK,.nl_pid=packet->port,
         .nl_groups=packet->group ? 1U<<(packet->group-1) : 0};
-    long error=md_write_memory(target,&source,capacity<sizeof(source) ? capacity : sizeof(source));
-    socklen_t size=sizeof(source);
+    const void *value=ethernet ? (const void *)&packet->ethernet : (const void *)&source;
+    socklen_t size=ethernet ? sizeof(packet->ethernet) : sizeof(source);
+    long error=md_write_memory(target,value,capacity<size ? capacity : size);
     return error ? error : md_write_memory(length,&size,sizeof(size));
 }
 static long control_item(struct msghdr *message,size_t *used,int level,int type,const void *data,size_t length) {
@@ -116,7 +117,7 @@ long md_network_packet_receive(long nr,const unsigned long *a) {
     result-=sizeof(packet);
     if (original.msg_name) {
         void *length=nr==SYS_recvmsg ? (char *)a[1]+offsetof(struct msghdr,msg_namelen) : (void *)a[5];
-        error=address(original.msg_name,original.msg_namelen,length,&packet);
+        error=address(original.msg_name,original.msg_namelen,length,&packet,options&MD_NETWORK_PACKET_ETHERNET);
     }
     if (!error && nr==SYS_recvmsg) {
         original.msg_flags=native.msg_flags;

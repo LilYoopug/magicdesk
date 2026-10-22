@@ -72,7 +72,7 @@ long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsign
     if (descriptor) {
         long known=md_descriptor_kind((int)a[0]);
         if (known<0) return known;
-        if (known==MD_DESCRIPTOR_ANONYMOUS) return md_descriptor_metadata((int)a[0],nr,a);
+        if (known==MD_DESCRIPTOR_ANONYMOUS) return md_descriptor_metadata(fs,(int)a[0],nr,a);
         if (known && (known!=MD_DESCRIPTOR_FILESYSTEM || nr==SYS_getdents64)) {
             long result=nr==SYS_getdents64 ? md_proc_control_call(nr,a)
                 : md_proc_control_metadata(&(struct md_proc_path){.process=(int)RAW0(gettid),.descriptor=(int)a[0]},nr,a);

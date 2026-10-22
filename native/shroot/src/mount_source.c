@@ -73,9 +73,6 @@ int md_mount_source_create(struct md_filesystem *fs,const struct md_fs_request *
     int cgroup=q->mode==MD_FS_MOUNT_CGROUP || q->mode==MD_FS_MOUNT_CGROUP2;
     if (!devpts && !cgroup && q->mode!=MD_FS_MOUNT_PROC) return -ENODEV;
     if (q->flags&~MD_FS_MOUNT_FLAGS) return -ENOTSUP;
-    if (q->mode==MD_FS_MOUNT_CGROUP) {
-        if (!q->value_size || strcmp(q->value,"devices")) return -ENOTSUP;
-    } else if (!devpts && q->mode!=MD_FS_MOUNT_PROC && q->value_size && (q->value_size!=1 || *(const char *)q->value)) return -ENOTSUP;
     struct md_pid_namespace *pid=fs->actor ? md_pid_identity_namespace(fs->actor->pid) : NULL;
     if (!devpts && !cgroup && !md_identity_capable_in(fs->store->identity,md_pid_namespace_owner(pid),CAP_SYS_ADMIN)) return -EPERM;
     if (cgroup && (!fs->actor || !fs->actor->cgroup)) return -EOPNOTSUPP;
@@ -88,7 +85,8 @@ int md_mount_source_create(struct md_filesystem *fs,const struct md_fs_request *
         int parent=md_fs_private_mounts_parent(fs->store);
         if (parent<0) return parent;
         if (devpts) s.devpts=md_devpts_new(parent,q->value_size ? q->value : NULL,fs->store->identity);
-        else s.cgroup=md_cgroup_mount(fs->actor->cgroup,parent,q->mode==MD_FS_MOUNT_CGROUP,fs->store->identity);
+        else s.cgroup=md_cgroup_mount(fs->actor->cgroup,parent,q->mode==MD_FS_MOUNT_CGROUP,fs->store->identity,
+            fs->actor->cgroup_namespace,q->value_size ? q->value : NULL);
         int error=errno; close(parent); errno=error;
         if ((devpts && !s.devpts) || (cgroup && !s.cgroup)) return -errno;
     } else {

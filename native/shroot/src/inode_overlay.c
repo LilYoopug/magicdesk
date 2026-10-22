@@ -101,7 +101,7 @@ static int properties(struct merge *m, const struct mdi_node *source, struct mdi
             if (b>=0) close(b);
         }
     }
-    if (!r) r=mdi_overlay_attributes_copy(m->index,target,m->source,source);
+    if (!r) r=mdi_xattr_virtual_copy(m->index,target,m->source,source);
     if (!r) r=mdi_channel_copy(m->index,target,m->source,source);
     return r ? r : node_origin(m,source,target);
 }
@@ -125,9 +125,9 @@ static int alias(struct merge *m, const struct mdi_node *source, struct mdi_node
     sqlite3_finalize(q); return r;
 }
 static int security_equal(struct merge *m, const struct mdi_node *source, const struct mdi_node *target) {
-    static const char sql[]="SELECT type,value FROM inode_acls WHERE object=?1 "
-        "UNION ALL SELECT 4,value FROM file_capabilities WHERE object=?1 "
-        "UNION ALL SELECT name+8,value FROM overlay_attributes WHERE object=?1 ORDER BY 1";
+    static const char sql[]="SELECT CAST(type AS TEXT),value FROM inode_acls WHERE object=?1 "
+        "UNION ALL SELECT '4',value FROM file_capabilities WHERE object=?1 "
+        "UNION ALL SELECT name,value FROM inode_xattrs WHERE object=?1 ORDER BY 1";
     sqlite3_stmt *a=NULL,*b=NULL;
     int r=mdi_prepare(m->source,sql,&a);
     if (!r) r=mdi_prepare(m->index,sql,&b);
@@ -143,7 +143,7 @@ static int security_equal(struct merge *m, const struct mdi_node *source, const 
         else if (left==SQLITE_DONE) break;
         else {
             int size=sqlite3_column_bytes(a,1);
-            same=sqlite3_column_int(a,0)==sqlite3_column_int(b,0)
+            same=!strcmp((const char *)sqlite3_column_text(a,0),(const char *)sqlite3_column_text(b,0))
                 && sqlite3_column_type(a,1)==sqlite3_column_type(b,1)
                 && size==sqlite3_column_bytes(b,1)
                 && !memcmp(sqlite3_column_blob(a,1),sqlite3_column_blob(b,1),(size_t)size);

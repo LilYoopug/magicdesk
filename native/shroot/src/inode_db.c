@@ -133,8 +133,8 @@ static void begin_read(struct md_inode_store *s) {
     s->recording=0; s->event_sequence=0; s->read_depth=1;
     s->operation_changes=sqlite3_total_changes64(s->db);
 }
-int mdi_begin(struct md_inode_store *s, int write) {
-    if (write && (s->readonly || s->mount_readonly)) return -EROFS;
+static int begin(struct md_inode_store *s,int write,int runtime) {
+    if (write && !runtime && (s->readonly || s->mount_readonly)) return -EROFS;
     if (s->read_depth) {
         if (write) return -EDEADLK;
         ++s->read_depth; return 0;
@@ -178,7 +178,7 @@ int mdi_begin(struct md_inode_store *s, int write) {
          * rows. Writes and rollback still invalidate through the row hooks. */
         if (!r && (write || s->cache_checked!=1)) mdi_cache_snapshot(s,s->locked_version);
         if (!r) r=mdi_super_refresh(s,s->locked_version);
-        if (!r && write && s->super_readonly) r=-EROFS;
+        if (!r && write && !runtime && s->super_readonly) r=-EROFS;
         if (r) { if (!sqlite3_get_autocommit(s->db)) transaction(s,MDI_ROLLBACK); }
         else {
             if (!write) begin_read(s);
@@ -191,6 +191,8 @@ int mdi_begin(struct md_inode_store *s, int write) {
     }
     return 0;
 }
+int mdi_begin(struct md_inode_store *s,int write) { return begin(s,write,0); }
+int mdi_runtime_begin(struct md_inode_store *s) { return begin(s,1,1); }
 int md_inode_read_scope_begin(void *store) { return mdi_begin(store,0); }
 int md_inode_read_scope_end(void *store) { return mdi_finish(store,0); }
 int md_inode_operation_window_begin(void *store) {

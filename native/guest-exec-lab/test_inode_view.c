@@ -56,7 +56,7 @@ static void control_attributes(struct md_inode_store *s) {
     assert(!fsetxattr(fd,"user.overlay.opaque","y",1,0));
     struct mdi_node node;
     assert(!mdi_begin(s,1) && !mdi_fd(s,fd,&node));
-    assert(!mdi_overlay_attribute_set(s,&node,"user.overlay.opaque",NULL,0));
+    assert(!mdi_xattr_virtual_set(s,&node,"user.overlay.opaque",NULL,0));
     assert(mdi_xattr_get(s,&node,"user.overlay.opaque",NULL,0)==-ENODATA);
     assert(mdi_commit(s,-ECANCELED)==-ECANCELED);
     assert(!mdi_begin(s,0));
@@ -111,6 +111,50 @@ static void owned_metadata(struct md_inode_store *s,const char *path,uint32_t ui
     assert(!mdi_begin(s,1) && !mdi_fd(s,fd,&node));
     assert(!mdi_metadata(s,&node,uid,gid,mode));
     assert(!mdi_commit(s,0)); close(fd);
+}
+static void trusted_attributes(struct md_inode_store *s) {
+    struct md_identity root=md_identity_new(0,0),user=md_identity_new(1000,1000);
+    s->identity=&root;
+    assert(!md_inode_mkdir(s,-1,"/trusted-files",0755));
+    int fd=md_inode_open(s,-1,"/trusted-files/file",O_CREAT|O_RDWR,0600); assert(fd>=0);
+    struct mdi_node node;
+    assert(!mdi_begin(s,0) && !mdi_fd(s,fd,&node) && node.native);
+    assert(!mdi_finish(s,0));
+    char name[256]; memset(name,'x',255); memcpy(name,"trusted.",8); name[255]=0;
+    char data[1024]; const char value[]={0,'a',-1};
+    struct md_fs_output output={.data=data,.capacity=sizeof(data)};
+    struct md_fs_result result={.fd=-1};
+    struct md_fs_request q={.operation=MD_FS_XATTR_OBJECT,.directory={fd,-1},.path={NULL,name},
+        .mode=MD_FS_XATTR_SET,.flags=XATTR_REPLACE,.value=value,.value_size=sizeof(value)};
+    md_inode_xattr(s,&q,&result,NULL); assert(result.error==-ENODATA);
+    q.flags=XATTR_CREATE;
+    md_inode_xattr(s,&q,&result,NULL); assert(!result.error);
+    md_inode_xattr(s,&q,&result,NULL); assert(result.error==-EEXIST);
+    assert(!mdi_begin(s,0) && !mdi_fd(s,fd,&node) && !node.native);
+    assert(!mdi_finish(s,0));
+    assert(!md_inode_link(s,-1,"/trusted-files/file",-1,"/trusted-alias",0));
+    assert(!md_inode_unlink(s,-1,"/trusted-files/file",0));
+    int alias=md_inode_open(s,-1,"/trusted-alias",O_RDONLY,0); assert(alias>=0);
+    q.directory[0]=alias; q.mode=MD_FS_XATTR_GET; q.capacity=sizeof(data);
+    q.value=NULL; q.value_size=0; q.flags=0;
+    md_inode_xattr(s,&q,&result,&output);
+    assert(!result.error && result.size==sizeof(value) && !memcmp(data,value,sizeof(value)));
+    q.capacity=1; md_inode_xattr(s,&q,&result,&output); assert(result.error==-ERANGE);
+    q.capacity=sizeof(data); q.mode=MD_FS_XATTR_LIST; q.path[1]=NULL;
+    md_inode_xattr(s,&q,&result,&output); assert(!result.error && listed(data,result.size,name));
+    s->identity=&user;
+    md_inode_xattr(s,&q,&result,&output); assert(!result.error && !listed(data,result.size,name));
+    q.mode=MD_FS_XATTR_GET; q.path[1]=name;
+    md_inode_xattr(s,&q,&result,&output); assert(result.error==-ENODATA);
+    q.mode=MD_FS_XATTR_REMOVE; q.capacity=0;
+    md_inode_xattr(s,&q,&result,NULL); assert(result.error==-EPERM);
+    s->identity=&root;
+    md_inode_xattr(s,&q,&result,NULL); assert(!result.error);
+    q.mode=MD_FS_XATTR_GET; q.directory[0]=fd;
+    md_inode_xattr(s,&q,&result,NULL); assert(result.error==-ENODATA);
+    close(alias); close(fd); s->identity=NULL;
+    md_identity_release(&root); md_identity_release(&user);
+    puts("PASS trusted xattrs: native promotion, hardlinks, retained FD, binary value, long name and capabilities");
 }
 static void overlay_credentials(struct md_inode_store *s) {
     struct md_identity root=md_identity_new(0,0),mounter=md_identity_new(1000,1000);
@@ -449,6 +493,7 @@ void test_inode_view(const char *base) {
     struct md_inode_store *s=NULL,*view=NULL;
     assert(!md_inode_store_open(path,1,&s));
     control_attributes(s);
+    trusted_attributes(s);
     int file=md_inode_open(s,-1,"/file",O_CREAT|O_RDWR,0600); assert(file>=0);
     assert(write(file,"lower",5)==5);
     struct mdi_node lower;

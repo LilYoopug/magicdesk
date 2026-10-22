@@ -171,7 +171,7 @@ static int promote(struct md_inode_store *s,const char *id,struct mdi_node *uppe
                 mdi_root(u),upper,&fd);
             if (fd>=0) close(fd);
             if (!r && node.kind==S_IFDIR) r=mdi_bind_body(s,&node,upper);
-            if (!r && node.kind==S_IFDIR && !lower) r=mdi_overlay_attribute_set(u,upper,
+            if (!r && node.kind==S_IFDIR && !lower) r=mdi_xattr_virtual_set(u,upper,
                 s->overlay->user_xattr ? "user.overlay.opaque" : "trusted.overlay.opaque","y",1);
         } else r=-EOPNOTSUPP;
         sqlite3_stmt *q=NULL;
@@ -227,7 +227,7 @@ static int sync_name(struct md_inode_store *s,const char *parent,const char *nam
     int fd=-1; struct md_inode_store *u=&s->overlay->upper;
     r=mdi_allocate(u,S_IFREG,0600,O_RDWR,NULL,up.id,&node,&fd);
     if (fd>=0) close(fd);
-    if (!r) r=mdi_overlay_attribute_set(u,&node,
+    if (!r) r=mdi_xattr_virtual_set(u,&node,
         s->overlay->user_xattr ? "user.overlay.whiteout" : "trusted.overlay.whiteout","",0);
     if (!r) r=set_name(s,&up,name,&node);
     return r;

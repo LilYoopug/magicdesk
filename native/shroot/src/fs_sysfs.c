@@ -54,27 +54,28 @@ int md_fs_sysfs_prepare(struct md_filesystem *fs,struct md_provider_tree **out) 
     return error;
 }
 
-struct selected_node { struct md_sysfs *view; int index; };
+struct selected_node { struct md_sysfs *view; struct md_sysfs_node value; };
 static int prepare_open(void *context,int fd,int flags,const struct md_identity *id,
         struct md_fs_anchor *origin,struct md_control_file *file) {
     (void)fd;
     struct selected_node *node=context;
-    return md_sysfs_node_open(node->view,node->index,flags,id,origin,&file->ops,&file->context);
+    return md_sysfs_node_open(node->view,&node->value,flags,id,origin,&file->ops,&file->context);
 }
 static int metadata(void *context,int fd,struct stat *out) {
     (void)fd;
     struct selected_node *node=context;
-    return md_sysfs_node_stat(node->view,node->index,out);
+    *out=node->value.stat; return 0;
 }
 
 int md_fs_sysfs_operation(struct md_filesystem *fs,struct md_mount_namespace *view,
         struct md_view_mount *mount,int fd,const struct md_fs_request *q,
         struct md_fs_result *out,const struct md_fs_output *output) {
     if (!mount || !mount->sysfs) return 0;
-    struct selected_node node={mount->sysfs,md_sysfs_node(mount->sysfs,fd)};
+    struct selected_node node={.view=mount->sysfs};
     if (fd>=0) {
-        if (node.index==-EXDEV) return 0;
-        if (node.index<0) { out->error=node.index; return 1; }
+        int error=md_sysfs_node(mount->sysfs,fd,&node.value);
+        if (error==-EXDEV) return 0;
+        if (error) { out->error=error; return 1; }
     }
     if (q->operation==MD_FS_REOPEN && fd>=0 && (q->mode&MD_FS_REOPEN_MUTABLE)) {
         out->error=md_view_readonly(mount) ? -EROFS : -EOPNOTSUPP; return 1;

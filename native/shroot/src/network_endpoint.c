@@ -45,7 +45,7 @@ static int direct_path(struct md_network_endpoint *e,const struct md_network_flo
     if (!p) return -ENOMEM;
     p->path=*path; p->next=e->direct; e->direct=p; ++e->direct_count; return 0;
 }
-int md_network_endpoint_filter_update(struct md_network_namespace *n,struct md_network_filter *filter) {
+int md_network_endpoint_policy_update(struct md_network_namespace *n,struct md_network_filter *filter) {
     /* Direct kernel streams cannot be moved into a relay after connect. Reject
      * a revoking transaction atomically rather than retain a stale allowance.
      * No per-read/write broker call is added to the ordinary data path. */

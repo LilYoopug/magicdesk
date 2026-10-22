@@ -9,6 +9,8 @@
 #include "inode_watch.h"
 #include "inode_internal.h"
 #include "ipc_credentials.h"
+#include "filesystem_ioctl.h"
+#include "bpf_request.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -387,6 +389,16 @@ static int fd_count(pid_t pid) {
     while ((entry = readdir(dir))) if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) ++count;
     closedir(dir); return count;
 }
+static void dump_fds(void) {
+    DIR *dir=opendir("/proc/self/fd"); CHECK(dir);
+    struct dirent *entry;
+    while ((entry=readdir(dir))) if (entry->d_name[0]!='.') {
+        char target[PATH_MAX];
+        ssize_t size=readlinkat(dirfd(dir),entry->d_name,target,sizeof(target)-1);
+        if (size>=0) { target[size]=0; fprintf(stderr,"fd %s: %s\n",entry->d_name,target); }
+    }
+    closedir(dir);
+}
 struct exchange_service {
     struct md_filesystem fs;
     int listener, stop, notice[2], release[2], after_reply;
@@ -405,7 +417,13 @@ static void *exchange_serve(void *context) {
     CHECK(!md_fs_serve(&s->fs,s->listener,s->stop,60000,NULL,NULL));
     return NULL;
 }
+static void *warm_thread(void *context) { return context; }
 static void exchange_retirement(void) {
+    /* Bionic opens its process-wide trace_marker lazily on pthread_create.
+     * Initialize libc before the exact Shroot descriptor-lifetime baseline. */
+    pthread_t warm; CHECK(!pthread_create(&warm,NULL,warm_thread,NULL));
+    /* EVENT_WAIT: the empty libc thread exits before leak accounting starts. */
+    CHECK(!pthread_join(warm,NULL));
     for (unsigned result=0;result<3;++result) for (unsigned after=0;after<2;++after) {
         int baseline=fd_count(getpid());
         struct exchange_service s={.after_reply=after};
@@ -490,7 +508,12 @@ static void exchange_retirement(void) {
         md_domain_release(resources.fs); md_fd_origins_release(resources.files);
         md_identity_release(&identity); md_fs_mounts_close(&s.fs);
         md_inode_store_close(s.fs.store);
-        CHECK(fd_count(getpid())==baseline);
+        int remaining=fd_count(getpid());
+        if (remaining!=baseline) {
+            fprintf(stderr,"exchange result=%u after=%u baseline=%d remaining=%d\n",result,after,baseline,remaining);
+            dump_fds();
+        }
+        CHECK(remaining==baseline);
     }
     puts("PASS exchange retirement before/after reply: service releases without client close or peer timeout; watch ACK ownership and no host FD leaks");
 }
@@ -1029,6 +1052,18 @@ static void request_contract(void) {
     value.directory[0]=3; value.path[0]=NULL; CHECK(!md_fs_request_validate(&value));
     value.directory[0]=AT_FDCWD; CHECK(md_fs_request_validate(&value)==-EBADF);
     CHECK(md_fs_operation_data_inputs(value.operation)==1);
+    struct md_fs_request fdinfo={.operation=MD_FS_FDINFO,.directory={-1,3},
+        .capture={{"/proc/123/fdinfo/3",O_CLOEXEC}}};
+    CHECK(md_fs_operation_data_inputs(fdinfo.operation)==2);
+    CHECK(!md_fs_request_validate(&fdinfo));
+    fdinfo.capture[0].path="/proc/123/fd/3";
+    CHECK(md_fs_request_validate(&fdinfo)==-EINVAL);
+    struct md_fs_request peer={.operation=MD_FS_IOCTL,.directory={3,-1},
+        .mode=TIOCGPTPEER,.flags=O_RDWR|O_NOCTTY|O_CLOEXEC};
+    CHECK(md_fs_operation_data_inputs(peer.operation)==1 && md_fs_operation_has_origin(peer.operation));
+    CHECK(!md_fs_request_validate(&peer));
+    peer.mode=FS_IOC_GETFLAGS; CHECK(md_fs_request_validate(&peer)==-EINVAL);
+    peer.flags=0; CHECK(!md_fs_request_validate(&peer));
     puts("PASS common request contract: resolution fields belong only to open");
 }
 static void result_contract(void) {
@@ -1060,6 +1095,15 @@ static void result_contract(void) {
     CHECK(md_fs_result_valid(&q,&r,guard,0,2));
     r.open_completion.kind=(enum md_open_kind)-1;
     CHECK(!md_fs_result_valid(&q,&r,guard,0,2));
+    q=(struct md_fs_request){.operation=MD_FS_IOCTL,.mode=TIOCGPTPEER,.flags=O_RDWR};
+    r=(struct md_fs_result){.fd=-1};
+    CHECK(md_fs_result_valid(&q,&r,guard,0,1));
+    CHECK(!md_fs_result_valid(&q,&r,guard,0,0));
+    r.open_completion.kind=MD_OPEN_CALLER;
+    CHECK(md_fs_result_valid(&q,&r,guard,0,1));
+    q.mode=FS_IOC_GETFLAGS; CHECK(!md_fs_result_valid(&q,&r,guard,0,1));
+    r.open_completion.kind=MD_OPEN_READY; CHECK(md_fs_result_valid(&q,&r,guard,0,0));
+    CHECK(!md_fs_result_valid(&q,&r,guard,0,1));
     q.operation=MD_FS_PATH;
     r=(struct md_fs_result){.fd=-1,.size=3};
     CHECK(md_fs_result_valid(&q,&r,"/x",3,0));
@@ -1095,6 +1139,25 @@ static void result_contract(void) {
     peer.group_count=MD_IDENTITY_GROUPS_MAX+1;
     CHECK(!md_fs_result_valid(&q,&r,(const char *)&peer,sizeof(peer),0));
     r.size=1; CHECK(!md_fs_result_valid(&q,&r,guard,1,0));
+    struct { struct md_bpf_info info; unsigned char code[16]; } bpf={
+        .info={.kind=MD_BPF_INFO_PROGRAM,.value.program={.xlated_prog_len=16}}};
+    q=(struct md_fs_request){.operation=MD_FS_BPF,.mode=BPF_OBJ_GET_INFO_BY_FD,.capacity=sizeof(bpf.info)+7};
+    r=(struct md_fs_result){.fd=-1,.size=q.capacity};
+    CHECK(md_fs_result_valid(&q,&r,(const char *)&bpf,sizeof(bpf),0));
+    --r.size; CHECK(!md_fs_result_valid(&q,&r,(const char *)&bpf,sizeof(bpf),0));
+    q.capacity=sizeof(bpf)+16; r.size=sizeof(bpf);
+    CHECK(md_fs_result_valid(&q,&r,(const char *)&bpf,sizeof(bpf),0));
+    bpf.info.value.program.nr_map_ids=MD_BPF_MAPS_PER_PROGRAM+1;
+    CHECK(!md_fs_result_valid(&q,&r,(const char *)&bpf,sizeof(bpf),0));
+    bpf.info.value.program.nr_map_ids=0;
+    bpf.info.value.program.xlated_prog_len=MD_BPF_INSTRUCTIONS_MAX*sizeof(struct bpf_insn)+1;
+    CHECK(!md_fs_result_valid(&q,&r,(const char *)&bpf,sizeof(bpf),0));
+    bpf.info.kind=MD_BPF_INFO_MAP;
+    CHECK(!md_fs_result_valid(&q,&r,(const char *)&bpf,sizeof(bpf),0));
+    r.size=sizeof(bpf.info);
+    CHECK(md_fs_result_valid(&q,&r,(const char *)&bpf,sizeof(bpf),0));
+    bpf.info.kind=0; CHECK(!md_fs_result_valid(&q,&r,(const char *)&bpf,sizeof(bpf),0));
+    r.size=sizeof(bpf.info)-1; CHECK(!md_fs_result_valid(&q,&r,guard,r.size,0));
     CHECK(!munmap(guard,page));
     puts("PASS common reply contract: mapped/wire payload bounds, paths, metadata, capabilities and descriptor counts");
 }

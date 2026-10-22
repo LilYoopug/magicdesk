@@ -45,8 +45,9 @@ static void *serve(void *context) {
     send_frame(s->connection,1,&d,sizeof(d)); send_frame(s->connection,5,NULL,0);
     uint64_t one=1; assert(write(s->ready,&one,8)==8); return NULL;
 }
-static int capture(void *context,const struct md_control_file_ops *ops,void *node,const struct md_identity *id,int flags) {
-    (void)id;
+static int capture(void *context,const struct md_control_file_ops *ops,void *node,const struct md_identity *id,int flags,
+        struct md_fs_anchor *origin) {
+    (void)id; (void)origin;
     struct md_control_file *file=context;
     void *opened=flags&O_PATH ? ops->retain(node) : ops->open(node,flags);
     if (!opened) return -errno;

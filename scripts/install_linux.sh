@@ -481,6 +481,19 @@ advertise that callback, so offscreen flushes retain their original no-op behavi
        .device_get_suspend_count = kgsl_device_get_suspend_count,
        .device_check_status = kgsl_device_check_status,
        .submitqueue_new = kgsl_submitqueue_new,
+@@ -1791,10 +1810,8 @@
+ VkResult
+ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
+ {
+-   if (instance->vk.enabled_extensions.KHR_display) {
+-      return vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
+-                       "I can't KHR_display");
+-   }
++   /* KGSL is render-only. The common display WSI accepts master_fd == -1
++    * and enumerates no displays; requesting the extension is still valid. */
+
+    struct tu_physical_device *device = (struct tu_physical_device *)
+       vk_zalloc(&instance->vk.alloc, sizeof(*device), 8,
 --- a/src/gallium/drivers/zink/zink_screen.c
 +++ b/src/gallium/drivers/zink/zink_screen.c
 @@ -34,6 +34,9 @@
@@ -2539,29 +2552,29 @@ MESA_PATCH
     if [ "$build_phase" != build ]; then
     case "$family" in
     apt) packages build-essential meson ninja-build pkg-config \
-        python3-mako python3-yaml python3-ply bison flex patch curl xz-utils glslang-tools \
+        python3-mako python3-yaml python3-ply python3-packaging bison flex patch curl xz-utils glslang-tools \
         libdrm-dev libexpat1-dev libzstd-dev zlib1g-dev libelf-dev \
         libwayland-dev libwayland-egl-backend-dev wayland-protocols libglvnd-dev libvulkan-dev vulkan-tools mesa-utils \
         libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxxf86vm-dev \
         libxrandr-dev libxshmfence-dev libxcb-glx0-dev libxcb-randr0-dev \
         libxcb-shm0-dev libxcb-dri3-dev libxcb-present-dev libxcb-sync-dev \
         libxcb-xfixes0-dev ;;
-    apk) packages build-base meson ninja pkgconf python3 py3-mako py3-yaml py3-ply bison flex \
+    apk) packages build-base meson ninja pkgconf python3 py3-mako py3-yaml py3-ply py3-packaging bison flex \
         patch curl xz glslang-dev linux-headers libdrm-dev expat-dev zstd-dev zlib-dev elfutils-dev \
         wayland-dev wayland-protocols libglvnd-dev vulkan-headers vulkan-tools \
         libx11-dev libxext-dev libxfixes-dev libxxf86vm-dev libxrandr-dev libxshmfence-dev libxcb-dev ;;
     dnf) packages gcc gcc-c++ meson ninja-build pkgconf-pkg-config python3-mako python3-pyyaml \
-        python3-ply bison flex patch curl xz glslang libdrm-devel expat-devel libzstd-devel zlib-ng-compat-devel \
+        python3-ply python3-packaging bison flex patch curl xz glslang libdrm-devel expat-devel libzstd-devel zlib-ng-compat-devel \
         elfutils-libelf-devel wayland-devel wayland-protocols-devel libglvnd-devel vulkan-headers vulkan-tools \
         libX11-devel libXext-devel libXfixes-devel libXxf86vm-devel libXrandr-devel libxshmfence-devel libxcb-devel ;;
-    pacman|recovery) packages base-devel meson ninja pkgconf python-mako python-yaml python-ply bison flex \
+    pacman|recovery) packages base-devel meson ninja pkgconf python-mako python-yaml python-ply python-packaging bison flex \
         patch curl xz glslang libdrm expat zstd zlib libelf wayland wayland-protocols libglvnd vulkan-headers \
         vulkan-tools libx11 libxext libxfixes libxxf86vm libxrandr libxshmfence libxcb ;;
     zypper) packages gcc gcc-c++ make meson ninja pkgconf-pkg-config python3-Mako python3-PyYAML \
-        python3-ply bison flex patch curl xz glslang-devel libdrm-devel libexpat-devel libzstd-devel zlib-devel \
+        python3-ply python3-packaging bison flex patch curl xz glslang-devel libdrm-devel libexpat-devel libzstd-devel zlib-devel \
         libelf-devel wayland-devel wayland-protocols-devel libglvnd-devel vulkan-headers vulkan-tools \
         libX11-devel libXext-devel libXfixes-devel libXxf86vm-devel libXrandr-devel libxshmfence-devel libxcb-devel ;;
-    xbps) packages base-devel meson ninja pkg-config python3-Mako python3-yaml python3-ply bison flex \
+    xbps) packages base-devel meson ninja pkg-config python3-Mako python3-yaml python3-ply python3-packaging bison flex \
         patch curl xz glslang libdrm-devel expat-devel libzstd-devel zlib-devel elfutils-devel \
         wayland-devel wayland-protocols libglvnd-devel Vulkan-Headers Vulkan-Tools \
         libX11-devel libXext-devel libXfixes-devel libXxf86vm-devel libXrandr-devel libxshmfence-devel libxcb-devel ;;
@@ -3129,6 +3142,16 @@ MD_DESKTOP_INSTALL
     steam_game
     printf 'MD_STEAM_GAME\nchmod 755 /usr/local/bin/magicdesk-steam-game\n}\n'
     cat <<'SETUP'
+arch_mirror_fallback() {
+    [ -f "$1" ] || return 0
+    # The ARM rootfs ships only a geo-redirector. Retain it after the official
+    # HTTPS mirror used for the rootfs; do not replace a user's mirror selection.
+    servers=$(sed -n 's/^[[:space:]]*Server[[:space:]]*=[[:space:]]*//p' "$1")
+    [ "$servers" = 'http://mirror.archlinuxarm.org/$arch/$repo' ] || return 0
+    awk '{ if ($0 ~ /^[[:space:]]*Server[[:space:]]*=/) print "Server = https://de3.mirror.archlinuxarm.org/$arch/$repo"; print }' \
+        "$1" > "$1.magicdesk-new"
+    mv "$1.magicdesk-new" "$1"
+}
 gui=$1
 protocol=$2
 locale_name=$3
@@ -3173,6 +3196,7 @@ case "$family" in
         refresh_packages
         packages ca-certificates bash coreutils util-linux tzdata glibc-locales shadow ;;
     pacman)
+        arch_mirror_fallback /etc/pacman.d/mirrorlist
         refresh_packages
         packages ca-certificates bash coreutils util-linux tzdata gzip ;;
     recovery)

@@ -6,4 +6,5 @@
 long md_namespace_open_resolved(const struct md_fs *, int, const char *, const struct open_how *);
 long md_namespace_open(const struct md_fs *, int, const char *, int, unsigned);
 long md_namespace_call(const struct md_fs *, const char *, long, const unsigned long *);
+long md_namespace_fstatfs(const struct md_fs *, int fd, void *out);
 #endif

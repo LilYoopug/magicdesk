@@ -266,6 +266,18 @@ use their retained credentials without reusing a dead native PID. Unknown host
 processes do not acquire guest credentials. Policy-free proc views skip these
 checks, and native file-data IO is unchanged. Filesystem-option remounts fail
 explicitly; per-mount bind flags retain their separate contract.
+
+Mounted proc admits optional PSI once, during provider creation, by opening and
+reading `pressure/cpu`, `pressure/memory` and `pressure/io` under the real
+executor identity. If any component is absent, disabled or access-denied,
+lookup and enumeration both omit `pressure`. Other errors fail preparation;
+no zero-valued statistics are fabricated. A readable interface retains native
+host-wide samples, not invented guest-cgroup accounting. Bind, detached mount
+and namespace copies retain the capability snapshot without syscall-path probes.
+The initial unmounted host-proc passthrough retains native access behavior.
+`test_fs_context.c` covers complete/partial/denied/error admission, and
+`test_proc_policy.py` checks both mount APIs, listing, lookup, bind and copy.
+
 Status/stat use typed per-open snapshots with guest IDs, credentials and debugger
 relationships; seeking to zero refreshes the snapshot. A zombie remains visible
 until wait consumes it. Namespace handles retain their owners after task exit;
@@ -491,8 +503,13 @@ through the common PID owner; native permission errors are preserved.
 This is a private name/membership view over native PTYs, not a kernel devpts
 mount or a separate index allocator. It does not hide already inherited terminal
 descriptions or explicit native `/dev` attachments. TIOCGPTPEER-created slave
-descriptors currently retain native metadata rather than mounted-view
-provenance. Cross-supervisor mount export fails explicitly for private devpts.
+descriptors retain the master's devpts mount provenance through the common
+descriptor-publication owner, including masters received through SCM_RIGHTS
+after replacing the receiver's mount namespace. The kernel selects the peer;
+logical chmod/chown still applies to that original instance. Creation without
+O_NOCTTY uses the same caller-completed open as a named slave. Ordinary terminal
+IO is not forwarded through the filesystem worker. Cross-supervisor mount export
+fails explicitly for private devpts.
 
 ## Permissive Cgroups
 

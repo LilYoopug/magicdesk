@@ -94,9 +94,12 @@ unlink, including stale listeners; existing connections survive unlink/rebind.
 Format 17 is the compatibility baseline. SQLite `application_id=0x53485254`
 identifies Shroot, `user_version=17` identifies the storage family, and the
 `properties` row `schema-revision` identifies the metadata revision (initially 1,
-currently 2). Revision 2 adds native-publication intents and large directory-cookie
-mappings; it does not
-move installed data or change image import identity.
+currently 3). Revision 2 adds native-publication intents and large directory-cookie
+mappings. Revision 3 replaces fixed overlay-attribute slots with named logical
+xattrs, preserving existing overlay values and tombstones. Guest `trusted.*`
+attributes use the same inode identity and guest capability checks; they do not
+require Android trusted-xattr permissions. These revisions do not move installed
+data or change image import identity.
 Admission validates those markers before current-schema namespace queries or
 journal changes. Unknown families, missing markers and newer revisions fail;
 there is no reader/writer implementation for formats 14-16 or automatic deletion.

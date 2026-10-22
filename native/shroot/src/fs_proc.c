@@ -5,14 +5,74 @@
 #include "network_namespace.h"
 #include "proc_paths.h"
 #include "proc_sysctl.h"
+#include "proc_devices.h"
 #include "user_sysctl.h"
 #include "procfs_view.h"
 #include "linux_abi.h"
+#include "file_permissions.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/magic.h>
 #include <string.h>
 #include <unistd.h>
+
+void md_fs_proc_task(struct md_filesystem *fs,struct md_fs_anchor *origin,const char *path,
+        const struct md_fs_request *q,struct md_fs_result *out,const struct md_fs_output *output) {
+    struct md_proc_path ref=md_proc_path_for(path,0,0);
+    enum md_proc_kind selected=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
+    enum md_proc_file_kind kind=(enum md_proc_file_kind)(selected-MD_PROC_UID_MAP);
+    if (!md_proc_file_task(kind) || !fs->actor) return;
+    struct md_task_snapshot target;
+    int error=md_task_registry_proc(fs->tasks,ref.process,&target);
+    /* External Android processes retain native inspection and admission. */
+    if (error==-ESRCH) return;
+    struct stat st;
+    struct md_proc_file_node node;
+    if (!error) error=md_proc_file_task_stat(ref.process,&target.identity,kind,&node,&st);
+    *out=(struct md_fs_result){.fd=-1,.error=error};
+    if (!error) switch (q->operation) {
+    case MD_FS_STAT: case MD_FS_FSTAT:
+        md_fs_stat_info(&st,&out->info); md_fs_anchor_mount_info(origin,&out->info);
+        break;
+    case MD_FS_ACCESS:
+        error=(q->mode&W_OK) && md_view_readonly(origin->mount) ? -EROFS
+            : md_proc_file_task_access(fs->store->identity,&st,q->mode,1);
+        break;
+    case MD_FS_OPEN: case MD_FS_REOPEN: {
+        unsigned mode=(q->flags&O_PATH) ? 0 : (q->flags&O_ACCMODE)==O_RDWR ? R_OK|W_OK
+            : (q->flags&O_ACCMODE)==O_WRONLY ? W_OK : R_OK;
+        if (!(q->flags&O_PATH) && (q->flags&O_TRUNC)) mode|=W_OK;
+        error=(mode&W_OK) && md_view_readonly(origin->mount) ? -EROFS
+            : md_proc_file_task_access(fs->store->identity,&st,mode,1);
+        if (!error && (q->flags&O_NOATIME) && !(q->flags&O_PATH))
+            error=md_file_noatime(&st,fs->store->identity);
+        struct md_proc_file *file=NULL;
+        if (!error) {
+            file=md_proc_file_open(target.identity.user_namespace,kind,fs->store->identity,(int)q->flags);
+            if (!file) error=-errno;
+        }
+        if (file) {
+            md_proc_file_node(file,node);
+            md_proc_file_pid_view(file,origin->mount->pid_namespace);
+            md_proc_file_cgroup(file,target.cgroup);
+            md_proc_file_place(file,origin,&st);
+            error=md_fs_control_publish(md_proc_file_descriptor(file),md_proc_file_control(file),origin,
+                fs->store->identity,(int)q->flags,out,output);
+            md_proc_file_release(file);
+        }
+        break;
+    }
+    case MD_FS_STATFS:
+        md_fs_statfs_result(origin->fd,md_fs_anchor_policy(origin),NULL,out,output);
+        if (!out->error) ((struct md_fs_statfs *)output->data)->type=PROC_SUPER_MAGIC;
+        break;
+    case MD_FS_READLINK: error=-EINVAL; break;
+    case MD_FS_GETCAP: case MD_FS_GETACL: error=-ENODATA; break;
+    default: error=-EOPNOTSUPP; break;
+    }
+    if (error) out->error=error;
+    md_task_snapshot_release(&target);
+}
 
 int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *view,
         struct md_view_mount *mount,int fd,const struct md_fs_request *q,
@@ -25,9 +85,37 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
     enum md_proc_file_kind kind=(enum md_proc_file_kind)(ref.kind-MD_PROC_UID_MAP);
     int sysctl=md_proc_file_sysctl(kind);
     int user_control=ref.kind==MD_PROC_MAX_USER_NAMESPACES;
+    int catalogue=ref.kind==MD_PROC_DEVICES;
     if (q->operation==MD_FS_STATFS) {
         md_fs_statfs_result(fd,md_mount_policy_flags(&mount->policy),NULL,out,output);
         if (!out->error) ((struct md_fs_statfs *)output->data)->type=PROC_SUPER_MAGIC;
+        return 1;
+    }
+    if (md_procfs_masked(path)) {
+        switch (q->operation) {
+        case MD_FS_PATH: case MD_FS_OBJECT_ID: return 0;
+        case MD_FS_OPEN: case MD_FS_REOPEN:
+            if (q->flags&O_PATH) return 0;
+            r=-EACCES; break;
+        case MD_FS_STAT: case MD_FS_FSTAT: {
+            struct stat st;
+            r=fstat(fd,&st) ? -errno : 0;
+            if (!r) {
+                st.st_mode&=S_IFMT;
+                st.st_uid=st.st_gid=0;
+                md_fs_stat_info(&st,&out->info); out->info.mount_id=mount->id;
+            }
+            break;
+        }
+        case MD_FS_ACCESS:
+            r=(q->flags&~(AT_SYMLINK_NOFOLLOW|MD_AT_EACCESS)) || (q->mode&~7) ? -EINVAL
+                : q->mode ? -EACCES : 0;
+            break;
+        case MD_FS_READLINK: r=-EINVAL; break;
+        case MD_FS_GETCAP: case MD_FS_GETACL: r=-ENODATA; break;
+        default: r=-EACCES; break;
+        }
+        if (r) out->error=r;
         return 1;
     }
     if (q->operation!=MD_FS_PATH && q->operation!=MD_FS_OBJECT_ID) {
@@ -46,12 +134,12 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
         else out->error=r;
         return 1;
     }
-    if (!sysctl && !network_control && !user_control && (q->operation==MD_FS_OPEN || q->operation==MD_FS_REOPEN)
+    if (!sysctl && !network_control && !user_control && !catalogue && (q->operation==MD_FS_OPEN || q->operation==MD_FS_REOPEN)
             && (q->flags&O_NOATIME) && !(q->flags&O_PATH)) {
         r=md_procfs_noatime(fs,fd,path);
         if (r) { out->error=r; return 1; }
     }
-    if (!sysctl && !network_control && !user_control && (q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT)
+    if (!sysctl && !network_control && !user_control && !catalogue && (q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT)
             && mount->provider) {
         int private=md_provider_tree_private(mount->provider,fd);
         if (private<0) { out->error=private; return 1; }
@@ -70,7 +158,7 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
             return 1;
         }
     }
-    if (!sysctl && !user_control && (!md_proc_network_sysctl(ref.kind)
+    if (!sysctl && !user_control && !catalogue && (!md_proc_network_sysctl(ref.kind)
             || !md_network_namespace_managed(fs->actor->network))) return 0;
     if (q->operation==MD_FS_PATH || q->operation==MD_FS_OBJECT_ID) return 0;
     /* Metadata/access do not need an open description or its carrier memfd. */
@@ -94,6 +182,7 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
     struct md_control_file file={0};
     if (!r) {
         file=sysctl ? md_proc_sysctl_new(kind,origin,fs->actor->uts)
+            : catalogue ? md_proc_devices_new(fs->store->identity->user_namespace,origin)
             : user_control ? md_user_sysctl_new(fs->store->identity->user_namespace,origin)
             : md_network_sysctl_new(fs->actor->network,
             (enum md_network_parameter)(ref.kind-MD_PROC_NET_UNPRIVILEGED_PORT),ref.interface,origin);

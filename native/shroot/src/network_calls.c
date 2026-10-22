@@ -13,12 +13,15 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/netlink.h>
+#include <linux/filter.h>
 #include <linux/sockios.h>
 #include <net/if.h>
 #include <stddef.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/uio.h>
+
+_Static_assert(sizeof(((struct md_network_address *)0)->value)==sizeof(struct sockaddr_storage),"socket address transport");
 
 long md_network_open(const unsigned long *a) {
     long memory=md_adapter_buffer_take(); if (memory<0) return memory;
@@ -42,6 +45,10 @@ static int queue_option(unsigned long level,unsigned long option) {
     if (level!=SOL_SOCKET) return 0;
     switch (option) {
     case SO_SNDTIMEO: case SO_RCVTIMEO: case SO_SNDBUF: case SO_RCVBUF:
+    case SO_SNDBUFFORCE: case SO_RCVBUFFORCE:
+    /* Netlink port IDs remain exclusive; this generic socket flag only
+     * needs the kernel-owned value, shared by dup and fork. */
+    case SO_REUSEADDR:
         return 1;
     default: return 0;
     }
@@ -240,7 +247,8 @@ static long control_call(long nr,const unsigned long *a,int events) {
         return md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
     }
     size_t size=0; const void *input=NULL;
-    uint32_t groups=0;
+    unsigned filter_capacity=0;
+    struct md_network_address destination={0};
     struct msghdr message={0};
     struct iovec vectors[64];
     if (nr==SYS_sendmsg) {
@@ -248,11 +256,9 @@ static long control_call(long nr,const unsigned long *a,int events) {
         if (a[2]&~(MSG_DONTWAIT|MSG_NOSIGNAL) || message.msg_controllen) return -EOPNOTSUPP;
         if (message.msg_iovlen>64) return -EMSGSIZE;
         if (message.msg_name) {
-            struct sockaddr_nl address;
-            if (message.msg_namelen<sizeof(address) || message.msg_namelen>sizeof(struct sockaddr_storage)) return -EINVAL;
-            error=md_read_memory(&address,message.msg_name,sizeof(address)); if (error) return error;
-            if (address.nl_family!=AF_NETLINK || address.nl_pid) return -EOPNOTSUPP;
-            groups=address.nl_groups;
+            if (message.msg_namelen<sizeof(sa_family_t) || message.msg_namelen>sizeof(destination.value)) return -EINVAL;
+            destination.size=message.msg_namelen;
+            error=md_read_memory(&destination.value,message.msg_name,destination.size); if (error) return error;
         }
         error=md_read_memory(vectors,message.msg_iov,message.msg_iovlen*sizeof(*vectors)); if (error) return error;
         for (size_t i=0;i<message.msg_iovlen;++i) {
@@ -267,29 +273,51 @@ static long control_call(long nr,const unsigned long *a,int events) {
         if (nr==SYS_sendto) {
             if (a[3]&~(MSG_DONTWAIT|MSG_NOSIGNAL)) return -EOPNOTSUPP;
             if (a[4]) {
-                struct sockaddr_nl address;
-                if (a[5]<sizeof(address) || a[5]>sizeof(struct sockaddr_storage)) return -EINVAL;
-                long error=md_read_memory(&address,(void *)a[4],sizeof(address)); if (error) return error;
-                if (address.nl_family!=AF_NETLINK || address.nl_pid) return -EOPNOTSUPP;
-                groups=address.nl_groups;
+                if (a[5]<sizeof(sa_family_t) || a[5]>sizeof(destination.value)) return -EINVAL;
+                destination.size=a[5];
+                long error=md_read_memory(&destination.value,(void *)a[4],destination.size); if (error) return error;
             }
         }
-    } else if (nr==SYS_setsockopt) { size=a[4]; input=(void *)a[3]; }
+    } else if (nr==SYS_setsockopt) {
+        size=a[4]; input=(void *)a[3];
+        if (!events && a[1]==SOL_SOCKET && a[2]==SO_ATTACH_FILTER) {
+            if (size!=sizeof(struct sock_fprog)) return -EINVAL;
+            struct sock_fprog program;
+            long error=md_read_memory(&program,input,sizeof(program)); if (error) return error;
+            if (!program.len || program.len>BPF_MAXINSNS) return -EINVAL;
+            size=program.len*sizeof(*program.filter); input=program.filter;
+        }
+    }
     else if (nr!=SYS_getsockname && nr!=SYS_getpeername && nr!=SYS_getsockopt) return -EOPNOTSUPP;
+    if (!events && nr==SYS_getsockopt && a[1]==SOL_SOCKET && a[2]==SO_GET_FILTER) {
+        long error=md_read_memory(&filter_capacity,(void *)a[4],sizeof(filter_capacity));
+        if (error) return error;
+    }
     if (size>MD_NETWORK_BUFFER_SIZE) return -EMSGSIZE;
     long memory=md_adapter_buffer_take(); if (memory<0) return memory;
+    struct md_network_request *request=(void *)memory;
+    request->destination=destination;
+    void *data=request->data;
     long result=0;
     if (nr==SYS_sendmsg) {
         size_t offset=0;
         for (size_t i=0;!result && i<message.msg_iovlen;++i) {
-            result=md_read_memory((char *)memory+offset,vectors[i].iov_base,vectors[i].iov_len);
+            result=md_read_memory((char *)data+offset,vectors[i].iov_base,vectors[i].iov_len);
             offset+=vectors[i].iov_len;
         }
-    } else if (size) result=md_read_memory((void *)memory,input,size);
-    if (!result) result=md_guest_buffer_control(MD_BUFFER_NETWORK_CALL,size,groups);
-    if (!result && nr==SYS_ioctl) result=md_write_memory((void *)a[2],(void *)memory,size);
+    } else if (size) result=md_read_memory(data,input,size);
+    if (!result) result=md_guest_buffer_control(MD_BUFFER_NETWORK_CALL,size,0);
+    if (!result && nr==SYS_ioctl) result=md_write_memory((void *)a[2],data,size);
+    else if (result>=0 && !events && nr==SYS_getsockopt && a[1]==SOL_SOCKET && a[2]==SO_GET_FILTER) {
+        unsigned count=(unsigned)result/sizeof(struct sock_filter);
+        if (filter_capacity && filter_capacity<count) result=-EINVAL;
+        else {
+            result=filter_capacity ? md_write_memory((void *)a[3],data,(size_t)result) : 0;
+            if (!result) result=md_write_memory((void *)a[4],&count,sizeof(count));
+        }
+    }
     else if (result>=0 && (nr==SYS_getsockname || nr==SYS_getpeername || nr==SYS_getsockopt))
-        result=output((void *)a[nr==SYS_getsockopt ? 3 : 1],(void *)a[nr==SYS_getsockopt ? 4 : 2],(void *)memory,result);
+        result=output((void *)a[nr==SYS_getsockopt ? 3 : 1],(void *)a[nr==SYS_getsockopt ? 4 : 2],data,result);
     long released=md_adapter_buffer_release(); return result ? result : released;
 }
 long md_network_call(long nr,const unsigned long *a) { return control_call(nr,a,0); }

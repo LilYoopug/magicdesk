@@ -3,10 +3,12 @@
 #include "network_namespace.h"
 #include "network_message.h"
 #include <linux/netlink.h>
-/* Resolves a captured guest namespace handle, never a host PID/path. */
+enum md_network_target_kind { MD_NETWORK_TARGET_NONE, MD_NETWORK_TARGET_FD, MD_NETWORK_TARGET_PID };
+struct md_network_target_reference { enum md_network_target_kind kind; int value; };
+/* Resolves guest descriptors or guest-visible PIDs, never host PID/path input. */
 struct md_network_target {
     void *context;
-    int (*resolve)(void *,int,struct md_network_namespace **);
+    int (*resolve)(void *,struct md_network_target_reference,struct md_network_namespace **);
 };
 int md_network_route_query(unsigned);
 enum { MD_NETWORK_ROUTE_CAPPED_ACK=1, MD_NETWORK_ROUTE_STRICT=2 };

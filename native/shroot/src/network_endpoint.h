@@ -30,5 +30,5 @@ struct md_network_endpoint_info {
 int md_network_endpoint_snapshot(struct md_network_namespace *,int,
     struct md_network_endpoint_info **,size_t *);
 struct md_network_filter;
-int md_network_endpoint_filter_update(struct md_network_namespace *,struct md_network_filter *);
+int md_network_endpoint_policy_update(struct md_network_namespace *,struct md_network_filter *);
 #endif

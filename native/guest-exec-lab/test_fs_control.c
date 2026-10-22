@@ -10,14 +10,16 @@
 #include <string.h>
 #include <unistd.h>
 
-struct provider { unsigned refs,calls; int error,prepare_error,untyped; };
+struct provider { unsigned refs,calls; int error,prepare_error,untyped,require_origin; };
 static void *retain(void *context) { struct provider *p=context; ++p->refs; return p; }
 static void release(void *context) { struct provider *p=context; assert(p->refs); --p->refs; }
 static const struct md_control_file_ops ops={.retain=retain,.release=release};
 static int publish(void *context,const struct md_control_file_ops *operations,void *file,
-        const struct md_identity *id,int flags) {
+        const struct md_identity *id,int flags,struct md_fs_anchor *origin) {
     (void)id; (void)flags;
     struct provider *p=context;
+    assert(!!origin==p->require_origin);
+    if (origin) assert(md_fs_anchor_fd(origin)>=0);
     assert(file==p && operations==&ops && p->refs);
     ++p->calls; return p->error;
 }
@@ -52,6 +54,7 @@ void test_fs_control(const char *base) {
     unsigned before=descriptors();
     for (unsigned i=0;i<24;++i) {
         for (unsigned mode=0;mode<6;++mode) {
+            provider.require_origin=1;
             struct md_fs_result out={.fd=-1};
             provider.error=mode==1 ? -EACCES : 0;
             provider.prepare_error=mode==2 ? -EIO : 0;
@@ -76,6 +79,7 @@ void test_fs_control(const char *base) {
             assert(descriptors()==before);
         }
         struct md_fs_result out={.fd=-1};
+        provider.require_origin=0;
         unsigned calls=provider.calls;
         assert(md_fs_control_publish(-EMFILE,(struct md_control_file){&ops,&provider},NULL,
             NULL,O_RDONLY,&out,&output)==-EMFILE);

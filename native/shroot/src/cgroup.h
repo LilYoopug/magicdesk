@@ -31,7 +31,9 @@ void md_cgroup_member_depart(struct md_cgroup_member *,pid_t);
  * devices=0 is cgroup v2 with logical, non-enforcing pids policy, devices=1 is the
  * permissive v1 devices hierarchy. Android cgroups are never opened. */
 struct md_cgroup_view *md_cgroup_mount(struct md_cgroup_member *,int parent,int devices,
-    const struct md_identity *);
+    const struct md_identity *,const struct md_cgroup_namespace *,const char *options);
+int md_cgroup_parse_options(const char *,unsigned *);
+int md_cgroup_options(struct md_cgroup_view *,char *,size_t);
 struct md_cgroup_view *md_cgroup_retain(struct md_cgroup_view *);
 void md_cgroup_release(struct md_cgroup_view *);
 /* Returns an owned O_PATH root, selected under the hierarchy lock. */
@@ -43,7 +45,7 @@ int md_cgroup_chmod(struct md_cgroup_view *,int,mode_t,const struct md_identity 
 int md_cgroup_chown(struct md_cgroup_view *,int,uint32_t,uint32_t,const struct md_identity *);
 int md_cgroup_mkdir(struct md_cgroup_view *,int,const char *,const struct md_identity *);
 int md_cgroup_rmdir(struct md_cgroup_view *,int,const char *,const struct md_identity *);
-int md_cgroup_open(struct md_cgroup_view *,int,int,const struct md_identity *,struct md_fs_anchor *,
+int md_cgroup_open(struct md_cgroup_view *,int,int,const struct md_identity *,struct md_cgroup_namespace *,struct md_fs_anchor *,
     const struct md_control_file_ops **,void **);
 long md_cgroup_member_text(struct md_cgroup_member *,const struct md_cgroup_namespace *,char *,size_t);
 long md_cgroup_controllers_text(struct md_cgroup_member *,char *,size_t);

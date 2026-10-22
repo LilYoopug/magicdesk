@@ -7,6 +7,7 @@
 #include "fd_client.h"
 #include "fs_buffer.h"
 #include "bpf_request.h"
+#include "filesystem_ioctl.h"
 #include <errno.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -25,10 +26,11 @@ static int valid_entries(const char *data, size_t size) {
 int md_fs_result_valid(const struct md_fs_request *request, const struct md_fs_result *reply,
         const char *data, size_t capacity, unsigned descriptors) {
     uint32_t operation=request->operation;
+    int peer=operation==MD_FS_IOCTL && md_filesystem_ioctl_opens(request->mode);
     int opens = operation == MD_FS_MOUNT_TABLE || operation == MD_FS_OPEN || operation == MD_FS_CREATE || operation == MD_FS_TEMPORARY
         || operation == MD_FS_OPEN_OBJECT || operation == MD_FS_OPEN_IMAGE || operation == MD_FS_WATCH_CREATE
         || operation == MD_FS_REOPEN || operation==MD_FS_FSOPEN || operation==MD_FS_FSMOUNT
-        || operation==MD_FS_FDINFO || operation==MD_FS_OPEN_TREE || operation==MD_FS_SHM_CHANNEL
+        || operation==MD_FS_FDINFO || operation==MD_FS_OPEN_TREE || operation==MD_FS_SHM_CHANNEL || peer
         || (operation==MD_FS_BPF && md_bpf_opens(request->mode))
         || (operation==MD_FS_LANDLOCK && request->mode==MD_LL_CREATE)
         || operation == MD_FS_TASK_PATH || (operation == MD_FS_IPC
@@ -41,7 +43,7 @@ int md_fs_result_valid(const struct md_fs_request *request, const struct md_fs_r
                 && request->mode!=MD_FS_MOUNT_MOVE_FD)))
             || reply->open_completion.kind > MD_OPEN_CALLER || reply->open_completion.kind < MD_OPEN_READY
             || (reply->open_completion.kind && (reply->error || reply->host_path || reply->size
-                || (operation != MD_FS_OPEN && operation != MD_FS_REOPEN && operation != MD_FS_OPEN_OBJECT)
+                || (operation != MD_FS_OPEN && operation != MD_FS_REOPEN && operation != MD_FS_OPEN_OBJECT && !peer)
                 || (request->flags & O_PATH)))
             || reply->size > capacity
             || descriptors != (unsigned)(opens && !reply->error && !reply->host_path)
@@ -76,7 +78,17 @@ int md_fs_result_valid(const struct md_fs_request *request, const struct md_fs_r
         }
     } else if (operation==MD_FS_BPF && !reply->error) {
         if (reply->host_path || reply->position || reply->size>request->capacity) return 0;
-        if (request->mode==BPF_OBJ_GET_INFO_BY_FD) return reply->size==sizeof(struct bpf_prog_info);
+        if (request->mode==BPF_OBJ_GET_INFO_BY_FD) {
+            if (reply->size<sizeof(struct md_bpf_info)) return 0;
+            struct md_bpf_info info; memcpy(&info,data,sizeof(info));
+            if (info.kind==MD_BPF_INFO_MAP) return reply->size==sizeof(info);
+            if (info.kind!=MD_BPF_INFO_PROGRAM || info.value.program.nr_map_ids>MD_BPF_MAPS_PER_PROGRAM
+                    || info.value.program.xlated_prog_len>MD_BPF_INSTRUCTIONS_MAX*sizeof(struct bpf_insn)) return 0;
+            size_t bytes=request->capacity-sizeof(info);
+            if (bytes>info.value.program.xlated_prog_len) bytes=info.value.program.xlated_prog_len;
+            return reply->size==sizeof(info)+bytes;
+        }
+        if (md_bpf_element(request->mode)) return reply->size==request->capacity;
         if (request->mode==BPF_PROG_QUERY) {
             if (reply->size<sizeof(struct md_bpf_query)) return 0;
             struct md_bpf_query query; memcpy(&query,data,sizeof(query));

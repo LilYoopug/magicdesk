@@ -46,6 +46,18 @@ static void delegation_metadata(void) {
     assert(!mount(NULL,"/tmp/cgv2",NULL,MS_BIND|MS_REMOUNT,NULL));
     pid_t child=fork(); assert(child>=0);
     if (!child) {
+        pid_t denied=fork(); assert(denied>=0);
+        if (!denied) {
+            assert(!setgid(1000) && !setuid(1000));
+            int fd=open(path,O_WRONLY); assert(fd>=0);
+            assert(write(fd,"0",1)<0 && errno==EACCES);
+            close(fd); _exit(0);
+        }
+        int status;
+        assert(waitpid(denied,&status,0)==denied && WIFEXITED(status) && !WEXITSTATUS(status));
+        /* The delegator moves the process into the subtree before dropping
+         * credentials; owning only the destination cannot authorize entry. */
+        int assigned=open(path,O_WRONLY); assert(assigned>=0 && write(assigned,"0",1)==1); close(assigned);
         assert(!setgid(1000) && !setuid(1000));
         assert(chown(path,1001,(gid_t)-1)<0 && errno==EPERM);
         assert(!chmod(path,0640));
@@ -78,6 +90,45 @@ static int writing(const char *path,const char *text) {
     int fd=open(path,O_WRONLY|O_CLOEXEC|O_NOCTTY); assert(fd>=0);
     ssize_t n=write(fd,text,strlen(text)); int error=errno; close(fd); errno=error;
     return (int)n;
+}
+static void namespace_delegation(void) {
+    assert(!mkdir("/tmp/cg-options",0700));
+    assert(mount("none","/tmp/cg-options","cgroup2",0,"nsdelegate,bogus")<0 && errno==EINVAL);
+    assert(!mount("none","/tmp/cg-options","cgroup2",0,"nsdelegate,memory_recursiveprot"));
+    int context=syscall(SYS_fsopen,"cgroup2",FSOPEN_CLOEXEC); assert(context>=0);
+    assert(!syscall(SYS_fsconfig,context,FSCONFIG_SET_FLAG,"nsdelegate",NULL,0));
+    assert(!syscall(SYS_fsconfig,context,FSCONFIG_SET_FLAG,"memory_recursiveprot",NULL,0));
+    assert(syscall(SYS_fsconfig,context,FSCONFIG_SET_STRING,"nsdelegate","1",0)<0 && errno==EINVAL);
+    assert(syscall(SYS_fsconfig,context,FSCONFIG_SET_FLAG,"memory_hugetlb_accounting",NULL,0)<0 && errno==EINVAL);
+    assert(!syscall(SYS_fsconfig,context,FSCONFIG_CMD_CREATE,NULL,NULL,0)); close(context);
+    char text[8192]; read_text("/proc/self/mountinfo",text,sizeof(text));
+    assert(strstr(text,",nsdelegate,memory_recursiveprot"));
+    assert(!mkdir("/tmp/cgv2/ns-delegated",0700));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        char parent[32]; snprintf(parent,sizeof(parent),"%d",getppid());
+        assert(writing("/tmp/cgv2/ns-delegated/cgroup.procs","0")==1);
+        int retained=open("/tmp/cgv2/ns-delegated/cgroup.freeze",O_WRONLY); assert(retained>=0);
+        assert(!unshare(CLONE_NEWCGROUP|CLONE_NEWNS));
+        assert(!umount2("/tmp/cg-options",0));
+        assert(!mount("none","/tmp/cg-options","cgroup2",0,NULL));
+        read_text("/proc/self/mountinfo",text,sizeof(text));
+        assert(strstr(text,",nsdelegate,memory_recursiveprot"));
+        assert(writing("/tmp/cg-options/cgroup.freeze","0")<0 && errno==EPERM);
+        assert(writing("/tmp/cg-options/cgroup.procs","0")==1);
+        assert(writing("/tmp/cg-options/cgroup.procs",parent)<0 && errno==ENOENT);
+        assert(writing("/tmp/cgv2/cgroup.procs","0")<0 && errno==ENOENT);
+        assert(write(retained,"0",1)==1); close(retained);
+        assert(!umount2("/tmp/cg-options",0)); _exit(0);
+    }
+    int status;
+    /* EVENT_WAIT: child checks namespace boundaries and retained opener authority. */
+    assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    assert(!rmdir("/tmp/cgv2/ns-delegated"));
+    assert(!umount2("/tmp/cg-options",0));
+    assert(!mount("none","/tmp/cg-options","cgroup2",0,NULL));
+    assert(!umount2("/tmp/cg-options",0) && !rmdir("/tmp/cg-options"));
+    puts("PASS cgroup mount options, namespace delegation, migration and opener authority");
 }
 static unsigned events_read(int fd,int first,int second) {
     union { struct inotify_event event; char data[1024]; } buffer;
@@ -214,6 +265,7 @@ int test_cgroup_guest(int pid_namespace) {
     population_events();
     stopped_newborn_membership();
     delegation_metadata();
+    namespace_delegation();
     struct statfs st; assert(!statfs("/tmp/cgv2",&st) && st.f_type==CGROUP2_SUPER_MAGIC);
     assert(!statfs("/tmp/cgv1",&st) && st.f_type==CGROUP_SUPER_MAGIC);
     char text[8192]; read_text("/tmp/cgv2/cgroup.controllers",text,sizeof(text)); assert(!strcmp(text,"pids\n"));
@@ -224,6 +276,11 @@ int test_cgroup_guest(int pid_namespace) {
     assert(access("/tmp/cgv2/child/pids.max",F_OK)<0 && errno==ENOENT);
     assert(writing("/tmp/cgv2/child/cgroup.subtree_control","+pids")<0 && errno==ENOENT);
     assert(writing("/tmp/cgv2/cgroup.subtree_control","+pids")==5);
+    int terminated=open("/tmp/cgv2/cgroup.subtree_control",O_WRONLY); assert(terminated>=0);
+    assert(write(terminated,"-pids",6)==6);
+    read_text("/tmp/cgv2/cgroup.subtree_control",text,sizeof(text)); assert(!strcmp(text,"\n"));
+    assert(write(terminated,"+pids\0ignored",13)==13); close(terminated);
+    read_text("/tmp/cgv2/cgroup.subtree_control",text,sizeof(text)); assert(!strcmp(text,"pids\n"));
     read_text("/tmp/cgv2/child/pids.max",text,sizeof(text)); assert(!strcmp(text,"max\n"));
     assert(writing("/tmp/cgv2/child/pids.max","0")==1);
     read_text("/tmp/cgv2/child/pids.max",text,sizeof(text)); assert(!strcmp(text,"0\n"));

@@ -89,19 +89,33 @@ int md_fs_request_validate(const struct md_fs_request *q) {
                 || q->object[0] || q->object[1]) return -EINVAL;
         struct md_bpf_request in; memcpy(&in,q->value,sizeof(in));
         unsigned expected=md_bpf_opens(q->mode) ? 0
-            : q->mode==BPF_PROG_QUERY || q->mode==BPF_OBJ_GET_INFO_BY_FD ? 1 : 3;
+            : q->mode==BPF_PROG_QUERY || q->mode==BPF_OBJ_GET_INFO_BY_FD || md_bpf_element(q->mode) ? 1 : 3;
         if (descriptors!=expected || (expected && q->directory[0]<0)
                 || (expected==3 && q->directory[1]<0)
                 || q->flags!=(md_bpf_opens(q->mode) ? O_RDWR|O_CLOEXEC : 0)) return -EINVAL;
         if (q->mode==BPF_PROG_LOAD)
             return !in.count || in.count>MD_BPF_INSTRUCTIONS_MAX || !md_bpf_program_type(in.type)
-                || in.flags || in.id || q->capacity
+                || in.flags || in.id || in.key_size || in.value_size || q->capacity
                 || q->value_size!=sizeof(in)+in.count*sizeof(struct bpf_insn)
                 || strnlen(in.name,sizeof(in.name))==sizeof(in.name) ? -EINVAL : 0;
-        if (q->value_size!=sizeof(in) || in.count || in.type || in.name[0]) return -EINVAL;
-        if (q->mode==BPF_PROG_GET_FD_BY_ID) return in.flags || q->capacity ? -EINVAL : 0;
+        if (q->mode==BPF_MAP_CREATE)
+            return in.id || q->capacity || q->value_size!=sizeof(in) ? -EINVAL : 0;
+        if (md_bpf_element(q->mode)) {
+            unsigned bytes=q->mode==BPF_MAP_LOOKUP_ELEM ? in.value_size
+                : q->mode==BPF_MAP_GET_NEXT_KEY ? in.key_size : 0;
+            return in.id || in.type || in.name[0] || in.count>1
+                || (!in.count && q->mode!=BPF_MAP_GET_NEXT_KEY)
+                || !in.key_size || in.key_size>MD_BPF_MAP_KEY_MAX
+                || !in.value_size || in.value_size>MD_BPF_MAP_VALUE_MAX
+                || q->capacity!=bytes || q->value_size!=sizeof(in)+in.count*in.key_size
+                    +(q->mode==BPF_MAP_UPDATE_ELEM ? in.value_size : 0) ? -EINVAL : 0;
+        }
+        if (q->value_size!=sizeof(in) || in.count || in.type || in.key_size || in.value_size || in.name[0]) return -EINVAL;
+        if (q->mode==BPF_PROG_GET_FD_BY_ID || q->mode==BPF_MAP_GET_FD_BY_ID) return in.flags || q->capacity ? -EINVAL : 0;
         if (in.id) return -EINVAL;
-        if (q->mode==BPF_OBJ_GET_INFO_BY_FD) return in.flags || q->capacity!=sizeof(struct bpf_prog_info) ? -EINVAL : 0;
+        if (q->mode==BPF_OBJ_GET_INFO_BY_FD)
+            return in.flags || q->capacity<sizeof(struct md_bpf_info)
+                || q->capacity>sizeof(struct md_bpf_info)+MD_BPF_INSTRUCTIONS_MAX*sizeof(struct bpf_insn) ? -EINVAL : 0;
         if (q->mode==BPF_PROG_QUERY)
             return (in.flags&~BPF_F_QUERY_EFFECTIVE) || q->capacity<sizeof(struct md_bpf_query)
                 || q->capacity>sizeof(struct md_bpf_query)+MD_BPF_QUERY_MAX*sizeof(uint32_t)
@@ -115,7 +129,8 @@ int md_fs_request_validate(const struct md_fs_request *q) {
         return descriptors || !*a || *b || (q->flags&~(O_RDWR|O_CLOEXEC))
             || q->mode || q->capacity || q->offset ? -EINVAL : 0;
     if (q->operation==MD_FS_IOCTL)
-        return descriptors!=1 || q->directory[0]<0 || *a || *b || q->flags
+        return descriptors!=1 || q->directory[0]<0 || *a || *b
+            || (q->flags && !md_filesystem_ioctl_opens(q->mode))
             || q->capacity || q->offset || !md_filesystem_ioctl_command(q->mode) ? -EINVAL : 0;
     if (q->operation==MD_FS_SYNC)
         return descriptors!=1 || q->directory[0]<0 || *a || *b || q->flags
@@ -131,9 +146,12 @@ int md_fs_request_validate(const struct md_fs_request *q) {
         return descriptors!=1 || q->directory[0]<0 || *a || *b || (q->flags&~(O_PATH|O_CLOEXEC))
             || q->capacity || q->offset ? -EINVAL : 0;
     if (q->operation==MD_FS_FSCONFIG) {
-        if (descriptors!=1 || q->directory[0]<0 || *b || q->flags || q->capacity || q->offset
+        if (descriptors!=(q->mode==FSCONFIG_SET_FD ? 3U : 1U) || q->directory[0]<0
+                || (q->mode==FSCONFIG_SET_FD && q->directory[1]<0)
+                || *b || q->flags || q->capacity || q->offset
                 || q->value_size>PATH_MAX) return -EINVAL;
-        if (q->mode==FSCONFIG_SET_FLAG) return !*a || q->value_size ? -EINVAL : 0;
+        if (q->mode==FSCONFIG_SET_FLAG || q->mode==FSCONFIG_SET_FD)
+            return !*a || q->value_size ? -EINVAL : 0;
         if (q->mode==FSCONFIG_SET_STRING) return !*a || !q->value_size
             || strnlen(q->value,q->value_size)!=q->value_size-1 ? -EINVAL : 0;
         if (q->mode==FSCONFIG_CMD_CREATE || q->mode==FSCONFIG_CMD_RECONFIGURE)

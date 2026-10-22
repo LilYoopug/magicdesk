@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Device creation authority and retained native-device bind mounts under shell."""
 import argparse
+import array
 from contextlib import ExitStack
 import ctypes
 import errno
@@ -8,6 +9,8 @@ import fcntl
 import os
 from pathlib import Path
 import stat
+import socket
+import struct
 import sys
 import tempfile
 
@@ -31,8 +34,43 @@ def guest():
         except OSError as error:
             assert error.errno == code, error
 
+    def mount_id(path='', fd=-100):
+        value = ctypes.create_string_buffer(256)
+        call(291, fd, str(path), 0x1000 if not path else 0, 0x17ff, ctypes.addressof(value))
+        assert struct.unpack_from('I', value)[0] & 0x1000, 'missing STATX_MNT_ID'
+        return struct.unpack_from('Q', value, 144)[0]
+
     with tempfile.TemporaryDirectory(prefix='md-devices-') as directory, ExitStack() as cleanup:
         root = Path(directory)
+        # Typed devices retain their selected mount independently of the
+        # service's carrier FD, including aliases and lazy unmount.
+        fuse = root / 'fuse'
+        fuse.touch()
+        call(40, '/dev/fuse', fuse, 0, 4096, 0)
+        cleanup.callback(libc.syscall, ctypes.c_long(39), ctypes.c_char_p(str(fuse).encode()), ctypes.c_long(2))
+        selected = mount_id(fuse)
+        assert selected != mount_id('/dev/fuse')
+        with ExitStack() as pins:
+            for flags in (os.O_PATH, os.O_RDWR):
+                fd = os.open(fuse, flags | os.O_CLOEXEC)
+                pins.callback(os.close, fd)
+                assert mount_id(fd=fd) == selected
+                duplicate = os.dup(fd)
+                pins.callback(os.close, duplicate)
+                assert mount_id(fd=duplicate) == selected
+                left, right = socket.socketpair()
+                with left, right:
+                    left.sendmsg([b'x'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array('i', [fd]))])
+                    _, ancillary, _, _ = right.recvmsg(1, socket.CMSG_SPACE(4))
+                    received = array.array('i')
+                    received.frombytes(ancillary[0][2])
+                    assert len(received) == 1
+                    pins.callback(os.close, received[0])
+                    assert mount_id(fd=received[0]) == selected
+            call(39, fuse, 2)
+            assert mount_id(fuse) != selected
+            assert mount_id(fd=fd) == mount_id(fd=duplicate) == mount_id(fd=received[0]) == selected
+        print('PASS typed-device mount identity, O_PATH, dup, SCM_RIGHTS and detached lifetime', flush=True)
         # CAP_MKNOD authorizes guest metadata, never Android device creation.
         assert call(167, 23, 27, 0, 0, 0) == 1
         for kind, device in ((stat.S_IFCHR, os.makedev(1, 3)),
@@ -48,6 +86,16 @@ def guest():
             source, target = Path('/dev') / name, root / name
             native = source.stat()
             assert stat.S_ISCHR(native.st_mode)
+            for flags in (os.O_PATH, os.O_PATH | os.O_NOFOLLOW):
+                pin = os.open(source, flags | os.O_CLOEXEC)
+                try:
+                    metadata = os.fstat(pin)
+                    assert stat.S_ISCHR(metadata.st_mode) and metadata.st_rdev == native.st_rdev
+                    assert fcntl.fcntl(pin, fcntl.F_GETFL) & os.O_PATH
+                    assert fcntl.fcntl(pin, fcntl.F_GETFD) & fcntl.FD_CLOEXEC
+                finally:
+                    os.close(pin)
+            print('PASS direct metadata-only native device pins', name, flush=True)
             read_denied = False
             if name == 'full':
                 try:
@@ -145,14 +193,15 @@ def guest():
 
 
 def main():
+    from test_oci_services import Suite, add_machine_entry_argument
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build', type=Path)
     parser.add_argument('store')
+    add_machine_entry_argument(parser)
     args = parser.parse_args()
-    from test_oci_services import Suite
-    suite = Suite(args.build, args.build)
+    suite = Suite(args.build, args.build, machine_entry=args.machine_entry)
     target = '/tmp/md-devices-' + suite.report['id']
-    prefix = [suite.runner, '--store', args.store, '--user', '0:0']
+    prefix = suite.guest(args.store, '--user', '0:0')
     try:
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/test.py')
         suite.command(prefix + ['--', '/bin/mkdir', target])

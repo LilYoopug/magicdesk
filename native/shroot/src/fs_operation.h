@@ -54,14 +54,16 @@ static inline int md_fs_operation_has_origin(unsigned operation) {
     return operation==MD_FS_OPEN || operation==MD_FS_CREATE || operation==MD_FS_REOPEN
         || operation==MD_FS_OPEN_OBJECT || operation==MD_FS_OPEN_IMAGE
         || operation==MD_FS_MOUNT_TABLE || operation==MD_FS_TASK_PATH || operation==MD_FS_FSMOUNT
-        || operation==MD_FS_OPEN_TREE;
+        || operation==MD_FS_OPEN_TREE || operation==MD_FS_IOCTL;
 }
 /* A path anchor is sufficient only for object identity. These inputs consume
- * a real OFD (offset, socket, queue, or payload) and must never use its anchor. */
+ * a real OFD (offset, socket, queue, payload, or native fdinfo identity) and
+ * must never use its anchor. */
 static inline unsigned md_fs_operation_data_inputs(unsigned operation) {
     switch (operation) {
-    case MD_FS_SOCKET_BIND: case MD_FS_WATCH_PATH: return 2;
-    case MD_FS_FXATTR: case MD_FS_IPC_PEER: case MD_FS_SYNC: return 1;
+    case MD_FS_SOCKET_BIND: case MD_FS_WATCH_PATH: case MD_FS_FDINFO:
+    case MD_FS_FSCONFIG: return 2;
+    case MD_FS_FXATTR: case MD_FS_IPC_PEER: case MD_FS_SYNC: case MD_FS_IOCTL: return 1;
     case MD_FS_GETDENTS: case MD_FS_SEEKDIR:
     case MD_FS_WATCH_ADD: case MD_FS_WATCH_REMOVE: case MD_FS_WATCH_BYTES:
     case MD_FS_WATCH_CONTAINS: case MD_FS_WATCH_READ: return 1;
@@ -156,7 +158,7 @@ struct md_fs_output {
     int native_open_plan;
     /* Worker-owned unpublished creation. No pointer crosses a wire protocol. */
     struct md_inode_birth **birth;
-    int (*control)(void *,const struct md_control_file_ops *,void *,const struct md_identity *,int);
+    int (*control)(void *,const struct md_control_file_ops *,void *,const struct md_identity *,int,struct md_fs_anchor *);
     void *control_context;
     struct md_landlock_policy **landlock;
     /* Optional owned continuation, only with result.error == -EINPROGRESS. */

@@ -6,18 +6,23 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+struct selected_cgroup { struct md_cgroup_view *view; struct md_cgroup_namespace *namespace; };
 static int prepare_open(void *context,int fd,int flags,const struct md_identity *id,
         struct md_fs_anchor *origin,struct md_control_file *file) {
-    return md_cgroup_open(context,fd,flags,id,origin,&file->ops,&file->context);
+    struct selected_cgroup *selected=context;
+    return md_cgroup_open(selected->view,fd,flags,id,selected->namespace,origin,&file->ops,&file->context);
 }
-static int metadata(void *context,int fd,struct stat *out) { return md_cgroup_stat(context,fd,out); }
+static int metadata(void *context,int fd,struct stat *out) {
+    return md_cgroup_stat(((struct selected_cgroup *)context)->view,fd,out);
+}
 
 int md_fs_cgroup_operation(struct md_filesystem *fs,struct md_mount_namespace *view,
         struct md_view_mount *mount,int fd,int parent,const char *name,
         const struct md_fs_request *q,struct md_fs_result *out,const struct md_fs_output *output) {
     if (!mount || !mount->cgroup) return 0;
     struct md_cgroup_view *groups=mount->cgroup;
-    const struct md_fs_control_source source={groups,metadata,prepare_open,md_cgroup_filesystem(groups)};
+    struct selected_cgroup selected={groups,fs->actor ? fs->actor->cgroup_namespace : NULL};
+    const struct md_fs_control_source source={&selected,metadata,prepare_open,md_cgroup_filesystem(groups)};
     if (md_fs_control_operation(fs,view,mount,fd,&source,q,out,output)) return 1;
     const struct md_identity *id=fs->store->identity;
     int r=0;

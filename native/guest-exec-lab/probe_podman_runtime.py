@@ -23,6 +23,9 @@ def guest(options):
     report = {'options': options, 'commands': [], 'passed': False}
     base = Path(options['directory'])
     base.mkdir(parents=True, exist_ok=True)
+    if options.get('captureNft'):
+        os.environ['MD_NFT_CAPTURE'] = str(base / 'nft')
+        os.environ['PATH'] = str(Path(__file__).parent) + ':' + os.environ['PATH']
     prefix = ['podman', '--log-level', 'info', '--root', options['cache'],
               '--runroot', options['cache'] + '-run', '--storage-driver', options['storage']]
     limits = ['--cgroups', options['cgroups']]
@@ -242,6 +245,7 @@ def main():
     parser.add_argument('--image', default='docker.io/library/alpine:3.23')
     parser.add_argument('--cache', default='', help='Owned disposable Podman image cache')
     parser.add_argument('--trace', action='store_true')
+    parser.add_argument('--capture-nft', action='store_true', help='Record unchanged nft input in the fixture directory')
     parser.add_argument('--diagnostics', action='store_true', help='Record native runtime state transitions')
     parser.add_argument('--exec-repeats', type=int, default=1,
                         help='Repeat local outbound exec and complete process/output teardown')
@@ -269,6 +273,10 @@ def main():
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/probe.py')
         suite.transport.upload(suite.client, Path(__file__).with_name('docker_network_fixture.py'),
                                suite.base + '/docker_network_fixture.py')
+        if args.capture_nft:
+            suite.transport.upload(suite.client, Path(__file__).with_name('fixtures') / 'nft-capture.py',
+                                   suite.base + '/nft')
+            suite.command(['chmod', '755', suite.base + '/nft'])
         suite.command(runner + ['--', '/bin/mkdir', target]); created = True
         options = {'directory': '/tmp/md-podman-' + suite.report['id'],
                    # Podman 4 limits runroot (including "-run") to 50 bytes.
@@ -278,6 +286,7 @@ def main():
                    'internet': args.internet, 'portsImage': args.ports_image,
                    'trace': args.trace, 'hostLimits': args.host_limits, 'unlimitedPids': args.unlimited_pids,
                    'execRepeats': args.exec_repeats,
+                   'captureNft': args.capture_nft,
                    'observer': observer.address if observer else ''}
         deadline = args.deadline_seconds or (900 if observer else 300)
         command = runner + ['--bind-ro', suite.base, target, '--deadline-seconds', str(deadline), '--',

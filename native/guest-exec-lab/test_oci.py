@@ -1091,24 +1091,27 @@ sys.stdin.read()
         source.write_bytes(gzip.compress(tar([
             ('upper', 'dir', '', 0o755, 0, 0, {'user.overlay.opaque': b'y'}),
             ('upper/deleted', 'file', b'', 0o600, 0, 0, {'trusted.overlay.whiteout': b''}),
+            ('upper/label', 'file', b'data', 0o600, 0, 0, {'trusted.fixture': b'\x00value\xff'}),
         ])))
         self.command('rootfs', source, self.destination)
         instance = self.root / 'instance'
         self.command('create', self.destination, instance)
         for store in (self.destination, instance):
             with database(store / 'namespace.db') as db:
-                self.assertEqual(db.execute('SELECT name,value FROM overlay_attributes ORDER BY name').fetchall(),
-                                 [(2, b'y'), (3, b'')])
+                self.assertEqual(db.execute('SELECT name,value FROM inode_xattrs ORDER BY name').fetchall(),
+                                 [('trusted.fixture', b'\x00value\xff'), ('trusted.overlay.whiteout', b''),
+                                  ('user.overlay.opaque', b'y')])
         body = self.body('upper', instance)
         self.assertEqual(ctypes.CDLL(None).setxattr(os.fsencode(body), b'user.overlay.opaque', b'y', 1, 0), 0)
         with database(instance / 'namespace.db') as db:
-            db.execute('UPDATE overlay_attributes SET value=NULL WHERE name=2')
+            db.execute("UPDATE inode_xattrs SET value=NULL WHERE name='user.overlay.opaque'")
         archive = self.root / 'backup.tar.zst'
         restored = self.root / 'restored'
         self.command('backup', instance, archive)
         self.command('restore', archive, restored)
         with database(restored / 'namespace.db') as db:
-            self.assertEqual(db.execute('SELECT name,value FROM overlay_attributes').fetchall(), [(3, b'')])
+            self.assertEqual(db.execute('SELECT name,value FROM inode_xattrs ORDER BY name').fetchall(),
+                             [('trusted.fixture', b'\x00value\xff'), ('trusted.overlay.whiteout', b'')])
         libc = ctypes.CDLL(None, use_errno=True)
         libc.getxattr.restype = ctypes.c_ssize_t
         self.assertEqual(libc.getxattr(os.fsencode(self.body('upper', restored)), b'user.overlay.opaque', None, 0), -1)

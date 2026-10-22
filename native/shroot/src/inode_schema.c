@@ -21,7 +21,16 @@ int md_inode_store_format(void) { return 17; }
     "CREATE TABLE native_cookies(cookie INTEGER PRIMARY KEY AUTOINCREMENT," \
     "parent TEXT NOT NULL REFERENCES objects ON DELETE CASCADE,position INTEGER NOT NULL," \
     "UNIQUE(parent,position)) STRICT;"
-static const char *const revisions[]={PUBLICATION_SCHEMA};
+#define XATTR_SCHEMA \
+    "CREATE TABLE inode_xattrs(object TEXT NOT NULL REFERENCES objects ON DELETE CASCADE," \
+    "name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 255)," \
+    "value BLOB CHECK(length(value)<=65536),PRIMARY KEY(object,name)) STRICT;"
+#define XATTR_UPGRADE XATTR_SCHEMA \
+    "INSERT INTO inode_xattrs SELECT object,CASE name " \
+    "WHEN 1 THEN 'user.overlay.whiteout' WHEN 2 THEN 'user.overlay.opaque' " \
+    "WHEN 3 THEN 'trusted.overlay.whiteout' WHEN 4 THEN 'trusted.overlay.opaque' END,value " \
+    "FROM overlay_attributes; DROP TABLE overlay_attributes;"
+static const char *const revisions[]={PUBLICATION_SCHEMA,XATTR_UPGRADE};
 const struct mdi_schema_plan mdi_schema_current = {revisions,sizeof(revisions)/sizeof(*revisions)};
 int md_inode_store_revision(void) { return 1 + (int)mdi_schema_current.count; }
 
@@ -185,9 +194,7 @@ int mdi_schema_begin_create(struct md_inode_store *s) {
                 "upper TEXT REFERENCES objects,lower INTEGER NOT NULL CHECK(lower IN (0,1))) STRICT;"
             "CREATE TABLE overlay_lower_names(parent TEXT NOT NULL REFERENCES objects ON DELETE CASCADE,"
                 "name BLOB NOT NULL,PRIMARY KEY(parent,name)) WITHOUT ROWID;"
-            "CREATE TABLE overlay_attributes(object TEXT NOT NULL REFERENCES objects ON DELETE CASCADE,"
-                "name INTEGER NOT NULL CHECK(name BETWEEN 1 AND 4),value BLOB CHECK(length(value)<=65536),"
-                "PRIMARY KEY(object,name)) STRICT;"
+            XATTR_SCHEMA
             "CREATE TABLE properties(key TEXT PRIMARY KEY,value INTEGER NOT NULL) STRICT;"
             "INSERT INTO properties VALUES('sealed',0);"
             "CREATE TABLE names(cookie INTEGER PRIMARY KEY AUTOINCREMENT,"

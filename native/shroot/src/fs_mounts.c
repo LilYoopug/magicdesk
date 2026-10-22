@@ -5,6 +5,7 @@
 #include "mount_topology.h"
 #include "fs_storage.h"
 #include "mount_source.h"
+#include "procfs_view.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -122,6 +123,7 @@ int md_view_identity(struct md_filesystem *fs, int fd, struct md_view_object **o
 }
 int md_view_backing_path(struct md_filesystem *fs, int fd, const struct md_view_mount *mount,
         char *out, size_t size) {
+    if (mount && mount->backing==MD_MOUNT_PROC) return md_procfs_guest_path(mount,fd,out,size);
     if (mount && mount->provider) return md_provider_tree_path(mount->provider,fd,out,size);
     if (mount && mount->devpts) {
         char name[32]; int r=md_devpts_name(mount->devpts,fd,name,sizeof(name));
@@ -223,6 +225,7 @@ int md_fs_root_capture(struct md_filesystem *fs, int fd, const struct md_fs_anch
         struct md_fs_location *out) {
     *out = (struct md_fs_location){0};
     if (origin) {
+        if (origin->child) return -ENOTDIR;
         int error=md_view_anchor_check(fs,fd,origin);
         if (error) return error;
         if (origin->view && origin->view!=fs->mounts) return -ESTALE;

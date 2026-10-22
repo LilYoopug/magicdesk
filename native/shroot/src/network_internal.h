@@ -8,7 +8,7 @@ struct md_network_ipv4_policy { uint32_t route_localnet, rp_filter, arp_notify; 
 struct md_network_interface {
     struct md_network_link info;
     enum md_network_link_kind kind;
-    unsigned master, peer, prefix, hairpin;
+    unsigned master, peer, prefix, hairpin, isolated;
     uint32_t ipv4;
     uint64_t policy_id;
     struct md_network_ipv4_policy policy;
@@ -38,6 +38,7 @@ struct md_network_namespace {
     uint32_t next_port, ipv4_forward;
     struct md_network_ipv4_policy all, defaults;
     struct md_network_listener *listeners;
+    struct md_network_ethernet *ethernet;
     struct md_network_filter *filter;
 };
 /* Weak listeners are removed under the fabric lock before final FD release.
@@ -52,10 +53,14 @@ void md_network_broadcast(struct md_network_namespace *,unsigned,const void *,si
 /* Mutators below run under the fabric lock. No guest IO or blocking syscall
  * may span that lock. Namespaces are weakly listed and unlink before release. */
 struct md_network_interface *md_network_interface_find(struct md_network_namespace *,unsigned,const char *);
+/* Caller holds the fabric lock; all link observers share this projection. */
+struct md_network_link md_network_interface_snapshot(struct md_network_namespace *,const struct md_network_interface *);
 int md_network_interface_reserve(struct md_network_namespace *,unsigned);
 int md_network_interface_add(struct md_network_namespace *,enum md_network_link_kind,const char *,unsigned *);
 int md_network_interface_remove(struct md_network_namespace *,unsigned);
 int md_network_interface_move(struct md_network_namespace *,unsigned,struct md_network_namespace *,const char *);
+/* NULL ingress denotes locally generated bridge traffic. */
+int md_network_bridge_forward(const struct md_network_interface *ingress,const struct md_network_interface *egress);
 struct md_network_namespace *md_network_interface_owner(struct md_network_fabric *,unsigned);
 struct md_network_interface *md_network_route_find(struct md_network_namespace *,uint32_t,uint32_t *gateway);
 int md_network_ingress(struct md_network_namespace *,const struct md_network_interface *,uint32_t source,uint32_t destination);

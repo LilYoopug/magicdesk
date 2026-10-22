@@ -1070,6 +1070,41 @@ static void stream_transactions(void) {
     assert(descriptors()==before);
     puts("PASS mount stream transaction: two-view commit, late staging failure, retry and exact cleanup");
 }
+static void propagation_stack(const char *base) {
+    unsigned before=descriptors();
+    char dir[PATH_MAX],name[PATH_MAX]; path(dir,base,"propagation-stack"); assert(!mkdir(dir,0700));
+    struct md_filesystem fs=filesystem(dir,1),peer=filesystem(dir,0);
+    path(name,dir,"host0/fresh"); assert(!mkdir(name,0700));
+    assert(!md_inode_mkdir(fs.store,-1,"/source",0700));
+    int fd=md_inode_open(fs.store,-1,"/source/value",O_CREAT|O_WRONLY,0600); assert(fd>=0);
+    assert(write(fd,"under",5)==5); close(fd);
+    assert(!mutation(&fs,MD_FS_MOUNT_PROPAGATION,MS_SHARED,NULL,"/outer"));
+    struct md_fs_location root={0},selected;
+    assert(!md_fs_mounts_copy(&fs,&root,&peer.mounts,&selected));
+    assert(!mutation(&peer,MD_FS_MOUNT_PROPAGATION,MS_SLAVE,NULL,"/outer"));
+    assert(!mutation(&peer,MD_FS_MOUNT_BIND,MS_BIND,"/alias","/outer/fresh"));
+    assert(!mutation(&fs,MD_FS_MOUNT_BIND,MS_BIND,"/source","/outer/fresh"));
+    contents(&fs,"/outer/fresh/value",NULL,"under");
+    contents(&peer,"/outer/fresh/value",NULL,"value");
+    assert(!mutation(&peer,MD_FS_MOUNT_UMOUNT,0,NULL,"/outer/fresh"));
+    contents(&peer,"/outer/fresh/value",NULL,"under");
+    assert(!mutation(&fs,MD_FS_MOUNT_UMOUNT,0,NULL,"/outer/fresh"));
+    struct md_fs_result absent=open_file(&peer,"/outer/fresh/value",O_RDONLY,NULL,NULL);
+    assert(absent.error==-ENOENT);
+    /* Detach propagates through the parent even after the new mount itself
+     * has become private; its slave copies must not accumulate. */
+    for (unsigned i=0;i<16;++i) {
+        assert(!mutation(&fs,MD_FS_MOUNT_BIND,MS_BIND,"/source","/outer/fresh"));
+        assert(!mutation(&fs,MD_FS_MOUNT_PROPAGATION,MS_PRIVATE,NULL,"/outer/fresh"));
+        contents(&peer,"/outer/fresh/value",NULL,"under");
+        assert(!mutation(&fs,MD_FS_MOUNT_UMOUNT,0,NULL,"/outer/fresh"));
+        absent=open_file(&peer,"/outer/fresh/value",O_RDONLY,NULL,NULL);
+        assert(absent.error==-ENOENT);
+    }
+    close_filesystem(&peer); close_filesystem(&fs);
+    assert(descriptors()==before);
+    puts("PASS propagated mount inserts below a private overmount and preserves ordered detach");
+}
 static void propagation(const char *base) {
     unsigned before=descriptors();
     char dir[PATH_MAX],name[PATH_MAX]; path(dir,base,"propagation"); assert(!mkdir(dir,0700));
@@ -1159,5 +1194,5 @@ void test_mount_graph(const char *base) {
     assert(!mkdir(model,0700) && !mkdir(peers,0700));
     models(model); sizes(base); unordered(base); indexed_updates(base); updates(base); private_publication(base);
     retirement(base,0); retirement(base,1); processes(peers); host_projections(base);
-    initial_pivot(base); removed_points(base); branch_reconciliation(base); unlinked_propagation(base); propagation(base); alarm(0);
+    initial_pivot(base); removed_points(base); branch_reconciliation(base); unlinked_propagation(base); propagation_stack(base); propagation(base); alarm(0);
 }

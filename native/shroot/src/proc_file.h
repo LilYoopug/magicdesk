@@ -12,6 +12,7 @@ enum md_proc_file_kind { MD_PROC_FILE_UID_MAP, MD_PROC_FILE_GID_MAP, MD_PROC_FIL
     MD_PROC_FILE_HOSTNAME, MD_PROC_FILE_DOMAINNAME, MD_PROC_FILE_OSTYPE,
     MD_PROC_FILE_OSRELEASE, MD_PROC_FILE_VERSION,
     MD_PROC_FILE_OVERFLOWUID, MD_PROC_FILE_OVERFLOWGID, MD_PROC_FILE_CAP_LAST,
+    MD_PROC_FILE_NR_OPEN,
     MD_PROC_FILE_INOTIFY_INSTANCES, MD_PROC_FILE_INOTIFY_WATCHES, MD_PROC_FILE_INOTIFY_QUEUE,
     MD_PROC_FILE_NS_USER, MD_PROC_FILE_NS_MOUNT, MD_PROC_FILE_NS_UTS, MD_PROC_FILE_NS_IPC,
     MD_PROC_FILE_NS_PID, MD_PROC_FILE_NS_PID_CHILDREN, MD_PROC_FILE_NS_NETWORK, MD_PROC_FILE_NS_CGROUP,
@@ -19,6 +20,9 @@ enum md_proc_file_kind { MD_PROC_FILE_UID_MAP, MD_PROC_FILE_GID_MAP, MD_PROC_FIL
     MD_PROC_FILE_CGROUP, MD_PROC_FILE_CGROUPS,
     MD_PROC_FILE_CONTROL };
 struct md_proc_file;
+static inline int md_proc_file_task(enum md_proc_file_kind kind) {
+    return (unsigned)kind<=MD_PROC_FILE_SETGROUPS || (kind>=MD_PROC_FILE_STATUS && kind<=MD_PROC_FILE_CGROUPS);
+}
 struct md_cgroup_member;
 struct md_cgroup_namespace;
 void md_proc_file_cgroup(struct md_proc_file *,struct md_cgroup_member *);
@@ -31,7 +35,8 @@ struct md_proc_file *md_proc_file_open_control(const struct md_control_file_ops 
 /* Retained typed authority and optional per-open carrier for filesystem
  * publication. On failure neither ownership is transferred. */
 struct md_fd_object *md_proc_file_control_object(const struct md_control_file_ops *,void *,
-    const struct md_identity *,int flags,int *descriptor);
+    const struct md_identity *,int flags,struct md_fs_anchor *,int *descriptor);
+struct md_fs_anchor *md_proc_file_origin(const struct md_proc_file *);
 int md_proc_file_control_stat(const struct md_proc_file *,struct stat *);
 struct md_control_file md_proc_file_control(const struct md_proc_file *);
 unsigned long md_proc_file_filesystem(const struct md_proc_file *);
@@ -44,10 +49,11 @@ static inline const char *md_proc_file_process_name(enum md_proc_file_kind kind)
     return kind==MD_PROC_FILE_STAT ? "stat" : kind==MD_PROC_FILE_LIMITS ? "limits" : "status";
 }
 struct md_pid_namespace;
+struct md_process_limits;
 struct md_proc_file;
 void md_proc_file_pid_view(struct md_proc_file *,struct md_pid_namespace *);
 void md_proc_file_process_state(struct md_proc_file *,const struct md_identity *,struct md_pid_namespace *,pid_t tracer,
-    const struct rlimit *nproc);
+    const struct md_process_limits *);
 static inline int md_proc_file_directory(enum md_proc_file_kind kind) {
     return kind==MD_PROC_FILE_NS_DIRECTORY || kind==MD_PROC_FILE_PROCESS_DIRECTORY;
 }
@@ -76,6 +82,10 @@ struct md_proc_file *md_proc_file_open_namespace(const struct md_namespace_refer
     const struct md_identity *, int flags);
 const struct md_namespace_reference *md_proc_file_namespace_reference(const struct md_proc_file *);
 struct md_proc_file_node { uint64_t device, inode; int process; };
+int md_proc_file_task_stat(int,const struct md_identity *,enum md_proc_file_kind,
+    struct md_proc_file_node *,struct stat *);
+int md_proc_file_task_access(const struct md_identity *,const struct stat *,unsigned,int effective);
+void md_proc_file_place(struct md_proc_file *,struct md_fs_anchor *,const struct stat *);
 /* Descriptor-host identity of the proc entry, independent of the carrier FD. */
 void md_proc_file_node(struct md_proc_file *, struct md_proc_file_node);
 struct md_proc_file_node md_proc_file_get_node(const struct md_proc_file *);
@@ -96,6 +106,7 @@ void md_proc_file_release(struct md_proc_file *);
 /* Inert kernel carrier; proc contents and operations are served by the owner. */
 int md_proc_file_descriptor(const struct md_proc_file *);
 int md_proc_file_flags(const struct md_proc_file *);
+long md_proc_file_namespace_entries(uint64_t inode,int64_t *position,void *,size_t capacity);
 long md_proc_file_read_at(struct md_proc_file *, const struct md_uts_namespace *, const struct md_cgroup_namespace *,
     void *, size_t capacity, int64_t offset);
 long md_proc_file_write_at(struct md_proc_file *, const struct md_identity *writer,

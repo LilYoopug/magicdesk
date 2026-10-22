@@ -79,6 +79,11 @@ long md_namespace_mount_fd(const struct md_fs *fs,long nr,const unsigned long *a
             r=md_read_string(value,sizeof(value),(const char *)a[3]);
             if (r>=0) { q.value=value; q.value_size=(unsigned)md_length(value)+1; }
             break;
+        case FSCONFIG_SET_FD:
+            if (!a[2] || a[3]) return -EINVAL;
+            if ((int)a[4]<0) return -EBADF;
+            q.directory[1]=(int)a[4];
+            break;
         case FSCONFIG_CMD_CREATE: case FSCONFIG_CMD_RECONFIGURE:
             if (a[2] || a[3] || (int)a[4]) return -EINVAL;
             break;

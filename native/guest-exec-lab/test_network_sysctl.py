@@ -4,8 +4,10 @@ import argparse
 from contextlib import ExitStack
 import ctypes
 import errno
+import fcntl
 import os
 import socket
+import stat
 import struct
 import subprocess
 from pathlib import Path
@@ -38,11 +40,49 @@ def write(name, text):
 
 def guest():
     os.environ['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+    def ipv4_proc(root):
+        # A pre-existing proc mount keeps its original PID namespace even
+        # after unshare(CLONE_NEWPID). Use the PID exposed by that mount.
+        process = os.readlink(str(Path(root) / 'self'))
+        for name in ('self', 'thread-self'):
+            path = str(Path(root) / name)
+            assert os.readlink(path)
+            assert stat.S_ISLNK(os.lstat(path).st_mode)
+            assert stat.S_ISDIR(os.stat(path).st_mode)
+            assert stat.S_ISDIR(os.lstat(path + '/').st_mode)
+            denied(lambda: os.readlink(path + '/'), errno.EINVAL)
+            denied(lambda: os.open(path, os.O_RDONLY | os.O_NOFOLLOW), errno.ELOOP)
+            fd = os.open(path, os.O_PATH | os.O_NOFOLLOW)
+            try:
+                expected, actual = os.lstat(path), os.fstat(fd)
+                assert stat.S_ISLNK(actual.st_mode)
+                assert (actual.st_dev, actual.st_ino) == (expected.st_dev, expected.st_ino)
+                assert fcntl.fcntl(fd, fcntl.F_GETFL) == os.O_PATH | os.O_NOFOLLOW
+            finally:
+                os.close(fd)
+        for suffix in ('net', 'self/net', 'thread-self/net', process + '/net'):
+            directory = Path(root) / suffix
+            denied(lambda: (directory / 'if_inet6').stat(), errno.ENOENT)
+            denied(lambda: (directory / 'if_inet6').read_bytes(), errno.ENOENT)
+            assert 'if_inet6' not in os.listdir(directory), directory
+    ipv4_proc('/proc')
     with ExitStack() as sockets:
         def netlink(protocol=0):
             return sockets.enter_context(socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, protocol))
         first, second, duplicate = netlink(), netlink(), netlink()
+        assert first.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) == 0
+        first.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        duplicate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        with socket.socket(fileno=os.dup(first.fileno())) as alias:
+            assert alias.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) == 1
         first.bind((0, 0))
+        # Standalone nexthops are an empty catalogue, not an unsupported
+        # subscription. Modern network managers subscribe before dumping it.
+        first.setsockopt(270, 1, 32)  # SOL_NETLINK, ADD_MEMBERSHIP, NEXTHOP
+        with socket.socket(fileno=os.dup(first.fileno())) as alias:
+            assert alias.getsockopt(270, 9, 4) == struct.pack('=I', 1 << 31)
+        first.setsockopt(270, 2, 32)
+        assert first.getsockopt(270, 9, 4) == bytes(4)
         second.bind((0, 0))
         a, b = first.getsockname()[0], second.getsockname()[0]
         assert a and b and a != b, (a, b)
@@ -241,6 +281,7 @@ def guest():
             result = libc.umount2(os.fsencode(directory), 2)
             assert result == 0 or ctypes.get_errno() == errno.EINVAL, ctypes.get_errno()
         cleanup.callback(detach)
+        ipv4_proc(directory)
         conf = Path(directory + '/sys/net/ipv4/conf')
         entries = sorted(p.name for p in conf.iterdir())
         assert entries == ['all', 'default', 'lo'], entries
@@ -261,6 +302,19 @@ def guest():
         target = directory + '/sys/net/ipv4/' + port
         fd = os.open(target, os.O_RDWR)
         try:
+            def mount_id(pathfd, path=''):
+                value = ctypes.create_string_buffer(256)
+                result = libc.syscall(291, pathfd, ctypes.c_char_p(os.fsencode(path)),
+                                      0 if path else 0x1000, 0x17ff, ctypes.byref(value))
+                assert result == 0, ctypes.get_errno()
+                assert struct.unpack_from('I', value)[0] & 0x1000
+                return struct.unpack_from('Q', value, 144)[0]
+            identity = mount_id(-100, directory)
+            assert mount_id(fd) == identity, 'sysctl descriptor lost its proc mount'
+            assert os.readlink('/proc/self/fd/' + str(fd)) == target
+            info = Path('/proc/self/fdinfo/' + str(fd)).read_text()
+            values = dict(line.split(':', 1) for line in info.splitlines())
+            assert int(values['mnt_id']) == identity, values
             assert os.pread(fd, 32, 0) == b'30\n'
             assert libc.mount(None, os.fsencode(directory), None, 32 | 1 | 2 | 4 | 8, None) == 0, ctypes.get_errno()
             denied(lambda: os.open(target, os.O_WRONLY), errno.EROFS)

@@ -70,7 +70,7 @@ stop another launch. Persistent stores outlive those processes.
 | Credentials | Guest users, groups, capabilities, drops and namespace ownership | Guest root never grants Android root or kernel capabilities |
 | IPC and terminals | Separate SysV IPC owners, store-scoped pathname sockets, private devpts views | Inherited connections retain authority; explicit abstract Unix sockets share the host namespace |
 | Network | Offline child namespaces or routed IPv4, private ports, supported nftables flow filtering and NAT | Native backing ports remain reachable; not a host firewall or full Linux network isolation |
-| Resource controls | Launch-local real-UID `RLIMIT_NPROC`; logical cgroup membership, controller settings and device-filter bookkeeping | Cgroup CPU, memory, pids and device limits are not enforced; other resource limits remain native |
+| Resource controls | Launch-local real-UID `RLIMIT_NPROC`; logical `RLIMIT_NOFILE` backed by native FD allocation; logical cgroup membership, controller settings and device-filter bookkeeping | Android's physical FD/task budgets still apply; cgroup CPU, memory, pids and device limits are not enforced; other resource limits remain native |
 | Application filters | Installed seccomp filters and their denial actions remain active | The filesystem broker is not itself confined by every caller's filter domain |
 
 Use trusted images and programs. Logical separation prevents many accidental
@@ -857,7 +857,7 @@ installing the restrictive policy. Addressed UDP retains its mapping until
 socket closure or relay idle expiry.
 
 This is not full network isolation. Backing ports remain reachable, inherited
-native descriptors retain access, and IPv6, raw packets,
+native descriptors retain access, and IPv6, raw IP sockets,
 multicast/broadcast and device-bound sockets are unsupported. Routed `recvmmsg`
 and ancillary types other than supported IPv4 packet information/TTL/TOS also
 have explicit limits. Anonymous nftables counters count logical data transfers
@@ -910,11 +910,13 @@ netavark's nftables driver, enabled logical cgroups and the original application
 seccomp policy. Coverage includes image pull, TCP/UDP `podman run -p`, outbound
 DNS/HTTP, bidirectional peer connections by container name, occupied-port
 rejection and removal of containers, network rules and published ports.
-Its `nofile`/`nproc` limits are explicitly set to inherited shell limits, rather
-than attempting to raise Android hard limits.
-`nproc` is now enforced against guest real UIDs within the launch; `nofile`
-and the physical Android task ceiling remain native. The fixture retains its
-explicit limits so its resource policy is reproducible.
+Booted Arch checks use the engine's default `nofile`/`nproc` limits without
+`--ulimit` overrides. `nproc` is enforced against guest real UIDs within the
+launch. `nofile` preserves guest soft/hard settings while native FD allocation
+remains bounded by the executor's physical ceiling. Lowering and privileged
+raising do not irreversibly lower Android's hard limit. This does not create
+additional physical FD slots or bypass Android's task ceiling; see
+[process limits](../native/shroot/process-resources.md#process-limits).
 
 The [Podman fixture](../native/guest-exec-lab/probe_podman_runtime.py) runs inside
 a routed Shroot launch. No `--network host` bypass or Podman-specific runtime
@@ -1205,6 +1207,11 @@ application, init or isolation test.
 | GPU | Turnip Vulkan on Adreno 840 through X11/Wayland, GTK GLArea, X11 Blender, private KWin Wayland composition | [GPU fixtures](../native/guest-exec-lab/desktop-workflows.md#linux-gpu-fixture) and [installer profiles](#graphics-drivers) |
 | SteamOS | Nested Plasma, Steam client and selected FEX game workflows; private-memory/JIT and audio-continuity checks | [Steam fixtures](../native/guest-exec-lab/desktop-workflows.md#holo-arm64-userspace); not arbitrary game compatibility |
 | Application integration | Concurrent named environments, catalog identities/icons, retained PTY, CLI/MCP cancellation, file helpers, backup/restore and interrupted publication | [Environment workflows](../native/guest-exec-lab/README.md#named-environment-workflows); no Desktop required |
+
+For results and open failures by installer distribution and entry mode, see the
+[distribution validation matrix](../native/guest-exec-lab/validation-matrix.md).
+It separates recorded passes, historical coverage and untested workflows,
+including nspawn, BuildKit, LXC and the selected LTP checks.
 
 ### Known workflow limits
 

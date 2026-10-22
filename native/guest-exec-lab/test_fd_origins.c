@@ -60,7 +60,9 @@ void test_task_registry_exit(void) {
     assert(!md_pid_identity_publish(resources.pid,20003,20003));
     struct md_pid_identity *pid=md_pid_identity_retain(resources.pid);
     struct md_identity id=md_identity_new(2000,2000);
-    struct md_process_member *account=md_process_member_new(&id,&(struct rlimit){2,2}), *child=NULL;
+    struct md_process_limits limits; assert(!md_process_limits_read(&limits));
+    limits.nproc=(struct rlimit){2,2};
+    struct md_process_member *account=md_process_member_new(&id,&limits), *child=NULL;
     assert(account && !md_process_member_fork(account,&id,0,&resources.process));
     assert(!md_task_registry_publish(registry,20003,20003,&id,&resources));
     struct md_task_credentials observed;

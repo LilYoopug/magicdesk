@@ -497,6 +497,30 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("xfce", self.system_setup_call()[-8])
 
+    def test_arch_mirror_fallback_preserves_custom_lists_and_is_idempotent(self):
+        setup = self.run_script('--print-system-setup').stdout
+        start = setup.index('arch_mirror_fallback() {')
+        function = setup[start:setup.index('\ngui=$1', start)]
+        default = 'Server = http://mirror.archlinuxarm.org/$arch/$repo\n'
+        fallback = 'Server = https://de3.mirror.archlinuxarm.org/$arch/$repo\n'
+        mirrorlist = self.directory / 'mirrorlist'
+        for original, expected in (
+                ('# Official mirrors\n' + default, '# Official mirrors\n' + fallback + default),
+                ('Server=http://mirror.archlinuxarm.org/$arch/$repo\n',
+                 fallback + 'Server=http://mirror.archlinuxarm.org/$arch/$repo\n'),
+                (fallback + default, fallback + default),
+                (default + 'Server = https://custom/$arch/$repo\n',
+                 default + 'Server = https://custom/$arch/$repo\n'),
+                ('# No active mirrors\n', '# No active mirrors\n')):
+            with self.subTest(original=original):
+                mirrorlist.write_text(original)
+                # EVENT_WAIT: isolated recipe function exits or fails its deadline.
+                checked = subprocess.run(['sh', '-eu', '-c', function + '\narch_mirror_fallback "$1"',
+                                          'fixture', str(mirrorlist)], capture_output=True,
+                                         text=True, timeout=5)
+                self.assertEqual(0, checked.returncode, checked.stderr)
+                self.assertEqual(expected, mirrorlist.read_text())
+
     def test_gui_installs_gl_dispatch_libraries_with_mesa_drivers(self):
         result = self.run_script('--yes', '--gui', 'apps')
         self.assertEqual(0, result.returncode, result.stderr)
@@ -612,13 +636,18 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
         self.assertNotIn('QML_DISABLE', setup)
         self.assertNotIn('KWIN_NO_TIMER_QUERY', setup)
 
-    def test_new_package_families_use_their_mesa_tool_names(self):
+    def test_package_families_declare_mesa_tools_and_python_packaging(self):
         self.assertEqual(0, self.run_script('--yes', '--gpu', 'turnip').returncode)
         setup = Path(str(self.payload) + '.gpu').read_text()
         start = setup.index('    case "$family" in\n    apt) packages build-essential')
         end = setup.index('\n    esac', start) + len('\n    esac')
-        for family, required in [('zypper', {'glslang-devel', 'python3-Mako', 'vulkan-tools'}),
-                                 ('xbps', {'glslang', 'python3-Mako', 'Vulkan-Headers', 'Vulkan-Tools'})]:
+        for family, required in [('apt', {'python3-packaging'}),
+                                 ('apk', {'py3-packaging'}),
+                                 ('dnf', {'python3-packaging'}),
+                                 ('pacman', {'python-packaging'}),
+                                 ('recovery', {'python-packaging'}),
+                                 ('zypper', {'python3-packaging', 'glslang-devel', 'python3-Mako', 'vulkan-tools'}),
+                                 ('xbps', {'python3-packaging', 'glslang', 'python3-Mako', 'Vulkan-Headers', 'Vulkan-Tools'})]:
             with self.subTest(family=family):
                 command = 'family=' + family + '\npackages() { printf "%s\\n" "$@"; }\n' + setup[start:end]
                 # EVENT_WAIT: dependency selection exits without installing host packages.
@@ -1624,6 +1653,8 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
         self.assertIn("IOCTL_KGSL_READ_CALIBRATED_TIMESTAMPS", result.stdout)
         self.assertIn("dev->local_fd, &timestamp) == 0", result.stdout)
         self.assertIn("kgsl_read_gpu_timestamp(dev->fd, ts)", result.stdout)
+        self.assertIn('-   if (instance->vk.enabled_extensions.KHR_display)', result.stdout)
+        self.assertIn('+   /* KGSL is render-only.', result.stdout)
         for extension in ("KHR_calibrated_timestamps", "EXT_calibrated_timestamps"):
             self.assertIn(f"+      .{extension} = has_calibrated_timestamps,", result.stdout)
         self.assertEqual([], self.calls())

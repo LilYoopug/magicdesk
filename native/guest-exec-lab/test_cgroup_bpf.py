@@ -58,6 +58,30 @@ def info(fd, expected_kind=15):
     return identity
 
 
+def instruction_info(fd, expected):
+    for capacity in (0, 1, 7, len(expected), len(expected) + 17, 32768):
+        output = ctypes.create_string_buffer(b'\xa5' * (capacity + 8), capacity + 8)
+        value = ctypes.create_string_buffer(256)
+        struct.pack_into('<I', value, 20, capacity)
+        struct.pack_into('<Q', value, 32, ctypes.addressof(output))
+        bpf(15, struct.pack('<IIQ', fd, len(value), ctypes.addressof(value)))
+        assert struct.unpack_from('<I', value.raw, 20)[0] == len(expected)
+        assert struct.unpack_from('<Q', value.raw, 32)[0] == ctypes.addressof(output)
+        copied = min(capacity, len(expected))
+        assert output.raw[:copied] == expected[:copied]
+        assert output.raw[copied:] == b'\xa5' * (len(output) - copied)
+    for pointer in (0, 1):
+        value = ctypes.create_string_buffer(256)
+        struct.pack_into('<I', value, 20, len(expected))
+        struct.pack_into('<Q', value, 32, pointer)
+        denied(lambda: bpf(15, struct.pack('<IIQ', fd, len(value), ctypes.addressof(value))), errno.EFAULT)
+    value = ctypes.create_string_buffer(4)
+    _, reply = bpf(15, struct.pack('<IIQ', fd, len(value), ctypes.addressof(value)))
+    assert struct.unpack_from('<I', reply, 4)[0] == len(value)
+    assert struct.unpack('<I', value.raw)[0] == 15
+    print('PASS BPF instruction metadata: exact bytes, bounded copies, query-only, short ABI and EFAULT', flush=True)
+
+
 def by_id(identity):
     return bpf(13, struct.pack('<III', identity, 0, 0))[0]
 
@@ -84,6 +108,105 @@ def query(target, count=64, flags=0, pointer=None, expected=0):
     attached = struct.unpack_from('<I', buffer.raw, 12)[0]
     total = struct.unpack_from('<I', buffer.raw, 24)[0]
     return list(values)[:min(count, total)], total, attached
+
+
+def map_create(entries=3, key_size=8, value_size=4, kind=1):
+    return bpf(0, struct.pack('<IIIIIII16s', kind, key_size, value_size, entries, 0, 0, 0, b'md_devices'))[0]
+
+
+def map_info(fd):
+    value = ctypes.create_string_buffer(88)
+    bpf(15, struct.pack('<IIQ', fd, len(value), ctypes.addressof(value)))
+    return struct.unpack_from('<IIIIII', value.raw)
+
+
+def map_element(fd, command, key=None, value=0, flags=0, output=None):
+    k = ctypes.c_uint64(key or 0)
+    v = ctypes.c_uint64(value)
+    bpf(command, struct.pack('<IIQQQ', fd, 0, ctypes.addressof(k) if key is not None else 0,
+                            ctypes.addressof(v) if output is None else output, flags))
+    return v.value
+
+
+def map_by_id(identity):
+    return bpf(14, struct.pack('<III', identity, 0, 0))[0]
+
+
+def program_maps(fd):
+    value = ctypes.create_string_buffer(256)
+    ids = (ctypes.c_uint32 * 64)()
+    struct.pack_into('<I', value, 52, len(ids))
+    struct.pack_into('<Q', value, 56, ctypes.addressof(ids))
+    bpf(15, struct.pack('<IIQ', fd, len(value), ctypes.addressof(value)))
+    return list(ids)[:struct.unpack_from('<I', value, 52)[0]]
+
+
+def maps(directory):
+    fd = map_create()
+    identity = map_info(fd)[1]
+    assert map_info(fd) == (1, identity, 8, 4, 3, 0)
+    assert fcntl.fcntl(fd, fcntl.F_GETFD) == fcntl.FD_CLOEXEC
+    denied(lambda: map_element(fd, 1, 5), errno.ENOENT)
+    denied(lambda: map_element(fd, 4), errno.ENOENT)
+    denied(lambda: map_element(fd, 2, 5, 10, flags=2), errno.ENOENT)
+    for key in (5, 9, 101):
+        map_element(fd, 2, key, key * 3, flags=1)
+    denied(lambda: map_element(fd, 2, 5, 0, flags=1), errno.EEXIST)
+    denied(lambda: map_element(fd, 2, 6, 0), errno.E2BIG)
+    denied(lambda: map_element(fd, 2, 5, 0, flags=3), errno.EINVAL)
+    map_element(fd, 2, 5, 123, flags=2)
+    assert map_element(fd, 1, 5) == 123
+    denied(lambda: map_element(fd, 1, 5, output=1), errno.EFAULT)
+    seen = set()
+    key = None
+    while True:
+        try:
+            key = map_element(fd, 4, key)
+        except OSError as error:
+            assert error.errno == errno.ENOENT
+            break
+        assert key not in seen
+        seen.add(key)
+    assert seen == {5, 9, 101}
+    assert map_element(fd, 4, 999) == map_element(fd, 4)
+    map_element(fd, 3, 9)
+    denied(lambda: map_element(fd, 3, 9), errno.ENOENT)
+    map_element(fd, 2, 6, 77)
+    duplicate = os.dup(fd)
+    assert map_element(duplicate, 1, 6) == 77
+    os.close(duplicate)
+    instructions = b''.join(struct.pack('<BBhi', *i) for i in (
+        (0x18, 0x11, 0, fd), (0, 0, 0, 0),
+        (0x7a, 0x0a, -8, 0), (0xbf, 0xa2, 0, 0), (0x07, 2, 0, -8),
+        (0x85, 0, 0, 1), (0xb7, 0, 0, 1), (0x95, 0, 0, 0)))
+    program = load(instructions=instructions)
+    assert program_maps(program) == [identity]
+    translated = bytearray(instructions)
+    struct.pack_into('<i', translated, 4, identity)
+    instruction_info(program, bytes(translated))
+    attach(directory, program)
+    os.close(fd)
+    fd = map_by_id(identity)
+    assert map_element(fd, 1, 5) == 123
+    left, right = socket.socketpair()
+    try:
+        left.sendmsg([b'm'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array('i', [fd]))])
+        os.close(fd)
+        _, ancillary, _, _ = right.recvmsg(1, socket.CMSG_SPACE(4))
+        received = array.array('i'); received.frombytes(ancillary[0][2])
+        assert len(received) == 1
+        fd = received[0]
+        assert map_info(fd)[1] == identity and map_element(fd, 1, 6) == 77
+        os.close(fd)
+    finally:
+        left.close(); right.close()
+    detach(directory, program)
+    os.close(program)
+    denied(lambda: map_by_id(identity), errno.ENOENT)
+    denied(lambda: map_create(kind=2), errno.EOPNOTSUPP)
+    denied(lambda: map_create(key_size=0), errno.EINVAL)
+    denied(lambda: map_create(value_size=4097), errno.E2BIG)
+    print('PASS BPF maps: CRUD, flags, capacity, iteration, EFAULT, dup/SCM, program custody and final release', flush=True)
 
 
 def guest():
@@ -121,10 +244,12 @@ def guest():
             target.mkdir()
             directory = os.open(target, os.O_RDONLY | os.O_DIRECTORY)
             try:
+                maps(directory)
                 assert query(directory) == ([], 0, 0)
                 first, second = load(), load(0)
                 one, two = info(first), info(second)
                 assert one != two
+                instruction_info(first, struct.pack('<BBhiBBhi', 0xb7, 0, 0, 1, 0x95, 0, 0, 0))
                 attach(directory, first)
                 denied(lambda: attach(directory, first), errno.EEXIST)
                 attach(directory, second)
@@ -285,6 +410,7 @@ def guest():
                 instruction = struct.pack('<BBhi', 0xb7, 0, 0, 1)
                 exit_instruction = struct.pack('<BBhi', 0x95, 0, 0, 0)
                 fd = load(instructions=instruction * 4095 + exit_instruction)
+                instruction_info(fd, instruction * 4095 + exit_instruction)
                 os.close(fd)
                 denied(lambda: load(instructions=instruction * 4096 + exit_instruction), errno.E2BIG)
                 print('PASS attachment quota, large inherited query and instruction bound', flush=True)
@@ -296,9 +422,9 @@ def guest():
                 denied(lambda: bpf(8, struct.pack('<IIIII', directory, fd, 0, 0, 0)), errno.EOPNOTSUPP)
                 os.close(fd)
                 denied(lambda: by_id(identity), errno.ENOENT)
-                for command in (0, 18, 0xffffffff):  # maps, BTF, unknown command
+                for command in (0, 18, 0xffffffff):  # invalid map type, BTF, unknown command
                     denied(lambda: bpf(command, bytes(64)), errno.EINVAL)
-                denied(lambda: load(instructions=struct.pack('<BBhiBBhi', 0x85, 0, 0, 1, 0x95, 0, 0, 0)), errno.EOPNOTSUPP)
+                denied(lambda: load(instructions=struct.pack('<BBhiBBhi', 0x85, 0, 0, 2, 0x95, 0, 0, 0)), errno.EOPNOTSUPP)
                 denied(lambda: load(instructions=struct.pack('<BBhiBBhi', 0x05, 0, 4, 0, 0x95, 0, 0, 0)), errno.EINVAL)
                 invalid = os.open('/dev/null', os.O_RDONLY)
                 try:
@@ -340,11 +466,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build', type=Path)
     parser.add_argument('store')
+    parser.add_argument('--base', action='store_true')
     args = parser.parse_args()
     from test_oci_services import Suite
-    suite = Suite(args.build, args.build)
+    suite = Suite(args.build, args.build, machine_entry=False if args.base else None)
     target = '/tmp/md-bpf-' + suite.report['id']
-    prefix = [suite.runner, '--store', args.store, '--user', '0:0']
+    prefix = suite.guest(args.store, '--user', '0:0')
     try:
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/test.py')
         suite.command(prefix + ['--', '/bin/mkdir', target])

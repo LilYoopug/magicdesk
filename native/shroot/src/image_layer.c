@@ -223,8 +223,8 @@ static int entry_file(struct md_inode_store *s, struct archive *ar, struct archi
         snprintf(native, sizeof(native), "/proc/self/fd/%d/%s", s->objects, node.backing);
         archive_entry_xattr_reset(entry);
         while (!r && !archive_entry_xattr_next(entry, &name, &value, &length)) {
-            if (mdi_overlay_attribute(name)) {
-                r=mdi_overlay_attribute_set(s,&node,name,length ? value : "",length);
+            if (mdi_xattr_virtual(name)) {
+                r=mdi_xattr_virtual_set(s,&node,name,length ? value : "",length);
                 continue;
             }
             if (!backup || strncmp(name, "user.", 5)) continue;

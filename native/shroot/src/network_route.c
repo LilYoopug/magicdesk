@@ -4,11 +4,13 @@
 #include "netlink_attributes.h"
 #include "network_internal.h"
 #include "network_forward.h"
+#include "network_endpoint.h"
 #include "guest_identity.h"
 #include <errno.h>
 #include <linux/if_link.h>
 #include <linux/fib_rules.h>
 #include <linux/neighbour.h>
+#include <linux/nexthop.h>
 #include <linux/pkt_sched.h>
 #include <linux/rtnetlink.h>
 #include <linux/veth.h>
@@ -47,27 +49,27 @@ static int kind_is(const struct rtattr *a,const char *name) {
     return (size==length || (size==length+1 && !((const char *)RTA_DATA(a))[length]))
         && !memcmp(RTA_DATA(a),name,length);
 }
-static unsigned flags(const struct md_network_interface *link) {
-    return link->info.flags | ((link->info.flags&IFF_UP) ? IFF_RUNNING|IFF_LOWER_UP : 0);
-}
 static int link_reply(struct md_network_message *out,const struct nlmsghdr *h,uint32_t port,int dump,
-        const struct md_network_interface *link,int family) {
+        struct md_network_namespace *n,const struct md_network_interface *link,int family) {
+    struct md_network_link observed=md_network_interface_snapshot(n,link);
     struct ifinfomsg m={.ifi_family=family,.ifi_type=link->info.type,
-        .ifi_index=link->info.index,.ifi_flags=flags(link)};
+        .ifi_index=link->info.index,.ifi_flags=observed.flags};
     int error=md_network_message_begin(out,h,port,RTM_NEWLINK,dump,&m,sizeof(m));
     if (!error) error=md_network_message_attribute(out,IFLA_IFNAME,link->info.name,strlen(link->info.name)+1);
     if (!error) error=md_network_message_attribute(out,IFLA_MTU,&link->info.mtu,sizeof(link->info.mtu));
     if (!error) error=md_network_message_attribute(out,IFLA_TXQLEN,&link->info.tx_queue_length,sizeof(link->info.tx_queue_length));
     if (!error) error=md_network_message_attribute(out,IFLA_ADDRESS,link->info.address,6);
-    unsigned char state=(link->info.flags&IFF_UP) ? IF_OPER_UNKNOWN : IF_OPER_DOWN;
+    unsigned char state=observed.state;
     if (!error) error=md_network_message_attribute(out,IFLA_OPERSTATE,&state,1);
     if (!error && link->master) error=md_network_message_attribute(out,IFLA_MASTER,&link->master,sizeof(link->master));
     if (!error && link->peer) error=md_network_message_attribute(out,IFLA_LINK,&link->peer,sizeof(link->peer));
     if (!error && link->master && family==AF_BRIDGE) {
         size_t nest=0;
         unsigned char hairpin=(unsigned char)link->hairpin;
+        unsigned char isolated=(unsigned char)link->isolated;
         error=md_network_message_nest(out,IFLA_PROTINFO,&nest);
         if (!error) error=md_network_message_attribute(out,IFLA_BRPORT_MODE,&hairpin,sizeof(hairpin));
+        if (!error) error=md_network_message_attribute(out,IFLA_BRPORT_ISOLATED,&isolated,sizeof(isolated));
         if (!error) error=md_network_message_end_nest(out,nest);
     }
     if (!error && (link->kind==MD_LINK_VETH || link->kind==MD_LINK_BRIDGE)) {
@@ -85,17 +87,28 @@ struct link_change {
     char name_storage[IFNAMSIZ],peer_storage[IFNAMSIZ];
     enum md_network_link_kind kind;
     unsigned index,master,mtu,change,flags,tx_queue_length,peer_tx_queue_length,peer_mtu,family;
-    int has_master,has_mtu,has_address,namespace_fd,peer_namespace_fd,has_tx_queue_length,has_peer_tx_queue_length;
-    int has_peer_mtu,has_peer_address,has_hairpin;
-    unsigned hairpin;
+    int has_master,has_mtu,has_address,has_tx_queue_length,has_peer_tx_queue_length;
+    struct md_network_target_reference namespace,peer_namespace;
+    int has_peer_mtu,has_peer_address,has_hairpin,has_isolated;
+    unsigned hairpin,isolated;
     unsigned char address[6],peer_address[6];
 };
+static int namespace_reference(const struct rtattr *attribute,unsigned type,struct md_network_target_reference *out) {
+    if (out->kind) return -EINVAL;
+    uint32_t value=0;
+    int error=number(attribute,&value);
+    if (error) return error;
+    enum md_network_target_kind kind=type==IFLA_NET_NS_FD ? MD_NETWORK_TARGET_FD : MD_NETWORK_TARGET_PID;
+    if ((int)value<0 || (kind==MD_NETWORK_TARGET_PID && !value))
+        return kind==MD_NETWORK_TARGET_FD ? -EBADF : -ESRCH;
+    *out=(struct md_network_target_reference){kind,(int)value}; return 0;
+}
 static int parse_link(const struct nlmsghdr *h,struct link_change *change,struct attrs *a) {
     if (h->nlmsg_len<NLMSG_LENGTH(sizeof(struct ifinfomsg))) return -EINVAL;
     const struct ifinfomsg *m=NLMSG_DATA(h);
     if (m->ifi_index<0 || (m->ifi_family!=AF_UNSPEC && m->ifi_family!=AF_PACKET && m->ifi_family!=AF_BRIDGE)) return -EINVAL;
     *change=(struct link_change){.index=(unsigned)m->ifi_index,.change=m->ifi_change,.flags=m->ifi_flags,
-        .namespace_fd=-1,.peer_namespace_fd=-1,.family=m->ifi_family};
+        .family=m->ifi_family};
     int error=attributes(IFLA_RTA(m),h->nlmsg_len-NLMSG_LENGTH(sizeof(*m)),a,IFLA_MAX);
     for (unsigned i=1;!error && i<=IFLA_MAX;++i) {
         const struct rtattr *v=a->v[i]; if (!v) continue;
@@ -108,10 +121,8 @@ static int parse_link(const struct nlmsghdr *h,struct link_change *change,struct
         case IFLA_ADDRESS:
             if (RTA_PAYLOAD(v)!=6) error=-EINVAL;
             else { memcpy(change->address,RTA_DATA(v),6); change->has_address=1; } break;
-        case IFLA_NET_NS_FD: {
-            uint32_t fd=0; error=number(v,&fd); change->namespace_fd=(int)fd;
-            if (!error && (int)fd<0) error=-EBADF; break;
-        }
+        case IFLA_NET_NS_FD: case IFLA_NET_NS_PID:
+            error=namespace_reference(v,i,&change->namespace); break;
         case IFLA_EXT_MASK: {
             uint32_t mask; error=number(v,&mask);
             if (!error && (mask&~(RTEXT_FILTER_VF|RTEXT_FILTER_SKIP_STATS))) error=-EOPNOTSUPP;
@@ -123,12 +134,13 @@ static int parse_link(const struct nlmsghdr *h,struct link_change *change,struct
             struct attrs port;
             error=attributes(RTA_DATA(v),RTA_PAYLOAD(v),&port,IFLA_BRPORT_MAX);
             for (unsigned j=1;!error && j<=IFLA_BRPORT_MAX;++j) if (port.v[j]) {
-                if (j!=IFLA_BRPORT_MODE) error=-EOPNOTSUPP;
+                if (j!=IFLA_BRPORT_MODE && j!=IFLA_BRPORT_ISOLATED) error=-EOPNOTSUPP;
                 else if (RTA_PAYLOAD(port.v[j])!=1) error=-EINVAL;
                 else {
-                    change->hairpin=*(const unsigned char *)RTA_DATA(port.v[j]);
-                    change->has_hairpin=1;
-                    if (change->hairpin>1) error=-EINVAL;
+                    unsigned value=*(const unsigned char *)RTA_DATA(port.v[j]);
+                    if (value>1) error=-EINVAL;
+                    else if (j==IFLA_BRPORT_MODE) { change->hairpin=value; change->has_hairpin=1; }
+                    else { change->isolated=value; change->has_isolated=1; }
                 }
             }
             break;
@@ -173,11 +185,9 @@ static int parse_link(const struct nlmsghdr *h,struct link_change *change,struct
             if (RTA_PAYLOAD(peer_attrs.v[i])!=6) return -EINVAL;
             memcpy(change->peer_address,RTA_DATA(peer_attrs.v[i]),6);
             change->has_peer_address=1;
-        } else if (i==IFLA_NET_NS_FD) {
-            uint32_t fd=0; error=number(peer_attrs.v[i],&fd);
+        } else if (i==IFLA_NET_NS_FD || i==IFLA_NET_NS_PID) {
+            error=namespace_reference(peer_attrs.v[i],i,&change->peer_namespace);
             if (error) return error;
-            if ((int)fd<0) return -EBADF;
-            change->peer_namespace_fd=(int)fd;
         } else if (i==IFLA_LINKINFO) {
             struct attrs peer_info;
             error=attributes(RTA_DATA(peer_attrs.v[i]),RTA_PAYLOAD(peer_attrs.v[i]),&peer_info,IFLA_INFO_MAX);
@@ -208,7 +218,7 @@ static int change_link(struct md_network_namespace *n,const struct nlmsghdr *h,c
         struct md_network_interface *master=md_network_interface_find(n,c->master,NULL);
         if (!master || master->kind!=MD_LINK_BRIDGE) return -EINVAL;
     }
-    if (c->has_hairpin && (!link || link->kind!=MD_LINK_VETH
+    if ((c->has_hairpin || c->has_isolated) && (!link || link->kind!=MD_LINK_VETH
             || !(c->has_master ? c->master : link->master))) return -EINVAL;
     int creating=h->nlmsg_type==RTM_NEWLINK && (h->nlmsg_flags&NLM_F_CREATE);
     if (link && creating && (h->nlmsg_flags&NLM_F_EXCL)) return -EEXIST;
@@ -251,11 +261,14 @@ static int change_link(struct md_network_namespace *n,const struct nlmsghdr *h,c
     }
     if (target && c->has_master) return -EOPNOTSUPP;
     link->info.flags=(link->info.flags&~c->change)|(c->flags&c->change);
-    if (c->has_master) link->master=c->master;
+    if (c->has_master && link->master!=c->master) {
+        link->master=c->master; link->hairpin=link->isolated=0;
+    }
     if (c->has_mtu) link->info.mtu=c->mtu;
     if (c->has_tx_queue_length) link->info.tx_queue_length=c->tx_queue_length;
     if (c->has_address) memcpy(link->info.address,c->address,6);
     if (c->has_hairpin) link->hairpin=c->hairpin;
+    if (c->has_isolated) link->isolated=c->isolated;
     return 0;
 }
 static int address_reply(struct md_network_message *o,const struct nlmsghdr *h,uint32_t port,int dump,const struct md_network_interface *link) {
@@ -265,6 +278,8 @@ static int address_reply(struct md_network_message *o,const struct nlmsghdr *h,u
     if (!error) error=md_network_message_attribute(o,IFA_ADDRESS,&link->ipv4,sizeof(link->ipv4));
     if (!error) error=md_network_message_attribute(o,IFA_LOCAL,&link->ipv4,sizeof(link->ipv4));
     if (!error) error=md_network_message_attribute(o,IFA_LABEL,link->info.name,strlen(link->info.name)+1);
+    uint32_t address_flags=m.ifa_flags;
+    if (!error) error=md_network_message_attribute(o,IFA_FLAGS,&address_flags,sizeof(address_flags));
     return error;
 }
 static int addresses(struct md_network_namespace *n,const struct nlmsghdr *h,uint32_t port,int dump,struct md_network_message *o) {
@@ -409,6 +424,7 @@ struct topology_checkpoint {
     struct md_network_interface *links;
     unsigned count,default_interface;
     uint32_t default_gateway,default_metric;
+    unsigned char states[256];
 };
 static int checkpoint(struct topology_checkpoint *saved,struct md_network_namespace *n) {
     if (!n) return 0;
@@ -417,6 +433,8 @@ static int checkpoint(struct topology_checkpoint *saved,struct md_network_namesp
     if (n->count) memcpy(links,n->links,n->count*sizeof(*links));
     *saved=(struct topology_checkpoint){.space=n,.links=links,.count=n->count,
         .default_interface=n->default_interface,.default_gateway=n->default_gateway,.default_metric=n->default_metric};
+    if (n->listeners) for (unsigned i=0;i<n->count;++i)
+        saved->states[i]=md_network_interface_snapshot(n,&n->links[i]).state;
     return 0;
 }
 static void checkpoint_finish(struct topology_checkpoint *saved,int commit) {
@@ -440,7 +458,7 @@ static void notify_link(struct md_network_namespace *n,const struct md_network_i
     union { struct nlmsghdr alignment; unsigned char bytes[1024]; } packet;
     struct md_network_message out={.data=packet.bytes,.capacity=sizeof(packet)};
     const struct nlmsghdr request={0};
-    int r=group==RTNLGRP_LINK ? link_reply(&out,&request,0,0,link,AF_UNSPEC)
+    int r=group==RTNLGRP_LINK ? link_reply(&out,&request,0,0,n,link,AF_UNSPEC)
         : group==RTNLGRP_IPV4_IFADDR ? address_reply(&out,&request,0,0,link)
         : route_reply(&out,&request,0,0,link,gateway,metric,NULL);
     if (!r) {
@@ -464,8 +482,10 @@ static void notify_changes(const struct topology_checkpoint *saved) {
     for (unsigned i=0;i<n->count;++i) {
         const struct md_network_interface *now=&n->links[i];
         const struct md_network_interface *old=snapshot_link(saved->links,saved->count,now->info.index);
+        int state_changed=old && saved->states[old-saved->links]!=md_network_interface_snapshot(n,now).state;
         if (!old || memcmp(&old->info,&now->info,sizeof(now->info)) || old->kind!=now->kind
-                || old->peer!=now->peer || old->master!=now->master)
+                || old->peer!=now->peer || old->master!=now->master || state_changed
+                || old->hairpin!=now->hairpin || old->isolated!=now->isolated)
             notify_link(n,now,RTM_NEWLINK,RTNLGRP_LINK,0,0);
         if (now->ipv4 && (!old || old->ipv4!=now->ipv4 || old->prefix!=now->prefix)) {
             notify_link(n,now,RTM_NEWADDR,RTNLGRP_IPV4_IFADDR,0,0);
@@ -483,7 +503,8 @@ static void notify_changes(const struct topology_checkpoint *saved) {
 int md_network_route_query(unsigned type) {
     switch (type) {
     case RTM_GETLINK: case RTM_GETADDR: case RTM_GETROUTE: case RTM_GETRULE:
-    case RTM_GETNEIGH: case RTM_GETQDISC: case RTM_GETTCLASS: case RTM_GETTFILTER: return 1;
+    case RTM_GETNEIGH: case RTM_GETQDISC: case RTM_GETTCLASS: case RTM_GETTFILTER:
+    case RTM_GETNEXTHOP: return 1;
     default: return 0;
     }
 }
@@ -493,7 +514,8 @@ static int policy_dump(struct md_network_message *out,const struct nlmsghdr *h,u
     unsigned family=((const struct rtgenmsg *)NLMSG_DATA(h))->rtgen_family;
     if (family!=AF_UNSPEC && family!=AF_INET && family!=AF_INET6 && family!=AF_BRIDGE) return -EAFNOSUPPORT;
     /* The fabric routes local addresses before its main table. It has no
-     * neighbor cache, programmable policy rules or traffic-control objects. */
+     * neighbor cache, standalone nexthops, programmable policy rules or
+     * traffic-control objects. Mutations of these catalogues remain rejected. */
     if (h->nlmsg_type!=RTM_GETRULE || family==AF_INET6) return 0;
     if (family==AF_BRIDGE) return -EAFNOSUPPORT;
     const unsigned char tables[]={RT_TABLE_LOCAL,RT_TABLE_MAIN,RT_TABLE_DEFAULT};
@@ -502,6 +524,8 @@ static int policy_dump(struct md_network_message *out,const struct nlmsghdr *h,u
     for (unsigned i=0;!error && i<3;++i) {
         struct fib_rule_hdr rule={.family=AF_INET,.table=tables[i],.action=FR_ACT_TO_TBL};
         error=md_network_message_begin(out,h,port,RTM_NEWRULE,1,&rule,sizeof(rule));
+        const unsigned char protocol=RTPROT_KERNEL;
+        if (!error) error=md_network_message_attribute(out,FRA_PROTOCOL,&protocol,sizeof(protocol));
         if (!error && priority[i]) error=md_network_message_attribute(out,FRA_PRIORITY,&priority[i],sizeof(priority[i]));
     }
     return error;
@@ -514,6 +538,7 @@ static int strict_query(const struct nlmsghdr *h,int dump) {
     case RTM_GETROUTE: body=sizeof(struct rtmsg); break;
     case RTM_GETRULE: body=sizeof(struct fib_rule_hdr); break;
     case RTM_GETNEIGH: body=sizeof(struct ndmsg); break;
+    case RTM_GETNEXTHOP: body=sizeof(struct nhmsg); break;
     default: body=sizeof(struct tcmsg); break;
     }
     if (h->nlmsg_len<NLMSG_LENGTH(body)) return -EINVAL;
@@ -569,14 +594,14 @@ long md_network_route(struct md_network_namespace *n,const struct md_identity *i
     struct md_network_namespace *target=NULL,*peer_target=NULL;
     int link=h->nlmsg_type==RTM_GETLINK || h->nlmsg_type==RTM_NEWLINK || h->nlmsg_type==RTM_SETLINK || h->nlmsg_type==RTM_DELLINK;
     if (!error && link) error=parse_link(h,&change,&attrs);
-    if (!error && link && change.namespace_fd>=0) {
-        error=resolver && resolver->resolve ? resolver->resolve(resolver->context,change.namespace_fd,&target) : -EOPNOTSUPP;
+    if (!error && link && change.namespace.kind) {
+        error=resolver && resolver->resolve ? resolver->resolve(resolver->context,change.namespace,&target) : -EOPNOTSUPP;
         if (!error && (!md_identity_capable_in(identity,target->owner,CAP_NET_ADMIN))) error=-EPERM;
         if (!error && target->fabric!=n->fabric) error=-EXDEV;
         if (!error && (query || change.has_master)) error=-EOPNOTSUPP;
     }
-    if (!error && link && change.peer_namespace_fd>=0) {
-        error=resolver && resolver->resolve ? resolver->resolve(resolver->context,change.peer_namespace_fd,&peer_target) : -EOPNOTSUPP;
+    if (!error && link && change.peer_namespace.kind) {
+        error=resolver && resolver->resolve ? resolver->resolve(resolver->context,change.peer_namespace,&peer_target) : -EOPNOTSUPP;
         if (!error && !md_identity_capable_in(identity,peer_target->owner,CAP_NET_ADMIN)) error=-EPERM;
         if (!error && peer_target->fabric!=n->fabric) error=-EXDEV;
         if (!error && (query || target)) error=-EOPNOTSUPP;
@@ -589,7 +614,7 @@ long md_network_route(struct md_network_namespace *n,const struct md_identity *i
     unsigned next_index=n->fabric->next_index;
     if (!error && !query) {
         struct md_network_namespace *other=peer_target ? peer_target : target;
-        if (h->nlmsg_type==RTM_DELLINK) {
+        if (!other && link) {
             struct md_network_interface *found=md_network_interface_find(n,change.index,change.name);
             if (found) other=md_network_interface_owner(n->fabric,found->peer);
         }
@@ -602,11 +627,11 @@ long md_network_route(struct md_network_namespace *n,const struct md_identity *i
                 for (unsigned i=0;!error && i<n->count;++i)
                     if ((!change.master || n->links[i].master==change.master)
                             && (change.family!=AF_BRIDGE || n->links[i].master))
-                        error=link_reply(&out,h,port,1,&n->links[i],change.family==AF_BRIDGE ? AF_BRIDGE : AF_UNSPEC);
+                        error=link_reply(&out,h,port,1,n,&n->links[i],change.family==AF_BRIDGE ? AF_BRIDGE : AF_UNSPEC);
             } else {
                 struct md_network_interface *found=md_network_interface_find(n,change.index,change.name);
                 error=found && (change.family!=AF_BRIDGE || found->master)
-                    ? link_reply(&out,h,port,0,found,change.family==AF_BRIDGE ? AF_BRIDGE : AF_UNSPEC) : -ENODEV;
+                    ? link_reply(&out,h,port,0,n,found,change.family==AF_BRIDGE ? AF_BRIDGE : AF_UNSPEC) : -ENODEV;
             }
         } else if (link) error=change_link(n,h,&change,target,peer_target);
         else if (h->nlmsg_type==RTM_GETADDR || h->nlmsg_type==RTM_NEWADDR || h->nlmsg_type==RTM_DELADDR)
@@ -616,6 +641,8 @@ long md_network_route(struct md_network_namespace *n,const struct md_identity *i
         else if (query) error=policy_dump(&out,h,port,dump);
         else error=-EOPNOTSUPP;
     }
+    if (!error && !query && link && (change.has_hairpin || change.has_isolated))
+        error=md_network_endpoint_policy_update(n,n->filter);
     if (error) out.size=0;
     int encoded=md_network_message_done(&out,original,port,error,dump,options&MD_NETWORK_ROUTE_CAPPED_ACK);
     if (!encoded && out.size && publication)

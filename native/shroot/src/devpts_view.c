@@ -17,11 +17,13 @@
 
 /* Worker-owned directory membership. Kernel PTYs retain all terminal IO and
  * job-control semantics. No master/slave data FD is retained by this view. */
-struct entry { struct entry *next; dev_t device; ino_t inode; unsigned number; uid_t uid; gid_t gid; mode_t mode; };
+struct attributes { uid_t uid; gid_t gid; mode_t mode; };
+struct entry { struct entry *next; dev_t device; ino_t inode; unsigned number; struct attributes attributes; };
 struct md_devpts {
     atomic_uint references;
     struct entry *entries;
-    mode_t mode,ptmxmode;
+    mode_t mode;
+    struct attributes directory,ptmx;
     uid_t uid; gid_t gid;
     int fixed_uid,fixed_gid;
     int storage,root;
@@ -30,6 +32,8 @@ struct md_devpts *md_devpts_new(int parent,const char *options,const struct md_i
     if (!id) { errno=EPERM; return NULL; }
     struct md_devpts *p=calloc(1,sizeof(*p)); if (!p) return NULL;
     atomic_init(&p->references,1); p->mode=0600; p->uid=id->uid.fs; p->gid=id->gid.fs;
+    p->directory=(struct attributes){id->uid.fs,id->gid.fs,0755};
+    p->ptmx=(struct attributes){id->uid.fs,id->gid.fs,0};
     p->storage=p->root=-1;
     for (const char *at=options;at && *at;) {
         const char *end=strchr(at,','); if (!end) end=at+strlen(at);
@@ -49,7 +53,7 @@ struct md_devpts *md_devpts_new(int parent,const char *options,const struct md_i
         }
         if (mode || ptmx) {
             if (value&~0777U) { errno=EINVAL; goto failed; }
-            if (mode) p->mode=value; else p->ptmxmode=value;
+            if (mode) p->mode=value; else p->ptmx.mode=value;
         } else {
             value=md_user_namespace_into(id->user_namespace,gid,value);
             if (value==UINT32_MAX) { errno=EINVAL; goto failed; }
@@ -85,6 +89,11 @@ static struct entry *find(struct md_devpts *p,const struct stat *st) {
     for (struct entry *e=p->entries;e;e=e->next) if (e->device==st->st_dev && e->inode==st->st_ino) return e;
     return NULL;
 }
+static struct attributes *attributes(struct md_devpts *p,const struct stat *st) {
+    if (S_ISDIR(st->st_mode)) return &p->directory;
+    if (ptmx(st)) return &p->ptmx;
+    struct entry *e=find(p,st); return e ? &e->attributes : NULL;
+}
 int md_devpts_name(struct md_devpts *p,int fd,char *name,size_t size) {
     struct stat st;
     if (fstat(fd,&st)) return -errno;
@@ -96,10 +105,8 @@ int md_devpts_name(struct md_devpts *p,int fd,char *name,size_t size) {
 int md_devpts_stat(struct md_devpts *p,int fd,struct stat *st) {
     if (!p) return -EINVAL;
     if (fstat(fd,st)) return -errno;
-    if (S_ISDIR(st->st_mode)) { st->st_mode=S_IFDIR|0755; st->st_uid=p->uid; st->st_gid=p->gid; return 0; }
-    if (ptmx(st)) { st->st_mode=S_IFCHR|p->ptmxmode; st->st_uid=p->uid; st->st_gid=p->gid; return 0; }
-    struct entry *e=find(p,st); if (!e) return -ENOENT;
-    st->st_mode=S_IFCHR|e->mode; st->st_uid=e->uid; st->st_gid=e->gid; return 0;
+    struct attributes *a=attributes(p,st); if (!a) return -ENOENT;
+    st->st_mode=(st->st_mode&S_IFMT)|a->mode; st->st_uid=a->uid; st->st_gid=a->gid; return 0;
 }
 int md_devpts_access(struct md_devpts *p,int fd,int mode,const struct md_identity *id) {
     struct stat st; int r=md_devpts_stat(p,fd,&st); return r ? r : md_file_permissions(&st,mode,id);
@@ -147,7 +154,8 @@ int md_devpts_open(struct md_devpts *p,int fd,int flags,const struct md_identity
             e->next=p->entries; p->entries=e;
         }
         e->number=number; e->device=slave.st_dev; e->inode=slave.st_ino;
-        e->uid=p->fixed_uid ? p->uid : id->uid.fs; e->gid=p->fixed_gid ? p->gid : id->gid.fs; e->mode=p->mode;
+        e->attributes=(struct attributes){p->fixed_uid ? p->uid : id->uid.fs,
+            p->fixed_gid ? p->gid : id->gid.fs,p->mode};
         char name[32]; snprintf(name,sizeof(name),"%u",number);
         int node=openat(p->root,name,O_CREAT|O_WRONLY|O_NOFOLLOW|O_CLOEXEC,0600);
         if (node<0) { r=-errno; goto failed; }
@@ -160,8 +168,9 @@ failed:
 int md_devpts_chmod(struct md_devpts *p,int fd,mode_t mode,const struct md_identity *id) {
     struct stat st; int r=md_devpts_stat(p,fd,&st); if (r) return r;
     if (id->uid.fs!=st.st_uid && !md_identity_file_capable(id,st.st_uid,st.st_gid,CAP_FOWNER)) return -EPERM;
-    if (S_ISDIR(st.st_mode)) return -EOPNOTSUPP;
-    if (ptmx(&st)) p->ptmxmode=mode&0777; else find(p,&st)->mode=mode&0777;
+    if (!md_identity_in_group(id,st.st_gid)
+            && !md_identity_file_capable(id,st.st_uid,st.st_gid,CAP_FSETID)) mode&=~S_ISGID;
+    attributes(p,&st)->mode=mode&07777;
     return 0;
 }
 int md_devpts_chown(struct md_devpts *p,int fd,uint32_t uid,uint32_t gid,const struct md_identity *id) {
@@ -170,8 +179,7 @@ int md_devpts_chown(struct md_devpts *p,int fd,uint32_t uid,uint32_t gid,const s
     if (gid==UINT32_MAX) gid=st.st_gid;
     if (!md_identity_file_capable(id,st.st_uid,st.st_gid,CAP_CHOWN)
             && !(id->uid.fs==st.st_uid && uid==st.st_uid && (gid==st.st_gid || md_identity_in_group(id,gid)))) return -EPERM;
-    if (S_ISDIR(st.st_mode) || ptmx(&st)) return -EOPNOTSUPP;
-    struct entry *e=find(p,&st); e->uid=uid; e->gid=gid; return 0;
+    struct attributes *a=attributes(p,&st); a->uid=uid; a->gid=gid; return 0;
 }
 ssize_t md_devpts_getdents(struct md_devpts *p,int fd,void *data,size_t capacity) {
     for (;;) {

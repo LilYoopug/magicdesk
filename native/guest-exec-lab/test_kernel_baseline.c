@@ -1,23 +1,56 @@
 #define _GNU_SOURCE
 #include "task_descriptor.h"
 #include "task_lifetime.h"
+#include "fd_filesystem.h"
 #include "linux_abi.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/filter.h>
 #include <linux/futex.h>
+#include <linux/magic.h>
 #include <linux/seccomp.h>
 #include <sched.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/eventfd.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+static void pidfd_filesystem(void) {
+    int fd=(int)syscall(SYS_pidfd_open,getpid(),0), event=eventfd(0,EFD_CLOEXEC);
+    int file=memfd_create("anon_inode:[pidfd]",MFD_CLOEXEC);
+    assert(fd>=0 && event>=0 && file>=0);
+    struct statfs native,value;
+    int available=!syscall(SYS_fstatfs,fd,&native);
+    assert(available || errno==EACCES || errno==EPERM);
+    assert(!md_fd_filesystem(fd,&value));
+    assert(value.f_type==ANON_INODE_FS_MAGIC || value.f_type==0x50494446);
+    assert(value.f_bsize==(unsigned long)getpagesize() && value.f_frsize==(unsigned long)getpagesize() && value.f_namelen==255);
+    if (available) assert(!memcmp(&native,&value,sizeof(value)));
+    struct sock_filter rules[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_fstatfs,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EACCES),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog program={sizeof(rules)/sizeof(*rules),rules};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+    struct statfs fallback;
+    assert(!md_fd_filesystem(fd,&fallback) && !memcmp(&value,&fallback,sizeof(value)));
+    int copy=dup(fd); assert(copy>=0 && !close(fd));
+    assert(!md_fd_filesystem(copy,&fallback));
+    assert(md_fd_filesystem(event,&fallback)==-EACCES);
+    assert(md_fd_filesystem(file,&fallback)==-EACCES);
+    close(copy); close(event); close(file);
+    puts("PASS pidfd statfs fallback, duplicate and non-pidfd denial");
+}
 
 static void without_thread_pidfd(void) {
     struct sock_filter rules[]={
@@ -102,6 +135,10 @@ int main(int argc, char **argv) {
         without_thread_pidfd(); execv(argv[1],argv+1); perror("baseline exec"); return 126;
     }
     alarm(20);
+    pid_t metadata=fork(); assert(metadata>=0);
+    if (!metadata) { pidfd_filesystem(); _exit(0); }
+    int metadata_status;
+    assert(waitpid(metadata,&metadata_status,0)==metadata && WIFEXITED(metadata_status) && !WEXITSTATUS(metadata_status));
     assert(!md_task_descriptor_needs_export(-EBADF));
     assert(!md_task_descriptor_needs_export(-EINVAL));
     for (int baseline=0;baseline<2;++baseline) for (int protected=0;protected<2;++protected) {

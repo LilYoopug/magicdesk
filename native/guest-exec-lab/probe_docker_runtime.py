@@ -2,7 +2,7 @@
 """Probe stock Docker Engine in a prepared disposable Debian Shroot store.
 
 Diagnostic profiles record missing capabilities rather than assert compatibility.
-The routed/nftables --exercise-ports modes require TCP/UDP publication, peer
+The routed/iptables/nftables --exercise-ports modes require TCP/UDP publication, peer
 exchange and cleanup. --internet adds external availability checks separately.
 Install Docker Engine in the store before running this probe (29+ for nftables).
 """
@@ -22,7 +22,7 @@ import traceback
 
 
 ROOTLESS_PROFILES = ('rootless', 'rootless-no-firewall', 'rootless-no-network')
-NETWORK_PROFILES = ('routed', 'nftables')
+NETWORK_PROFILES = ('routed', 'iptables', 'nftables')
 PROFILES = ('default', 'no-network', *NETWORK_PROFILES, *ROOTLESS_PROFILES)
 
 
@@ -70,6 +70,8 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
                  '--userland-proxy=' + str(userland_proxy).lower()]
     if profile == 'nftables':
         argv += ['--firewall-backend=nftables', '--ip6tables=false']
+    elif profile == 'iptables':
+        argv += ['--iptables=true', '--ip6tables=false']
     if trace_runtime or no_new_keyring:
         wrapper = base / 'runc-trace'
         wrapper.write_text('#!/usr/bin/python3\nimport os, sys\n'
@@ -305,7 +307,7 @@ def main():
     add_machine_entry_argument(parser)
     args = parser.parse_args()
     if args.exercise_ports and args.profile not in NETWORK_PROFILES:
-        parser.error('--exercise-ports requires --profile routed or nftables')
+        parser.error('--exercise-ports requires --profile routed, iptables or nftables')
     if args.image is None:
         args.image = 'python:3.14-alpine' if args.exercise_ports else 'busybox:1.37.0'
     suite = Suite(args.build, args.build, machine_entry=args.machine_entry)

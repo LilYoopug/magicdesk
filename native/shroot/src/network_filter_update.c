@@ -7,7 +7,7 @@
 int md_network_filter_prepare(struct md_network_namespace *n,struct md_network_filter *next,
         struct md_network_forward_update **update) {
     int error=md_filter_validate(next);
-    if (!error) error=md_network_endpoint_filter_update(n,next);
+    if (!error) error=md_network_endpoint_policy_update(n,next);
     if (!error) error=md_network_forward_prepare(n,next,update);
     return error;
 }
