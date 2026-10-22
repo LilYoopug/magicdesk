@@ -11,4 +11,5 @@ int md_database_step(sqlite3_stmt *);
  * single-thread-owned; SQLite keeps native locking and journal semantics.
  * A failed open never returns a partially initialized connection. */
 int md_database_open(int directory,const char *name,int create,sqlite3 **out);
+int md_database_open_readonly(int directory,const char *name,sqlite3 **out);
 #endif

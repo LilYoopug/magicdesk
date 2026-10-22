@@ -60,6 +60,10 @@ public class GuestEnvironmentLibraryTest {
                     if (!stores.containsKey(path)) throw new IOException("Missing store");
                     return stores.get(path).toString();
                 }
+                case "sources" -> {
+                    if (!stores.containsKey(path)) throw new IOException("Missing store");
+                    return stores.get(path).getJSONArray("sources").toString();
+                }
                 case "remove", "remove-layer" -> {
                     if (busy) throw new IOException("Busy");
                     Files.delete(path); stores.remove(path);
@@ -330,6 +334,20 @@ public class GuestEnvironmentLibraryTest {
         assertTrue(Files.exists(root.resolve("images").resolve(environment.image())));
         images.busy = false; library.remove("work"); library.prune();
         assertTrue(images.stores.isEmpty());
+    }
+
+    @Test public void removalDoesNotInspectTheSelectedStoreOrAdmitOtherSchemas() throws Exception {
+        Path root = temporary.newFolder().toPath(), archive = temporary.newFile().toPath();
+        Images images = new Images(); var library = library(root, images);
+        var old = library.restore(archive, "old");
+        var other = library.restore(archive, "other");
+        images.stores.remove(old.store());
+        images.commands.clear();
+        library.remove("old");
+        assertEquals(List.of(List.of("sources", other.store().toString()),
+                List.of("remove", old.store().toString())), images.commands);
+        assertFalse(Files.exists(old.store()));
+        assertEquals(List.of(other), library.list());
     }
 
     @Test public void restoreHasNoLowerImageAndDuplicateNamesAreRejected() throws Exception {

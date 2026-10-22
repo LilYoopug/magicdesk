@@ -343,7 +343,7 @@ final class GuestEnvironmentLibrary {
     private Set<Path> dependencies(List<Path> stores) throws Exception {
         Set<Path> result = new HashSet<>();
         for (Path store : stores) {
-            JSONArray sources = new JSONObject(images.invoke("inspect", store.toString())).getJSONArray("sources");
+            JSONArray sources = new JSONArray(images.invoke("sources", store.toString()));
             for (int i = 0; i < sources.length(); ++i) {
                 Path objects = Path.of(sources.getJSONObject(i).getString("path")).toAbsolutePath().normalize();
                 result.add(objects.getParent());

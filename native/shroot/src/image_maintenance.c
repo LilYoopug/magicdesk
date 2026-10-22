@@ -2,13 +2,15 @@
 #include "image_maintenance.h"
 #include "image_publish.h"
 #include "private_tree.h"
-#include "inode_internal.h"
+#include "storage_database.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fs.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -27,16 +29,10 @@ int md_image_remove(const char *directory, int layer) {
     struct stat present;
     int resumed = lstat(directory, &present) && errno == ENOENT;
     const char *selected = resumed ? tomb_path : directory;
-    int root = -1, r = 0;
-    struct md_inode_store *s = NULL;
-    if (!layer && !resumed) { r = md_inode_store_open_exclusive(directory, &s); if (!r) root = s->lifetime->root; }
-    else {
-        root = open(selected, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        if (root < 0) r = -errno;
-        if (!r && flock(root, LOCK_EX | LOCK_NB)) r = errno == EWOULDBLOCK ? -EBUSY : -errno;
-        struct stat st;
-        if (!r && !resumed && (fstatat(root, "objects", &st, AT_SYMLINK_NOFOLLOW) || !S_ISDIR(st.st_mode))) r = -EINVAL;
-    }
+    /* Deletion needs lifetime authority, not schema admission or source opens. */
+    int root = open(selected, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int r = root < 0 ? -errno : 0;
+    if (!r && flock(root, LOCK_EX | LOCK_NB)) r = errno == EWOULDBLOCK ? -EBUSY : -errno;
     int parent = -1;
     if (!r && (parent = openat(root, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0) r = -errno;
     struct stat opened, named;
@@ -49,6 +45,34 @@ int md_image_remove(const char *directory, int layer) {
         if (!r && fsync(parent)) r = -errno;
     }
     if (parent >= 0) close(parent);
-    if (s) md_inode_store_close(s); else if (root >= 0) close(root);
+    if (root >= 0) close(root);
+    return r;
+}
+
+int md_image_sources(const char *directory) {
+    int root = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (root < 0) return -errno;
+    int r = flock(root, LOCK_SH | LOCK_NB) ? (errno == EWOULDBLOCK ? -EBUSY : -errno) : 0;
+    sqlite3 *db = NULL;
+    sqlite3_stmt *query = NULL;
+    /* The dependency table is a storage contract independent of runtime schema
+     * admission. Do not open lower sources or require image configuration. */
+    if (!r) r = md_database_open_readonly(root, "namespace.db", &db);
+    if (!r) r = md_database_error(db, sqlite3_exec(db, "PRAGMA trusted_schema=OFF", NULL, NULL, NULL));
+    if (!r) r = md_database_error(db, sqlite3_prepare_v2(db,
+        "SELECT json_group_array(json_object('path',path)) FROM (SELECT DISTINCT path FROM sources)",
+        -1, &query, NULL));
+    if (!r) {
+        int rc = md_database_step(query);
+        if (rc != SQLITE_ROW) r = rc < 0 ? rc : -EIO;
+        else {
+            const char *json = (const char *)sqlite3_column_text(query, 0);
+            if (!json) r = -ENOMEM;
+            else if (puts(json) == EOF) r = -EIO;
+        }
+    }
+    sqlite3_finalize(query);
+    if (db) sqlite3_close(db);
+    close(root);
     return r;
 }

@@ -89,7 +89,7 @@ int md_database_step(sqlite3_stmt *query) {
     int rc=sqlite3_step(query);
     return rc==SQLITE_ROW || rc==SQLITE_DONE ? rc : md_database_error(sqlite3_db_handle(query),rc);
 }
-int md_database_open(int root, const char *name, int create, sqlite3 **out) {
+static int database_open(int root, const char *name, int flags, sqlite3 **out) {
     if (!out) return -EINVAL;
     *out=NULL;
     if (root<0 || !leaf(name)) return -EINVAL;
@@ -97,9 +97,14 @@ int md_database_open(int root, const char *name, int create, sqlite3 **out) {
     if (status!=SQLITE_OK) return md_database_result(status);
     char path[NAME_MAX+64]; snprintf(path,sizeof(path),"/proc/self/fd/%d/%s",root,name);
     int rc=sqlite3_open_v2(path,out,
-        SQLITE_OPEN_READWRITE|SQLITE_OPEN_NOMUTEX|SQLITE_OPEN_NOFOLLOW
-            | (create ? SQLITE_OPEN_CREATE : 0),anchored.zName);
+        flags|SQLITE_OPEN_NOMUTEX|SQLITE_OPEN_NOFOLLOW,anchored.zName);
     int r=md_database_error(*out,rc);
     if (r) { sqlite3_close(*out); *out=NULL; }
     return r;
+}
+int md_database_open(int root, const char *name, int create, sqlite3 **out) {
+    return database_open(root,name,SQLITE_OPEN_READWRITE|(create ? SQLITE_OPEN_CREATE : 0),out);
+}
+int md_database_open_readonly(int root, const char *name, sqlite3 **out) {
+    return database_open(root,name,SQLITE_OPEN_READONLY,out);
 }

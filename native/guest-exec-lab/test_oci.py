@@ -1019,13 +1019,66 @@ sys.stdin.read()
         self.command('remove', original)
         self.assertFalse(tomb.exists())
 
+    def test_removal_never_admits_database_or_opens_sources(self):
+        for state in ('old', 'future', 'corrupt', 'missing', 'missing-source', 'incomplete'):
+            with self.subTest(state=state):
+                target = self.root / state
+                target.mkdir()
+                (target / 'objects').mkdir()
+                if state in ('old', 'future', 'missing-source'):
+                    with database(target / 'namespace.db') as db:
+                        db.execute('PRAGMA user_version=' + ('14' if state == 'old' else '999'))
+                        db.execute('CREATE TABLE sources(path TEXT)')
+                        db.execute('INSERT INTO sources VALUES(?)', (str(self.root / 'gone/objects'),))
+                elif state == 'corrupt':
+                    (target / 'namespace.db').write_bytes(b'not a database')
+                elif state == 'incomplete':
+                    (target / 'objects').rmdir()
+                fd = os.open(target, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_SH)
+                    result = self.command('remove', target, success=False)
+                    self.assertIn('errno=16', result.stderr)
+                    self.assertTrue(target.exists())
+                finally:
+                    os.close(fd)
+                self.command('remove', target)
+                self.assertFalse(target.exists())
+                self.assertFalse(target.with_name('.md-remove-' + target.name).exists())
+
+    def test_sources_are_read_without_schema_admission_or_lower_opens(self):
+        self.destination.mkdir()
+        expected = str(self.root / 'absent/objects')
+        with database(self.destination / 'namespace.db') as db:
+            db.execute('PRAGMA user_version=999')
+            db.execute('CREATE TABLE sources(path TEXT)')
+            db.executemany('INSERT INTO sources VALUES(?)', [(expected,), (expected,)])
+        before = (self.destination / 'namespace.db').read_bytes()
+        self.assertEqual(json.loads(self.command('sources', self.destination).stdout), [{'path': expected}])
+        self.assertEqual((self.destination / 'namespace.db').read_bytes(), before)
+        fd = os.open(self.destination, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            self.assertIn('errno=16', self.command('sources', self.destination, success=False).stderr)
+        finally:
+            os.close(fd)
+        (self.destination / 'namespace.db').unlink()
+        self.command('sources', self.destination, success=False)
+        self.assertFalse((self.destination / 'namespace.db').exists())
+
     def test_removal_does_not_follow_symlink_targets(self):
-        self.run_import(self.layout())
+        self.destination.mkdir()
+        (self.destination / 'keep').write_bytes(b'world')
         alias = self.root / 'alias'
         alias.symlink_to(self.destination, target_is_directory=True)
         self.command('remove', alias, success=False)
-        self.assertEqual(self.body('hello').read_bytes(), b'world')
-        self.command('inspect', self.destination)
+        self.assertEqual((self.destination / 'keep').read_bytes(), b'world')
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'keep').write_bytes(b'keep')
+        (self.destination / 'external').symlink_to(outside, target_is_directory=True)
+        self.command('remove', self.destination)
+        self.assertEqual((outside / 'keep').read_bytes(), b'keep')
 
     def test_backup_user_attributes_and_times(self):
         self.run_import(self.layout())

@@ -159,6 +159,7 @@ int main(int argc, char **argv) {
     else if (argc == 4 && !strcmp(argv[1], "rootfs")) r = md_image_archive_import(argv[2], argv[3], 0);
     else if (argc == 3 && !strcmp(argv[1], "remove")) r = md_image_remove(argv[2], 0);
     else if (argc == 3 && !strcmp(argv[1], "remove-layer")) r = md_image_remove(argv[2], 1);
+    else if (argc == 3 && !strcmp(argv[1], "sources")) r = md_image_sources(argv[2]);
     else if (argc == 3 && !strcmp(argv[1], "inspect")) r = md_image_inspect(argv[2]);
     else if (argc == 3 && !strcmp(argv[1], "recover-staging")) r = md_image_publish_recover(argv[2]);
     else if (argc == 3 && !strcmp(argv[1], "launches")) r = md_image_launches(argv[2]);
@@ -177,6 +178,7 @@ int main(int argc, char **argv) {
         "       image backup STORE NEW_ARCHIVE\n"
         "       image restore ARCHIVE NEW_INSTANCE\n"
         "       image remove STORE | remove-layer LAYER (caller verifies persistent dependents)\n"
+        "       image sources STORE (dependency paths without runtime schema admission)\n"
         "       image inspect IMAGE_OR_INSTANCE\n"
         "       image format (stable persistent namespace format)\n"
         "       image import-version (import semantics for derived image cache keys)\n"
