@@ -12,19 +12,44 @@
 #include <linux/netfilter/xt_addrtype.h>
 #include <stdlib.h>
 
+int md_nft_compat_revision(unsigned family,const char *name,unsigned revision,unsigned target) {
+    static const struct { const char *name; unsigned target,revisions; } extensions[]={
+        {"MARK",1,1U<<2},{"mark",0,1U<<1},{"addrtype",0,1U<<1},{"conntrack",0,1U<<3},
+        {"DNAT",1,7},{"SNAT",1,7},{"MASQUERADE",1,1},
+        {"tcp",0,1},{"udp",0,1},{"comment",0,1}};
+    if (family!=NFPROTO_IPV4 || !name) return -ENOENT;
+    for (size_t i=0;i<sizeof(extensions)/sizeof(*extensions);++i)
+        if (target==extensions[i].target && !strcmp(name,extensions[i].name))
+            return revision<32 && (extensions[i].revisions&(1U<<revision)) ? 0 : -EPROTONOSUPPORT;
+    return -ENOENT;
+}
 int md_nft_compat_supported(unsigned family,const char *name,unsigned revision,unsigned target) {
-    if (family!=NFPROTO_IPV4 || !name) return 0;
-    if (target==1 && !strcmp(name,"MARK")) return revision==2;
-    if (target==0 && !strcmp(name,"mark")) return revision==1;
-    if (target==0 && !strcmp(name,"addrtype")) return revision==1;
-    if (!target && !strcmp(name,"conntrack")) return revision==3;
-    if (revision) return 0;
-    return target==1 ? !strcmp(name,"DNAT") || !strcmp(name,"SNAT") || !strcmp(name,"MASQUERADE")
-        : target==0 && (!strcmp(name,"tcp") || !strcmp(name,"udp") || !strcmp(name,"comment"));
+    return !md_nft_compat_revision(family,name,revision,target);
 }
 static unsigned table_family(const struct md_network_filter *f,uint64_t table) {
     for (size_t i=0;i<f->count;++i) if (f->tables[i].handle==table) return f->tables[i].family;
     return NFPROTO_UNSPEC;
+}
+static int nat_range(const struct attribute *wire,unsigned revision,struct nf_nat_range *out) {
+    size_t size=revision==0 ? sizeof(struct nf_nat_ipv4_multi_range_compat)
+        : revision==1 ? sizeof(*out) : sizeof(struct nf_nat_range2);
+    /* Xtables pads every revision to the guest's 8-byte ABI alignment. */
+    if (!wire->data || wire->flags || wire->size!=((size+7)&~(size_t)7)) return -EINVAL;
+    if (!revision) {
+        struct nf_nat_ipv4_multi_range_compat info;
+        memcpy(&info,wire->data,sizeof(info));
+        if (info.rangesize!=1) return -EOPNOTSUPP;
+        const struct nf_nat_ipv4_range *r=&info.range[0];
+        *out=(struct nf_nat_range){.flags=r->flags,.min_addr.ip=r->min_ip,.max_addr.ip=r->max_ip,
+            .min_proto=r->min,.max_proto=r->max};
+    } else if (revision==1) memcpy(out,wire->data,sizeof(*out));
+    else {
+        struct nf_nat_range2 info;
+        memcpy(&info,wire->data,sizeof(info));
+        *out=(struct nf_nat_range){.flags=info.flags,.min_addr=info.min_addr,.max_addr=info.max_addr,
+            .min_proto=info.min_proto,.max_proto=info.max_proto};
+    }
+    return 0;
 }
 static int target(struct md_network_filter *f,uint64_t table,const struct attribute *data,
         struct md_filter_expression *e) {
@@ -44,24 +69,23 @@ static int target(struct md_network_filter *f,uint64_t table,const struct attrib
         memcpy(e->value,&info.mark,4); memcpy(e->mask,&info.mask,4);
         return 0;
     }
-    struct nf_nat_ipv4_multi_range_compat info;
-    /* xt_align pads the revision-zero structure to the guest's 8-byte ABI. */
-    if (!wire->data || wire->flags || wire->size!=((sizeof(info)+7)&~(size_t)7)) return -EINVAL;
-    memcpy(&info,wire->data,sizeof(info));
-    const struct nf_nat_ipv4_range *r=&info.range[0];
+    struct nf_nat_range range;
+    error=nat_range(wire,revision,&range);
+    if (error) return error;
+    const struct nf_nat_range *r=&range;
     if (!strcmp(name,"MASQUERADE")) {
-        if (info.rangesize!=1 || r->flags || r->min_ip || r->max_ip
-                || r->min.all || r->max.all) return -EOPNOTSUPP;
+        if (r->flags || r->min_addr.ip || r->max_addr.ip
+                || r->min_proto.all || r->max_proto.all) return -EOPNOTSUPP;
         e->code=MD_FILTER_MASQUERADE;
         return 0;
     }
-    if (info.rangesize!=1 || (r->flags&~(NF_NAT_RANGE_MAP_IPS|NF_NAT_RANGE_PROTO_SPECIFIED))) return -EOPNOTSUPP;
-    if (((r->flags&NF_NAT_RANGE_MAP_IPS) && r->min_ip!=r->max_ip)
-            || ((r->flags&NF_NAT_RANGE_PROTO_SPECIFIED) && r->min.all!=r->max.all)) return -EOPNOTSUPP;
+    if (r->flags&~(NF_NAT_RANGE_MAP_IPS|NF_NAT_RANGE_PROTO_SPECIFIED)) return -EOPNOTSUPP;
+    if (((r->flags&NF_NAT_RANGE_MAP_IPS) && r->min_addr.ip!=r->max_addr.ip)
+            || ((r->flags&NF_NAT_RANGE_PROTO_SPECIFIED) && r->min_proto.all!=r->max_proto.all)) return -EOPNOTSUPP;
     e->code=MD_FILTER_NAT; e->constant=1; e->operation=!strcmp(name,"DNAT") ? NFT_NAT_DNAT : NFT_NAT_SNAT;
     e->key=!!(r->flags&NF_NAT_RANGE_MAP_IPS); e->aux=!!(r->flags&NF_NAT_RANGE_PROTO_SPECIFIED);
     if (!e->key && !e->aux) return -EOPNOTSUPP;
-    memcpy(e->value,&r->min_ip,4); memcpy(e->value+4,&r->min.all,2);
+    memcpy(e->value,&r->min_addr.ip,4); memcpy(e->value+4,&r->min_proto.all,2);
     return 0;
 }
 static int compat_match(struct md_network_filter *f,uint64_t table,const struct attribute *data,

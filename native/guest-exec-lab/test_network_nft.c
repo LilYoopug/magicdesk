@@ -142,6 +142,46 @@ static void nat_hook_order(void) {
     n->filter=NULL; md_network_namespace_release(n);
     puts("PASS retained NAT hook order: raw wire tuple, reverse translation, post-NAT filter, TCP/UDP and policy changes before first payload");
 }
+static void native_nat_update(void) {
+    struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
+    assert(n);
+    const int hooks[]={NF_INET_PRE_ROUTING,NF_INET_LOCAL_OUT,NF_INET_POST_ROUTING};
+    for (unsigned transport=0;transport<2;++transport) for (unsigned h=0;h<3;++h) {
+        struct md_filter_packet packet={.destination=htonl(0xc0000201),.destination_port=htons(80),
+            .source_port=htons(32800),.protocol=transport ? IPPROTO_UDP : IPPROTO_TCP,.state=8};
+        struct md_network_flow_path path;
+        assert(!md_network_flow_route(n,&packet,0,&path) && !path.mediated);
+        struct md_filter_chain chains[]={
+            {.handle=1,.hook=hooks[h],.nat=1,.policy=NF_ACCEPT,.counters=1},
+            {.handle=2,.hook=-1,.policy=NF_ACCEPT},
+            {.handle=3,.hook=NF_INET_LOCAL_OUT,.policy=NF_ACCEPT}};
+        struct md_filter_rule rules[]={
+            {.chain=1,.count=1,.expressions={{.code=MD_FILTER_VERDICT,.operation=NFT_JUMP,.target=2}}},
+            {.chain=2,.count=1,.expressions={{.code=MD_FILTER_COUNTER}}},
+            {.chain=3,.count=1,.expressions={{.code=MD_FILTER_VERDICT,.operation=NFT_JUMP,.target=2}}}};
+        struct md_network_filter filter={.chains=chains,.chain_count=2,.rules=rules,.rule_count=2};
+        /* Newly installed NAT counters do not require moving already native
+         * streams into a relay; their admitted tuple must not be rewritten. */
+        assert(!md_network_flow_admits(n,&filter,&path));
+        chains[0].counters=0;
+        assert(!md_network_flow_admits(n,&filter,&path));
+        chains[0].policy=NF_DROP;
+        assert(!md_network_flow_admits(n,&filter,&path));
+        struct md_filter_packet first=packet;
+        assert(md_filter_evaluate(&filter,hooks[h],&first)==-EACCES);
+        chains[0].policy=NF_ACCEPT;
+        chains[0].nat=0;
+        assert(md_network_flow_admits(n,&filter,&path)==-EBUSY);
+        chains[0].nat=1; filter.chain_count=3; filter.rule_count=3;
+        /* A regular chain reaching the same counter still requires mediation. */
+        assert(md_network_flow_admits(n,&filter,&path)==-EBUSY);
+        rules[2].expressions[0]=(struct md_filter_expression){.code=MD_FILTER_VERDICT,.operation=NF_DROP};
+        assert(md_network_flow_admits(n,&filter,&path)==-EBUSY);
+        assert(!chains[0].counter.packets && !rules[1].expressions[0].counter.packets);
+    }
+    md_network_namespace_release(n);
+    puts("PASS native flow updates: retained NAT in both directions, counters, shared jump chains and filter revocation");
+}
 static void program(void) {
     struct md_network_filter_table table={.handle=1,.family=NFPROTO_IPV4};
     struct md_filter_chain chains[2]={
@@ -167,6 +207,11 @@ static void program(void) {
     struct md_filter_port ports[4]; size_t count=0;
     assert(!md_filter_ports(&f,htonl(0x0a000264),ports,4,&count) && count==2);
     assert(!ports[0].address && ports[0].port==port && !ports[1].address && ports[1].port==port);
+    chains[0].hook=NF_INET_LOCAL_OUT;
+    assert(!md_filter_validate(&f));
+    assert(!md_filter_ports(&f,htonl(0x0a000264),ports,4,&count) && count==2);
+    assert(!ports[0].address && ports[0].port==port && !ports[1].address && ports[1].port==port);
+    chains[0].hook=NF_INET_PRE_ROUTING;
     struct md_filter_packet packet={.source=source,.destination=htonl(0x0a000264),.destination_port=port,
         .protocol=IPPROTO_TCP,.state=8};
     assert(!md_filter_evaluate(&f,NF_INET_PRE_ROUTING,&packet));
@@ -323,6 +368,70 @@ static void compat_transport(void) {
     assert(!md_nft_compat_supported(NFPROTO_IPV4,"udp",1,0));
     assert(!md_nft_compat_supported(NFPROTO_IPV4,"udp",0,1));
     puts("PASS xt TCP/UDP: raw ABI, dump roundtrip, source/destination ranges and inversion, NAT publication and explicit feature rejection");
+}
+static void compat_nat(void) {
+    struct md_network_filter_table table={.handle=1,.family=NFPROTO_IPV4};
+    struct md_filter_chain chain={.table=1,.handle=2,.policy=NF_ACCEPT,.nat=1};
+    struct md_network_filter f={.tables=&table,.count=1,.chains=&chain,.chain_count=1};
+    for (unsigned snat=0;snat<2;++snat) for (unsigned rev=0;rev<3;++rev)
+        for (unsigned variant=0;variant<8;++variant) {
+            const char *name=snat ? "SNAT" : "DNAT";
+            assert(md_nft_compat_supported(NFPROTO_IPV4,name,rev,1));
+            chain.hook=snat ? NF_INET_POST_ROUTING : NF_INET_PRE_ROUTING;
+            struct nf_nat_range2 r={.flags=NF_NAT_RANGE_MAP_IPS|NF_NAT_RANGE_PROTO_SPECIFIED,
+                .min_addr.ip=htonl(0x0a580002),.max_addr.ip=htonl(0x0a580002),
+                .min_proto.all=htons(8080),.max_proto.all=htons(8080)};
+            if (variant==1) r.flags=NF_NAT_RANGE_MAP_IPS;
+            if (variant==2) r.flags=NF_NAT_RANGE_PROTO_SPECIFIED;
+            if (variant==3) r.max_addr.ip=htonl(0x0a580003);
+            if (variant==4) r.max_proto.all=htons(8081);
+            if (variant==5) r.flags|=NF_NAT_RANGE_PROTO_RANDOM;
+            if (variant==6) { r.flags|=NF_NAT_RANGE_PROTO_OFFSET; r.base_proto.all=htons(1000); }
+            struct nf_nat_ipv4_multi_range_compat r0={.rangesize=1,
+                .range={{.flags=r.flags,.min_ip=r.min_addr.ip,.max_ip=r.max_addr.ip,
+                    .min=r.min_proto,.max=r.max_proto}}};
+            struct nf_nat_range r1={.flags=r.flags,.min_addr=r.min_addr,.max_addr=r.max_addr,
+                .min_proto=r.min_proto,.max_proto=r.max_proto};
+            unsigned char wire[(sizeof(r)+7)&~(size_t)7]={0};
+            size_t size=rev==0 ? sizeof(r0) : rev==1 ? sizeof(r1) : sizeof(r);
+            memcpy(wire,rev==0 ? (void *)&r0 : rev==1 ? (void *)&r1 : (void *)&r,size);
+            struct packet p;
+            struct md_network_message o={.data=p.data,.capacity=sizeof(p.data)};
+            add(&o,(NFNL_SUBSYS_NFTABLES<<8)|NFT_MSG_NEWRULE,0,NFPROTO_IPV4);
+            size_t start=o.size,entry,data;
+            assert(!md_network_message_nest(&o,NFTA_LIST_ELEM,&entry));
+            assert(!md_network_message_attribute(&o,NFTA_EXPR_NAME,"target",7));
+            assert(!md_network_message_nest(&o,NFTA_EXPR_DATA,&data));
+            assert(!md_network_message_attribute(&o,NFTA_TARGET_NAME,name,strlen(name)+1));
+            uint32_t revision=htonl(rev);
+            assert(!md_network_message_attribute(&o,NFTA_TARGET_REV,&revision,4));
+            assert(!md_network_message_attribute(&o,NFTA_TARGET_INFO,wire,((size+7)&~(size_t)7)-(variant==7)));
+            assert(!md_network_message_end_nest(&o,data));
+            assert(!md_network_message_end_nest(&o,entry));
+            struct md_filter_rule rule={.chain=2};
+            int error=md_nft_expressions(&f,1,&rule,o.data+start,o.size-start);
+            if (variant>=3) { assert(error==(variant==7 ? -EINVAL : -EOPNOTSUPP)); continue; }
+            assert(!error && rule.count==1 && rule.expressions[0].code==MD_FILTER_NAT);
+            f.rules=&rule; f.rule_count=1;
+            for (unsigned udp=0;udp<2;++udp) {
+                struct md_filter_packet flow={.protocol=udp ? IPPROTO_UDP : IPPROTO_TCP,.state=8,
+                    .source=htonl(0xc0000201),.destination=htonl(0xc0000202),
+                    .source_port=htons(40000),.destination_port=htons(443)};
+                assert(!md_filter_evaluate(&f,chain.hook,&flow));
+                assert(snat ? flow.snat : flow.dnat);
+                assert((snat ? flow.source : flow.destination)==(variant==2 ? htonl(snat ? 0xc0000201 : 0xc0000202) : r.min_addr.ip));
+                assert((snat ? flow.source_port : flow.destination_port)==(variant==1 ? htons(snat ? 40000 : 443) : r.min_proto.all));
+            }
+            o.size=NLMSG_HDRLEN; o.message=(void *)p.data;
+            assert(!md_nft_emit_expressions(&f,&rule,&o));
+            struct nlattr *list=(void *)(p.data+NLMSG_HDRLEN);
+            struct md_filter_rule copy={.chain=2};
+            assert(!md_nft_expressions(&f,1,&copy,list+1,list->nla_len-sizeof(*list)));
+            assert(copy.wire_size==rule.wire_size && !memcmp(copy.wire,rule.wire,rule.wire_size));
+            assert(copy.count==rule.count && !memcmp(copy.expressions,rule.expressions,rule.count*sizeof(*rule.expressions)));
+            free(copy.wire); free(rule.wire); f.rules=NULL; f.rule_count=0;
+        }
+    puts("PASS xt NAT revisions 0/1/2: TCP/UDP translations, wire roundtrip, unsupported flags/ranges and malformed size");
 }
 static void compat_masquerade(void) {
     struct md_network_filter_table table={.handle=1,.family=NFPROTO_IPV4};
@@ -524,8 +633,38 @@ static void compat_addrtype(void) {
     }
     puts("PASS xt addrtype: shared route classification and unsupported scopes rejected");
 }
+static void compat_revisions(void) {
+    struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
+    struct md_identity root=md_identity_new(0,0);
+    assert(n);
+    const char *names[]={"DNAT","SNAT","MASQUERADE","MARK","tcp","udp","comment","mark","addrtype","conntrack"};
+    unsigned revisions[]={0,0,0,2,0,0,0,1,1,3};
+    for (unsigned i=0;i<sizeof(names)/sizeof(*names);++i) for (unsigned variant=0;variant<4;++variant) {
+        struct packet p,reply;
+        struct md_network_message o={.data=p.data,.capacity=sizeof(p.data)};
+        unsigned family=variant==3 ? NFPROTO_IPV6 : NFPROTO_IPV4;
+        const char *name=variant==2 ? "unknown" : names[i];
+        uint32_t revision=htonl(variant==1 ? 32 : revisions[i]),target=htonl(i<4);
+        add(&o,(NFNL_SUBSYS_NFT_COMPAT<<8)|NFNL_MSG_COMPAT_GET,NLM_F_ACK,family);
+        assert(!md_network_message_attribute(&o,NFTA_COMPAT_NAME,name,strlen(name)+1));
+        assert(!md_network_message_attribute(&o,NFTA_COMPAT_REV,&revision,4));
+        assert(!md_network_message_attribute(&o,NFTA_COMPAT_TYPE,&target,4));
+        if (variant) assert(result(n,&root,&o)==(variant==1 ? -EPROTONOSUPPORT : -ENOENT));
+        else {
+            long size=run(n,&root,&o,&reply,NULL);
+            struct nlmsghdr *h=(void *)reply.data;
+            assert(NLMSG_OK(h,size) && h->nlmsg_type==((NFNL_SUBSYS_NFT_COMPAT<<8)|NFNL_MSG_COMPAT_GET));
+            h=NLMSG_NEXT(h,size);
+            assert(NLMSG_OK(h,size) && h->nlmsg_type==NLMSG_ERROR && !((struct nlmsgerr *)NLMSG_DATA(h))->error);
+        }
+    }
+    md_identity_release(&root); md_network_namespace_release(n);
+    puts("PASS xt revision negotiation: absent extension differs from unsupported revision");
+}
 void test_network_nft(void) {
+    compat_revisions();
     compat_transport();
+    compat_nat();
     compat_masquerade();
     compat_comment();
     compat_conntrack();
@@ -536,6 +675,7 @@ void test_network_nft(void) {
     policy_counters();
     reverse_policy();
     nat_hook_order();
+    native_nat_update();
     struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
     struct md_network_namespace *child=md_network_namespace_copy(n,NULL);
     struct md_identity root=md_identity_new(0,0),user=md_identity_new(1000,1000);

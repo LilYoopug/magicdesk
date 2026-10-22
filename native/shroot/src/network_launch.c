@@ -43,11 +43,11 @@ static int publications(struct md_network_namespace *gateway,const struct md_net
     struct md_network_filter *filter=md_network_filter_copy(NULL);
     if (!filter) return -ENOMEM;
     int error=md_network_filter_add(filter,NFPROTO_IPV4,"shroot",NULL,0);
-    if (!error) error=md_filter_reserve((void **)&filter->chains,&filter->chain_capacity,1,sizeof(*filter->chains),256);
-    if (!error) error=md_filter_reserve((void **)&filter->rules,&filter->rule_capacity,profile->count,sizeof(*filter->rules),1024);
+    if (!error) error=md_filter_reserve((void **)&filter->chains,&filter->chain_capacity,3,sizeof(*filter->chains),256);
+    if (!error) error=md_filter_reserve((void **)&filter->rules,&filter->rule_capacity,profile->count+2,sizeof(*filter->rules),1024);
     if (!error) {
         struct md_filter_chain chain={.table=filter->tables[0].handle,.handle=filter->next_handle++,
-            .name="publish",.hook=NF_INET_PRE_ROUTING,.priority=-100,.nat=1,.policy=NF_ACCEPT};
+            .name="publish",.hook=-1,.policy=NF_ACCEPT};
         filter->chains[filter->chain_count++]=chain;
         for (unsigned i=0;i<profile->count;++i) {
             const struct md_network_public_port *port=&profile->ports[i];
@@ -73,6 +73,16 @@ static int publications(struct md_network_namespace *gateway,const struct md_net
             memcpy(translated->value,&port->guest,2);
             r->expressions[r->count++]=(struct md_filter_expression){.code=MD_FILTER_NAT,
                 .operation=NFT_NAT_DNAT,.key=1,.aux=1,.src=8,.dst=4};
+        }
+        for (unsigned i=0;i<2;++i) {
+            struct md_filter_chain *base=&filter->chains[filter->chain_count++];
+            *base=(struct md_filter_chain){.table=chain.table,.handle=filter->next_handle++,
+                .hook=i ? NF_INET_LOCAL_OUT : NF_INET_PRE_ROUTING,.priority=-100,.nat=1,.policy=NF_ACCEPT};
+            strcpy(base->name,i ? "output" : "prerouting");
+            struct md_filter_rule *jump=&filter->rules[filter->rule_count++];
+            *jump=(struct md_filter_rule){.chain=base->handle,.handle=filter->next_handle++,.count=1};
+            jump->expressions[0]=(struct md_filter_expression){.code=MD_FILTER_VERDICT,
+                .operation=NFT_JUMP,.target=chain.handle};
         }
     }
     struct md_network_forward_update *update=NULL;

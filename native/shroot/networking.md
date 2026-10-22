@@ -26,7 +26,8 @@ these logical addresses without sharing ports or owners. The supervisor owns
 both namespaces; the fabric's peer list remains weak, avoiding a reference cycle.
 Routed remains a supported low-level mode, not an obsolete bridge alias.
 
-Published TCP/UDP ports become typed PREROUTING DNAT rules on the gateway;
+Published TCP/UDP ports become shared typed DNAT rules reached from PREROUTING
+and OUTPUT on the gateway;
 private guest binds do not automatically publish. `network_filter_update`
 shares validation, direct-flow compatibility, frontend reservation and commit
 with the nftables adapter. It prepares all resources before state replacement;
@@ -196,8 +197,12 @@ The iptables-nft rule-compat attribute is validation metadata, not a packet
 predicate; expressions still supply the matches. IPv4 revision-zero TCP/UDP
 matches become typed transport predicates with inclusive source/destination
 port ranges and inversion, without altering nft registers. DNAT/SNAT targets
+(revisions 0, 1 and 2)
 translate a single address/port into the same typed NAT operation. Revision
-queries advertise these supported adapters; TCP flags/options, NAT address/port
+queries advertise these supported adapters and distinguish an absent extension
+(`ENOENT`) from an unsupported revision (`EPROTONOSUPPORT`). This lets clients
+negotiate an older supported ABI without misdiagnosing a missing module.
+TCP flags/options, NAT address/port
 ranges, randomization and other xtables extensions are rejected. Rule/chain deletion accepts their dumped metadata but
 uses the live handle/reference graph, never the caller's stale use count.
 
@@ -215,7 +220,12 @@ payload. This is flow-level conntrack, not emulation of kernel packet queues or
 TCP state tracking.
 `network_forward` owns real frontend ports and a lazy epoll reactor,
 separately from namespace/ruleset storage. It never retains a guest data OFD.
-NAT publications are inferred from finite port predicates by abstract evaluation,
+Native Android loopback-to-loopback connections enter the logical OUTPUT path,
+just like guest-local connections, not PREROUTING. Both OUTPUT and INPUT policy
+still apply; DNAT cannot silently bypass a local proxy through a private bridge.
+Other native arrivals retain PREROUTING. This classification occurs only when
+admitting a flow, not on each payload transfer.
+NAT publications are inferred from finite PREROUTING/OUTPUT port predicates by abstract evaluation,
 not a trial packet with guessed source fields. Unbounded publication is rejected.
 Every real flow still evaluates the full predicates, including source addresses.
 Port reservations are prepared before ACK; failed encoding/publication rolls
@@ -231,6 +241,9 @@ neither direction has potentially denying hooks. Installing a policy that
 revokes one returns atomic `EBUSY`; it cannot retroactively move
 a kernel stream into a relay. Direct path records are bounded per endpoint and
 retained until socket close, including accepted stream owners. Relayed flows
+retain their original NAT binding, as do direct flows. Adding NAT chains and
+counters therefore cannot revoke an existing unmediated flow; non-NAT filter
+changes still undergo both-direction admission checks. Relayed flows
 cache decisions by fabric policy generation and revalidate in both directions
 after rules/topology changes. Private UDP uses the same relay even without
 filter rules: its queued source identity must survive sending-socket closure.

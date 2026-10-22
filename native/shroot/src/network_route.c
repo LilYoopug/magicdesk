@@ -214,6 +214,10 @@ static int change_link(struct md_network_namespace *n,const struct nlmsghdr *h,c
     if (h->nlmsg_type==RTM_DELLINK) return link ? md_network_interface_remove(n,link->info.index) : -ENODEV;
     if (c->change&~IFF_UP || (c->has_mtu && (c->mtu<68 || c->mtu>65535))) return -EOPNOTSUPP;
     if (c->has_peer_mtu && (c->peer_mtu<68 || c->peer_mtu>65535)) return -EINVAL;
+    if ((c->has_address && ((c->address[0]&1) || !memcmp(c->address,"\0\0\0\0\0\0",6)))
+            || (c->has_peer_address && ((c->peer_address[0]&1) || !memcmp(c->peer_address,"\0\0\0\0\0\0",6))))
+        return -EADDRNOTAVAIL;
+    if (c->has_address && link && link->kind==MD_LINK_LOOPBACK) return -EOPNOTSUPP;
     if (c->has_master && c->master) {
         struct md_network_interface *master=md_network_interface_find(n,c->master,NULL);
         if (!master || master->kind!=MD_LINK_BRIDGE) return -EINVAL;
@@ -658,4 +662,36 @@ long md_network_route(struct md_network_namespace *n,const struct md_identity *i
     md_network_namespace_release(target);
     md_network_namespace_release(peer_target);
     return encoded ? encoded : (long)out.size;
+}
+static int legacy_link_change(struct md_network_namespace *n,const struct md_identity *id,
+        unsigned index,const char *name,unsigned attribute,const void *value,size_t length) {
+    union { struct nlmsghdr align; unsigned char bytes[128]; } request={0},reply={0};
+    struct nlmsghdr *header=&request.align;
+    *header=(struct nlmsghdr){.nlmsg_len=NLMSG_LENGTH(sizeof(struct ifinfomsg)),
+        .nlmsg_type=RTM_SETLINK,.nlmsg_flags=NLM_F_REQUEST|NLM_F_ACK};
+    ((struct ifinfomsg *)NLMSG_DATA(header))->ifi_index=(int)index;
+    struct md_network_message message={.data=request.bytes,.size=header->nlmsg_len,
+        .capacity=sizeof(request),.message=header};
+    int error=name ? md_network_message_attribute(&message,IFLA_IFNAME,name,strlen(name)+1) : 0;
+    if (!error) error=md_network_message_attribute(&message,attribute,value,length);
+    if (error) return error;
+    long size=md_network_route(n,id,header,header->nlmsg_len,0,MD_NETWORK_ROUTE_CAPPED_ACK,
+        NULL,reply.bytes,sizeof(reply),NULL);
+    if (size<0) return (int)size;
+    if (size<(long)NLMSG_LENGTH(sizeof(struct nlmsgerr)) || reply.align.nlmsg_type!=NLMSG_ERROR) return -EPROTO;
+    return ((struct nlmsgerr *)NLMSG_DATA(&reply.align))->error;
+}
+int md_network_route_set_address(struct md_network_namespace *n,const struct md_identity *id,
+        const char *name,const unsigned char address[6]) {
+    return legacy_link_change(n,id,0,name,IFLA_ADDRESS,address,6);
+}
+int md_network_route_attach_bridge(struct md_network_namespace *n,const struct md_identity *id,
+        const char *name,unsigned index) {
+    if (!index) return -ENODEV;
+    pthread_mutex_lock(&n->fabric->lock);
+    struct md_network_interface *bridge=md_network_interface_find(n,0,name);
+    uint32_t master=bridge && bridge->kind==MD_LINK_BRIDGE ? bridge->info.index : 0;
+    pthread_mutex_unlock(&n->fabric->lock);
+    if (!master) return -ENODEV;
+    return legacy_link_change(n,id,index,NULL,IFLA_MASTER,&master,sizeof(master));
 }

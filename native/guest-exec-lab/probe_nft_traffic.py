@@ -219,7 +219,10 @@ def guest(observer):
             report['checks'].append('addressed-udp-retains-established-state')
             nft('add chain inet mdtraffic inbound { type nat hook prerouting priority -100; policy accept; }\n'
                 'add rule inet mdtraffic inbound ip saddr 127.0.0.0/8 tcp dport 38982 dnat ip to 127.0.0.1:38981\n'
-                'add rule inet mdtraffic inbound ip saddr 127.0.0.0/8 udp dport 38982 dnat ip to 127.0.0.1:38981\n')
+                'add rule inet mdtraffic inbound ip saddr 127.0.0.0/8 udp dport 38982 dnat ip to 127.0.0.1:38981\n'
+                'add chain inet mdtraffic localnat { type nat hook output priority -100; policy accept; }\n'
+                'add rule inet mdtraffic localnat ip saddr 127.0.0.0/8 tcp dport 38982 dnat ip to 127.0.0.1:38981\n'
+                'add rule inet mdtraffic localnat ip saddr 127.0.0.0/8 udp dport 38982 dnat ip to 127.0.0.1:38981\n')
             report['external'] = observe(observer, operation='exchange', port=38982, token='nft-ports')
             report['nat'] = benchmark(38982)
             report['udpNat'] = datagram_benchmark(38982)

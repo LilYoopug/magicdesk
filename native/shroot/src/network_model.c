@@ -203,6 +203,7 @@ static int veth_carrier(struct md_network_namespace *n,const struct md_network_i
 }
 struct md_network_link md_network_interface_snapshot(struct md_network_namespace *n,const struct md_network_interface *link) {
     struct md_network_link out=link->info;
+    out.kind=link->kind;
     int carrier=!!(out.flags&IFF_UP);
     if (link->kind==MD_LINK_VETH) carrier=veth_carrier(n,link);
     else if (link->kind==MD_LINK_BRIDGE) {

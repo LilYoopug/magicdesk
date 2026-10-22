@@ -122,7 +122,7 @@ static int compat_query(const struct nlmsghdr *h,uint32_t port,struct md_network
     if (!error) error=required_number(&a[NFTA_COMPAT_TYPE],&type);
     if (!error && (!name || strlen(name)>=NFT_COMPAT_NAME_MAX || type>1)) error=-EINVAL;
     const struct nfgenmsg *nf=NLMSG_DATA(h);
-    if (!error && !md_nft_compat_supported(nf->nfgen_family,name,revision,type)) error=-ENOENT;
+    if (!error) error=md_nft_compat_revision(nf->nfgen_family,name,revision,type);
     if (error) return error;
     struct nfgenmsg reply={.nfgen_family=nf->nfgen_family,.version=NFNETLINK_V0};
     error=md_network_message_begin(out,h,port,h->nlmsg_type,1,&reply,sizeof(reply));

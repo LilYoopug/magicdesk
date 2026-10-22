@@ -75,14 +75,19 @@ def guest():
         duplicate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         with socket.socket(fileno=os.dup(first.fileno())) as alias:
             assert alias.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) == 1
-        first.bind((0, 0))
+        subscriptions = 0x113  # LINK | NOTIFY | IPV4_IFADDR | IPV6_IFADDR
+        first.bind((0, subscriptions))
+        assert first.getsockname()[1] == subscriptions
+        first.setsockopt(270, 2, 2)  # DROP_MEMBERSHIP, NOTIFY
+        assert first.getsockname()[1] == subscriptions & ~2
+        first.setsockopt(270, 1, 2)
         # Standalone nexthops are an empty catalogue, not an unsupported
         # subscription. Modern network managers subscribe before dumping it.
         first.setsockopt(270, 1, 32)  # SOL_NETLINK, ADD_MEMBERSHIP, NEXTHOP
         with socket.socket(fileno=os.dup(first.fileno())) as alias:
-            assert alias.getsockopt(270, 9, 4) == struct.pack('=I', 1 << 31)
+            assert alias.getsockopt(270, 9, 4) == struct.pack('=I', subscriptions | (1 << 31))
         first.setsockopt(270, 2, 32)
-        assert first.getsockopt(270, 9, 4) == bytes(4)
+        assert first.getsockopt(270, 9, 4) == struct.pack('=I', subscriptions)
         second.bind((0, 0))
         a, b = first.getsockname()[0], second.getsockname()[0]
         assert a and b and a != b, (a, b)
@@ -92,11 +97,23 @@ def guest():
         first.close()
         duplicate.bind((a, 0))
         assert duplicate.getsockname()[0] == a
+    child = os.fork()
+    if not child:
+        os.setuid(1234)
+        with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 0) as monitor:
+            monitor.bind((0, subscriptions))
+            assert monitor.getsockname()[1] == subscriptions
+            monitor.setsockopt(270, 2, 2)
+            monitor.setsockopt(270, 1, 2)
+            denied(lambda: monitor.setsockopt(270, 1, 6), errno.EOPNOTSUPP)
+            assert monitor.getsockname()[1] == subscriptions
+        os._exit(0)
+    assert os.waitpid(child, 0) == (child, 0)
     print('PASS protocol-scoped netlink ports, collision, autobind and reuse', flush=True)
     with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 0) as sender, \
             socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 0) as monitor:
         sender.bind((12345, 1))
-        monitor.bind((12346, 1))
+        monitor.bind((12346, subscriptions))
         sender.settimeout(5)
         monitor.settimeout(5)
         monitor.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
@@ -177,6 +194,20 @@ def guest():
     assert bridge.read_text() == '1\n'
     def link(*args):
         subprocess.run(['ip', 'link', *args], check=True, timeout=10)
+
+    with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 0) as monitor:
+        monitor.bind((0, subscriptions))
+        # EVENT_WAIT: matching link creation notification; timeout fails.
+        monitor.settimeout(5)
+        link('add', 'md-notify', 'type', 'bridge')
+        try:
+            data, source = monitor.recvfrom(65536)
+            size, kind, _, sequence, _ = struct.unpack_from('=IHHII', data)
+            assert source == (0, 1) and size == len(data) and kind == 16 and not sequence
+            assert b'md-notify\0' in data
+        finally:
+            link('del', 'md-notify')
+    print('PASS legacy NOTIFY subscription and live link notification', flush=True)
 
     assert read('conf/lo/route_localnet') == ['0']
     write('conf/default/route_localnet', '1')

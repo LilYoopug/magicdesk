@@ -156,7 +156,8 @@ static int may_translate(struct md_network_filter *f,const struct md_filter_chai
 }
 static int publication(struct md_network_filter *f,uint32_t address,uint16_t port,unsigned protocol,
         int unknown_port,unsigned *budget) {
-    for (size_t i=0;i<f->chain_count;++i) if (f->chains[i].hook==NF_INET_PRE_ROUTING && f->chains[i].nat) {
+    for (size_t i=0;i<f->chain_count;++i) if (f->chains[i].nat
+            && (f->chains[i].hook==NF_INET_PRE_ROUTING || f->chains[i].hook==NF_INET_LOCAL_OUT)) {
         int found=may_translate(f,&f->chains[i],address,port,protocol,unknown_port,budget,0);
         if (found) return found;
     }

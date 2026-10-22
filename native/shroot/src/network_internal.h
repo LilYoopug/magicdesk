@@ -3,7 +3,6 @@
 #include "network_namespace.h"
 #include <pthread.h>
 
-enum md_network_link_kind { MD_LINK_LOOPBACK, MD_LINK_UPLINK, MD_LINK_BRIDGE, MD_LINK_VETH };
 struct md_network_ipv4_policy { uint32_t route_localnet, rp_filter, arp_notify; };
 struct md_network_interface {
     struct md_network_link info;

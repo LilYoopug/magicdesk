@@ -307,7 +307,8 @@ static long control_call(long nr,const unsigned long *a,int events) {
         }
     } else if (size) result=md_read_memory(data,input,size);
     if (!result) result=md_guest_buffer_control(MD_BUFFER_NETWORK_CALL,size,0);
-    if (!result && nr==SYS_ioctl) result=md_write_memory((void *)a[2],data,size);
+    if (!result && nr==SYS_ioctl && a[1]!=SIOCSIFHWADDR && a[1]!=SIOCBRADDIF)
+        result=md_write_memory((void *)a[2],data,size);
     else if (result>=0 && !events && nr==SYS_getsockopt && a[1]==SOL_SOCKET && a[2]==SO_GET_FILTER) {
         unsigned count=(unsigned)result/sizeof(struct sock_filter);
         if (filter_capacity && filter_capacity<count) result=-EINVAL;

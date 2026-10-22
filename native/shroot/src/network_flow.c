@@ -198,9 +198,13 @@ static int check_path(struct md_network_fabric *f,struct md_network_flow_path *p
         p.source_fib_type=md_network_local_interface(n,p.source,0) ? RTN_LOCAL : RTN_UNICAST;
         rewrite.fib_type=md_network_local_interface(n,rewrite.destination,0) ? RTN_LOCAL : RTN_UNICAST;
         rewrite.source_fib_type=md_network_local_interface(n,rewrite.source,0) ? RTN_LOCAL : RTN_UNICAST;
+        /* Existing connections retain even an untranslated NAT binding. The
+         * evaluator skips NAT chains for them, including counters and jumps;
+         * only live filter chains can revoke their native data path. */
         if (override==n && filter)
             for (size_t j=0;j<filter->chain_count;++j)
-                if (filter->chains[j].hook==(int)hook && requires_mediation(filter,&filter->chains[j],0)) return -EBUSY;
+                if (!filter->chains[j].nat && filter->chains[j].hook==(int)hook
+                        && requires_mediation(filter,&filter->chains[j],0)) return -EBUSY;
         int error=md_filter_evaluate_transition(n==override ? filter : n->filter,hook,&p,
             retained ? &rewrite : NULL,NULL);
         if (error) return error;

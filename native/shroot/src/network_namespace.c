@@ -162,7 +162,8 @@ struct md_network_namespace *md_network_socket_namespace(const struct md_fd_obje
     return md_network_endpoint_namespace(object);
 }
 int md_network_interface_ioctl(unsigned long command) {
-    return command==SIOCGIFNAME || command==SIOCGIFINDEX || command==SIOCGIFFLAGS || command==SIOCGIFMTU;
+    return command==SIOCGIFNAME || command==SIOCGIFINDEX || command==SIOCGIFFLAGS || command==SIOCGIFMTU
+        || command==SIOCGIFHWADDR || command==SIOCSIFHWADDR || command==SIOCBRADDIF;
 }
 int md_network_netlink_destination(const struct md_network_address *destination,uint32_t *groups) {
     *groups=0;
@@ -244,7 +245,8 @@ void md_network_broadcast(struct md_network_namespace *n,unsigned group,const vo
 static uint32_t supported_groups(const struct network_socket *s) {
     if (s->protocol==NETLINK_NETFILTER) return 0;
     if (s->protocol==NETLINK_GENERIC) return 1U<<(MD_NETWORK_GENERIC_NOTIFY-1);
-    return RTMGRP_LINK|RTMGRP_IPV4_IFADDR|RTMGRP_IPV6_IFADDR|RTMGRP_IPV4_ROUTE|RTMGRP_IPV6_ROUTE
+    /* The legacy NOTIFY group is a valid subscription even without events. */
+    return RTMGRP_LINK|RTMGRP_NOTIFY|RTMGRP_IPV4_IFADDR|RTMGRP_IPV6_IFADDR|RTMGRP_IPV4_ROUTE|RTMGRP_IPV6_ROUTE
         | RTMGRP_NEIGH|RTMGRP_TC|RTMGRP_IPV4_RULE|(1U<<(RTNLGRP_IPV6_RULE-1))
         | (1U<<(RTNLGRP_NEXTHOP-1));
 }
@@ -304,6 +306,11 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
         if (size!=sizeof(struct ifreq)) return -EINVAL;
         struct ifreq *r=data;
         if (a[1]!=SIOCGIFNAME && !memchr(r->ifr_name,0,IFNAMSIZ)) return -ENODEV;
+        if (a[1]==SIOCBRADDIF) return md_network_route_attach_bridge(space,identity,r->ifr_name,(unsigned)r->ifr_ifindex);
+        if (a[1]==SIOCSIFHWADDR) {
+            if (r->ifr_hwaddr.sa_family!=ARPHRD_ETHER) return -EINVAL;
+            return md_network_route_set_address(space,identity,r->ifr_name,(const unsigned char *)r->ifr_hwaddr.sa_data);
+        }
         struct md_network_link info;
         pthread_mutex_lock(&space->fabric->lock);
         struct md_network_interface *link=md_network_interface_find(space,
@@ -318,6 +325,11 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
         if (a[1]==SIOCGIFINDEX) r->ifr_ifindex=info.index;
         else if (a[1]==SIOCGIFFLAGS) r->ifr_flags=(short)info.flags;
         else if (a[1]==SIOCGIFMTU) r->ifr_mtu=info.mtu;
+        else if (a[1]==SIOCGIFHWADDR) {
+            memset(&r->ifr_hwaddr,0,sizeof(r->ifr_hwaddr));
+            r->ifr_hwaddr.sa_family=info.type;
+            memcpy(r->ifr_hwaddr.sa_data,info.address,6);
+        }
         else return -EOPNOTSUPP;
         return 0;
     }

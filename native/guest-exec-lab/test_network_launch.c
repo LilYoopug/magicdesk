@@ -13,6 +13,7 @@
 #include <linux/netfilter.h>
 #include <linux/netfilter/nf_tables.h>
 #include <net/if.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -103,6 +104,11 @@ static void ports(void) {
     assert(!md_network_flow_route(a.gateway,&packet,1,&path));
     assert(path.mediated && path.destination==a.space->inode && packet.destination==htonl(0x0a580002)
         && packet.destination_port==htons(80));
+    packet=(struct md_filter_packet){.source=htonl(INADDR_LOOPBACK),.source_port=htons(40000),
+        .destination=htonl(INADDR_LOOPBACK),.destination_port=htons(number),.protocol=6,.state=8};
+    assert(!md_network_flow_route(a.gateway,&packet,0,&path));
+    assert(path.steps[0].hook==NF_INET_LOCAL_OUT && path.destination==a.space->inode
+        && packet.destination==htonl(0x0a580002) && packet.destination_port==htons(80));
     unsigned char bytes[4096]={0};
     struct md_network_message output={.data=bytes,.capacity=sizeof(bytes),.size=NLMSG_HDRLEN,.message=(void *)bytes};
     struct md_filter_rule *rule=&a.gateway->filter->rules[0];
@@ -239,4 +245,67 @@ static void reserved_publication(void) {
     assert(!bind(held,(const void *)&address,sizeof(address))); close(held);
     puts("PASS bound-only TCP: NAT admission, abort, removal, guest listen, late bind and port release");
 }
-void test_network_launch(void) { parsing(); routes(); ports(); partial_rollback(); reserved_publication(); }
+static void loopback_origin(void) {
+    for (unsigned udp=0;udp<2;++udp) {
+        int type=udp ? SOCK_DGRAM : SOCK_STREAM;
+        struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
+        assert(n);
+        struct md_identity root=md_identity_new(0,0);
+        struct md_fd_object *endpoint=NULL;
+        int server=-1,held=-1;
+        struct sockaddr_in local={.sin_family=AF_INET,.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
+        local.sin_port=htons(reserve(&held)); close(held);
+        assert(!md_network_endpoint_open(n,0,AF_INET,type,0,&endpoint,&server));
+        assert(!md_network_endpoint_bind(endpoint,server,&root,(void *)&local,sizeof(local)));
+        if (!udp) assert(!md_network_endpoint_listen(endpoint,server,4));
+        struct md_network_filter_table table={.handle=1,.family=NFPROTO_IPV4};
+        struct md_filter_chain chains[]={
+            {.table=1,.handle=2,.hook=NF_INET_PRE_ROUTING,.policy=NF_DROP},
+            {.table=1,.handle=3,.hook=NF_INET_LOCAL_OUT,.policy=NF_ACCEPT},
+            {.table=1,.handle=4,.hook=NF_INET_LOCAL_IN,.policy=NF_ACCEPT}};
+        struct md_network_filter filter={.tables=&table,.count=1,.chains=chains,.chain_count=3};
+        pthread_mutex_lock(&n->fabric->lock);
+        n->filter=&filter; md_network_forward_changed(n->fabric);
+        pthread_mutex_unlock(&n->fabric->lock);
+        for (unsigned denied=0;denied<3;++denied) {
+            pthread_mutex_lock(&n->fabric->lock);
+            chains[1].policy=denied==1 ? NF_DROP : NF_ACCEPT;
+            chains[2].policy=denied==2 ? NF_DROP : NF_ACCEPT;
+            md_network_forward_changed(n->fabric);
+            pthread_mutex_unlock(&n->fabric->lock);
+            int client=socket(AF_INET,type|SOCK_CLOEXEC,0); assert(client>=0);
+            struct timeval timeout={.tv_sec=2};
+            assert(!setsockopt(client,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout)));
+            assert(!connect(client,(void *)&local,sizeof(local)));
+            long sent=send(client,"ping",4,MSG_NOSIGNAL);
+            char data[8];
+            if (denied) {
+                assert(sent==4 || (!udp && sent<0));
+                /* EVENT_WAIT: denied TCP closes, UDP has no reply; timeout
+                 * bounds the negative observation, not server readiness. */
+                assert(recv(client,data,sizeof(data),0)<=0);
+            } else {
+                assert(sent==4);
+                struct pollfd ready={.fd=server,.events=POLLIN};
+                /* EVENT_WAIT: admitted payload/accept; timeout fails delivery. */
+                assert(poll(&ready,1,2000)==1 && (ready.revents&POLLIN));
+                int peer=udp ? server : accept4(server,NULL,NULL,SOCK_CLOEXEC);
+                assert(peer>=0);
+                assert(!setsockopt(peer,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout)));
+                struct sockaddr_in source; socklen_t size=sizeof(source);
+                assert(recvfrom(peer,data,sizeof(data),0,(void *)&source,&size)==4 && !memcmp(data,"ping",4));
+                assert((udp ? sendto(peer,"pong",4,0,(void *)&source,size) : send(peer,"pong",4,MSG_NOSIGNAL))==4);
+                assert(recv(client,data,sizeof(data),0)==4 && !memcmp(data,"pong",4));
+                if (!udp) close(peer);
+            }
+            close(client);
+        }
+        pthread_mutex_lock(&n->fabric->lock);
+        n->filter=NULL; md_network_forward_changed(n->fabric);
+        pthread_mutex_unlock(&n->fabric->lock);
+        close(server); md_fd_object_release(endpoint);
+        md_identity_release(&root); md_network_namespace_release(n);
+    }
+    puts("PASS native loopback TCP/UDP: OUTPUT and INPUT policy, never PREROUTING");
+}
+void test_network_launch(void) { parsing(); routes(); ports(); partial_rollback(); reserved_publication(); loopback_origin(); }

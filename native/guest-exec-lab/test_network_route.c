@@ -2,6 +2,7 @@
 #include "network_route.h"
 #include "network_internal.h"
 #include "guest_identity.h"
+#include "sysfs_view.h"
 #include <assert.h>
 #include <errno.h>
 #include <linux/rtnetlink.h>
@@ -9,6 +10,11 @@
 #include <linux/veth.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <linux/sockios.h>
+#include <linux/if_arp.h>
+#include <sys/syscall.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -78,6 +84,11 @@ void test_network_route(void) {
     assert(!ack(n,&root,h,NULL) && n->count==3);
     assert(ack(n,&root,h,NULL)==-EEXIST && n->count==3);
     unsigned bridge=md_network_interface_find(n,0,"br-test")->info.index;
+    struct md_sysfs *sysfs=md_sysfs_new(AT_FDCWD,n,&root); assert(sysfs);
+    struct stat bridge_node;
+    assert(!fstatat(md_sysfs_root(sysfs),"class/net/br-test/bridge",&bridge_node,0));
+    assert(S_ISDIR(bridge_node.st_mode));
+    assert(fstatat(md_sysfs_root(sysfs),"class/net/lo/bridge",&bridge_node,0)==-1 && errno==ENOENT);
     h=request(&p,RTM_NEWLINK,NLM_F_CREATE|NLM_F_EXCL);
     attr(h,IFLA_IFNAME,"veth-host",10);
     info=attr(h,IFLA_LINKINFO|NLA_F_NESTED,NULL,0);
@@ -94,6 +105,30 @@ void test_network_route(void) {
     assert(!ack(n,&root,h,NULL) && n->count==5);
     unsigned endpoint=md_network_interface_find(n,0,"veth-guest")->info.index;
     assert(md_network_interface_find(n,endpoint,NULL)->info.tx_queue_length==77);
+    struct md_fd_object *socket=md_network_socket_new(n);
+    assert(socket && md_network_interface_ioctl(SIOCGIFHWADDR) && md_network_interface_ioctl(SIOCSIFHWADDR));
+    struct ifreq mac={0}; strcpy(mac.ifr_name,"veth-guest");
+    mac.ifr_hwaddr.sa_family=ARPHRD_ETHER;
+    const unsigned char address[6]={2,3,4,5,6,7};
+    memcpy(mac.ifr_hwaddr.sa_data,address,6);
+    unsigned long io[6]={0,SIOCSIFHWADDR};
+    assert(md_network_socket_call(socket,&user,SYS_ioctl,io,&mac,sizeof(mac),sizeof(mac),1,NULL,NULL,NULL)==-EPERM);
+    assert(!md_network_socket_call(socket,&root,SYS_ioctl,io,&mac,sizeof(mac),sizeof(mac),1,NULL,NULL,NULL));
+    assert(!memcmp(md_network_interface_find(n,endpoint,NULL)->info.address,address,6));
+    mac.ifr_hwaddr.sa_data[0]=1;
+    assert(md_network_socket_call(socket,&root,SYS_ioctl,io,&mac,sizeof(mac),sizeof(mac),1,NULL,NULL,NULL)==-EADDRNOTAVAIL);
+    io[1]=SIOCGIFHWADDR;
+    assert(!md_network_socket_call(socket,&user,SYS_ioctl,io,&mac,sizeof(mac),sizeof(mac),1,NULL,NULL,NULL));
+    assert(mac.ifr_hwaddr.sa_family==ARPHRD_ETHER && !memcmp(mac.ifr_hwaddr.sa_data,address,6));
+    strcpy(mac.ifr_name,"br-test"); mac.ifr_ifindex=(int)endpoint; io[1]=SIOCBRADDIF;
+    assert(md_network_socket_call(socket,&user,SYS_ioctl,io,&mac,sizeof(mac),sizeof(mac),1,NULL,NULL,NULL)==-EPERM);
+    assert(!md_network_socket_call(socket,&root,SYS_ioctl,io,&mac,sizeof(mac),sizeof(mac),1,NULL,NULL,NULL));
+    assert(md_network_interface_find(n,endpoint,NULL)->master==bridge);
+    h=request(&p,RTM_SETLINK,0);
+    ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_index=endpoint;
+    unsigned no_master=0; attr(h,IFLA_MASTER,&no_master,sizeof(no_master));
+    assert(!ack(n,&root,h,NULL));
+    md_fd_object_release(socket);
     struct md_control_file sysctl=md_network_sysctl_new(n,MD_NET_RP_FILTER,"veth-guest",NULL);
     assert(sysctl.ops);
     struct md_control_actor actor={.identity=&root};
@@ -387,6 +422,9 @@ void test_network_route(void) {
     h=request(&p,RTM_DELLINK,0);
     ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_index=bridge;
     assert(!ack(n,&root,h,NULL));
+    assert(!md_sysfs_refresh(sysfs));
+    assert(fstatat(md_sysfs_root(sysfs),"class/net/br-test",&bridge_node,0)==-1 && errno==ENOENT);
+    md_sysfs_release(sysfs);
     md_network_namespace_release(child); md_network_namespace_release(n);
     md_identity_release(&root); md_identity_release(&user);
     puts("PASS route netlink: permissions, bridge/veth, namespace handles, atomic rejection and multipart dumps");

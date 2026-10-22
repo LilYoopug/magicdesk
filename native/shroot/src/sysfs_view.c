@@ -15,7 +15,7 @@
 #include <string.h>
 #include <unistd.h>
 
-enum attribute { DIRECTORY, LINK, IFINDEX, IFLINK, MTU, TYPE, ADDRESS, BROADCAST, FLAGS, OPERSTATE, CARRIER, RETIRED };
+enum attribute { DIRECTORY, LINK, IFINDEX, IFLINK, MTU, TYPE, ADDRESS, BROADCAST, FLAGS, OPERSTATE, CARRIER, RETIRED, BRIDGE };
 static const struct node { const char *path; enum attribute attribute; const char *target; } nodes[]={
     {".",DIRECTORY,NULL}, {"block",DIRECTORY,NULL}, {"bus",DIRECTORY,NULL},
     {"dev",DIRECTORY,NULL}, {"dev/block",DIRECTORY,NULL}, {"dev/char",DIRECTORY,NULL},
@@ -29,6 +29,7 @@ static const struct node attributes[]={
     {"ifindex",IFINDEX,NULL}, {"iflink",IFLINK,NULL}, {"mtu",MTU,NULL}, {"type",TYPE,NULL},
     {"address",ADDRESS,NULL}, {"broadcast",BROADCAST,NULL}, {"flags",FLAGS,NULL},
     {"operstate",OPERSTATE,NULL}, {"carrier",CARRIER,NULL},
+    {"bridge",BRIDGE,NULL},
 };
 enum { NODE_COUNT=sizeof(nodes)/sizeof(*nodes), ATTRIBUTE_COUNT=sizeof(attributes)/sizeof(*attributes) };
 struct interface {
@@ -88,12 +89,13 @@ static void metadata(struct md_sysfs *v,struct md_sysfs_node *out,unsigned attri
     struct stat *st=&out->stat;
     out->attribute=attribute;
     st->st_uid=v->uid; st->st_gid=v->gid;
-    st->st_mode=attribute==DIRECTORY ? S_IFDIR|0755 : attribute==LINK ? S_IFLNK|0777 : S_IFREG|0444;
-    if (attribute!=LINK) st->st_size=attribute==DIRECTORY ? 0 : 4096;
+    int directory=attribute==DIRECTORY || attribute==BRIDGE;
+    st->st_mode=directory ? S_IFDIR|0755 : attribute==LINK ? S_IFLNK|0777 : S_IFREG|0444;
+    if (attribute!=LINK) st->st_size=directory ? 0 : 4096;
     st->st_blocks=0; st->st_blksize=4096;
 }
 static int materialize(struct md_sysfs *v,int directory,const struct node *spec,struct md_sysfs_node *out) {
-    if (spec->attribute==DIRECTORY) {
+    if (spec->attribute==DIRECTORY || spec->attribute==BRIDGE) {
         if (strcmp(spec->path,".") && mkdirat(directory,spec->path,0700) && errno!=EEXIST) return -errno;
     } else if (spec->attribute==LINK) {
         if (symlinkat(spec->target,directory,spec->path) && errno!=EEXIST) return -errno;
@@ -117,7 +119,8 @@ static int remove_interface(struct md_sysfs *v,struct interface *link) {
     if (directory<0) return errno==ENOENT ? 0 : -errno;
     int error=0;
     for (unsigned i=1;i<ATTRIBUTE_COUNT;++i)
-        if (unlinkat(directory,attributes[i].path,0) && errno!=ENOENT) { error=-errno; break; }
+        if (unlinkat(directory,attributes[i].path,attributes[i].attribute==BRIDGE ? AT_REMOVEDIR : 0)
+                && errno!=ENOENT) { error=-errno; break; }
     close(directory);
     if (!error && unlinkat(parent,path,AT_REMOVEDIR) && errno!=ENOENT) error=-errno;
     return error;
@@ -176,6 +179,7 @@ int md_sysfs_refresh(struct md_sysfs *v) {
             if (directory<0) return -errno;
             int error=0;
             for (unsigned i=0;i<ATTRIBUTE_COUNT && !error;++i) {
+                if (attributes[i].attribute==BRIDGE && wanted->kind!=MD_LINK_BRIDGE) continue;
                 error=materialize(v,directory,&attributes[i],&link->nodes[i]);
                 link->nodes[i].interface=link->index; link->nodes[i].lifetime=link->lifetime;
             }

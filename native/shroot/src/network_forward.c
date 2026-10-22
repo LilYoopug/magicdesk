@@ -197,7 +197,12 @@ static int incoming_path(struct md_network_forward *f,struct listener *l,const s
         .protocol=l->type==SOCK_STREAM ? IPPROTO_TCP : IPPROTO_UDP};
     if (l->address.sin_addr.s_addr && (ntohl(l->address.sin_addr.s_addr)>>24)!=127)
         p.destination=l->address.sin_addr.s_addr;
-    int error=md_network_flow_route(n,&p,1,path);
+    /* Android loopback clients originate on this host, just like guest
+     * loopback clients. Feeding them into PREROUTING can bypass a local
+     * listener through DNAT and leak a loopback source into a private link. */
+    int host_local=(ntohl(client->sin_addr.s_addr)>>24)==127
+        && (ntohl(local->sin_addr.s_addr)>>24)==127;
+    int error=md_network_flow_route(n,&p,!host_local,path);
     if (!error && !p.dnat && !l->endpoint) error=-ECONNREFUSED;
     if (!error) error=endpoint_target(f->fabric,path,l->type,target);
     return error;
