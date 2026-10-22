@@ -297,7 +297,7 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
         for name, recipe in recipes.items():
             with self.subTest(recipe=name):
                 commands = re.findall(r'^\s*(tar [^\n]+)$', recipe, re.M)
-                expected = 2 if name == 'mesa' else 1
+                expected = 3 if name == 'mesa' else 1
                 self.assertEqual(expected, len(commands), commands)
                 for command in commands:
                     self.assertIn('--no-same-owner', shlex.split(command))
@@ -1695,6 +1695,58 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
             self.assertIn(f'"-D{language}_link_args=-Wl,-rpath,\\$ORIGIN:\\$ORIGIN/..:$prefix/lib"', expected)
         self.assertIn("'-Dgbm-backends-path=$ORIGIN/gbm'", expected)
 
+    def test_alpine_graphics_uses_available_development_packages(self):
+        graphics = self.run_script('--print-graphics-setup').stdout
+        alpine = graphics.split('apk) packages build-base')[1].split(';;')[0]
+        self.assertIn('mesa-dev', alpine)
+        self.assertNotIn('libglvnd-dev', alpine)
+        self.assertIn('prepare_glvnd\n', graphics)
+        self.assertIn('cp -a "$private_glvnd/lib/." "$work/stage$prefix/lib/"', graphics)
+
+    def glvnd_helper(self):
+        payload = self.run_script('--print-graphics-setup').stdout
+        return payload[payload.index('prepare_glvnd() {'):payload.index('\nautomatic=no')]
+
+    def test_glvnd_bootstrap_preserves_system_dispatch(self):
+        tool = self.directory / 'pkg-config'
+        tool.write_text('#!/bin/sh\ntest "$1" = --exists && test "$2" = libglvnd\n')
+        tool.chmod(0o755)
+        run = subprocess.run(['sh', '-eu', '-c', self.glvnd_helper() +
+                              '\nprepare_glvnd\ntest -z "$private_glvnd"\n'],
+                             env=self.environment, capture_output=True, text=True, timeout=5)
+        self.assertEqual(0, run.returncode, run.stderr)
+
+    def test_glvnd_bootstrap_reuses_complete_private_dispatch(self):
+        tool = self.directory / 'pkg-config'
+        tool.write_text('#!/bin/sh\nexit 1\n')
+        tool.chmod(0o755)
+        root = self.directory / 'glvnd'
+        prefix = root / '1.7.0-test'
+        prefix.mkdir(parents=True)
+        (prefix / '.complete').write_text('test\n')
+        helper = self.glvnd_helper().replace('/opt/magicdesk/glvnd', str(root))
+        run = subprocess.run(['sh', '-eu', '-c', helper +
+                              '\nprepare_glvnd\nprintf "%s" "$PKG_CONFIG_PATH"\n'],
+                             env=dict(self.environment, recipe='test', PKG_CONFIG_PATH='/previous'),
+                             capture_output=True, text=True, timeout=5)
+        self.assertEqual(0, run.returncode, run.stderr)
+        self.assertEqual(str(prefix / 'lib/pkgconfig') + ':/previous', run.stdout)
+
+    def test_glvnd_bootstrap_rejects_invalid_archive_before_extracting(self):
+        for name, body in [('pkg-config', 'exit 1'), ('curl', 'exit 0'),
+                           ('tar', 'touch "$work/unexpected-extraction"')]:
+            tool = self.directory / name
+            tool.write_text('#!/bin/sh\n' + body + '\n')
+            tool.chmod(0o755)
+        (self.directory / 'libglvnd-1.7.0.tar.gz.part').write_text('invalid archive')
+        helper = self.glvnd_helper().replace('/opt/magicdesk/glvnd', str(self.directory / 'glvnd')) \
+            .replace('/var/cache/magicdesk/mesa/downloads', str(self.directory))
+        run = subprocess.run(['sh', '-eu', '-c', helper + '\nprepare_glvnd'],
+                             env=dict(self.environment, recipe='test', work=str(self.directory)),
+                             capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(0, run.returncode)
+        self.assertFalse((self.directory / 'unexpected-extraction').exists())
+
     def test_gpu_failure_preserves_environment_and_reports_exact_resume_command(self):
         result = self.run_script("--yes", "--resume", "--name", "gpu-work", "--gpu", "turnip",
                                  "--jobs", "3", TEST_FAIL="graphics")
@@ -1793,13 +1845,13 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
                                          json.loads(manifest.read_text())['ICD']['library_path'])
                         self.assertEqual(0o644, manifest.stat().st_mode & 0o777)
                     activated = subprocess.run(
-                        ["sh", "-eu", "-c", '. "$1"; printf "%s|%s" '
-                         '"$MESA_LOADER_DRIVER_OVERRIDE" "${GALLIUM_DRIVER-unset}"',
+                        ["sh", "-eu", "-c", '. "$1"; printf "%s|%s|%s" '
+                         '"$MESA_LOADER_DRIVER_OVERRIDE" "${GALLIUM_DRIVER-unset}" "$GBM_BACKENDS_PATH"',
                          "sh", str(profile)],
                         env=dict(environment, GALLIUM_DRIVER="zink"),
                         capture_output=True, text=True, timeout=5)
                     self.assertEqual(0, activated.returncode, activated.stderr)
-                    self.assertEqual("zink|zink", activated.stdout)
+                    self.assertEqual("zink|zink|" + str(prefix / 'lib/gbm'), activated.stdout)
                 else:
                     self.assertEqual("previous profile\n", profile.read_text())
 
@@ -1872,14 +1924,14 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
         self.assertTrue(all(path.read_text() == 'distribution' for path in others))
         environment.update(MAGICDESK_MESA_PREFIX="/opt/old", LD_LIBRARY_PATH="/custom:/opt/old/lib:/other",
                            VK_DRIVER_FILES="/old/icd.json", MESA_LOADER_DRIVER_OVERRIDE="zink",
-                           MESA_VK_WSI_DEBUG="noshm")
-        result = subprocess.run(["sh", "-eu", "-c", '. "$1"; . "$1"; printf "%s|%s|%s|%s|%s|%s" '
+                           MESA_VK_WSI_DEBUG="noshm", GBM_BACKENDS_PATH="/opt/old/lib/gbm")
+        result = subprocess.run(["sh", "-eu", "-c", '. "$1"; . "$1"; printf "%s|%s|%s|%s|%s|%s|%s" '
                                  '"$LD_LIBRARY_PATH" "$LIBGL_ALWAYS_SOFTWARE" "$GALLIUM_DRIVER" '
                                  '"${VK_DRIVER_FILES-unset}" "${MAGICDESK_MESA_PREFIX-unset}" '
-                                 '"${MESA_VK_WSI_DEBUG-unset}"', "sh", str(profile)],
+                                 '"${MESA_VK_WSI_DEBUG-unset}" "${GBM_BACKENDS_PATH-unset}"', "sh", str(profile)],
                                 env=environment, capture_output=True, text=True, timeout=5)
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual("/custom:/other|1|llvmpipe|unset|unset|unset", result.stdout)
+        self.assertEqual("/custom:/other|1|llvmpipe|unset|unset|unset|unset", result.stdout)
 
     def test_fex_graphics_defaults_preserve_overrides_and_follow_profile(self):
         recipe = self.profile_recipe()

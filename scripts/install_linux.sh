@@ -1773,7 +1773,7 @@ if [ ! -f "$prefix/.complete" ]; then
                 libxcb-shape0-dev libxcb-xfixes0-dev libxcb-cursor-dev libxcursor-dev ;;
             apk) packages build-base meson ninja pkgconf curl xz wayland-dev wayland-protocols \
                 libxkbcommon-dev pixman-dev libinput-dev libevdev-dev eudev-dev libdrm-dev \
-                cairo-dev pango-dev libpng-dev libglvnd-dev libxcb-dev xcb-util-cursor-dev libxcursor-dev ;;
+                cairo-dev pango-dev libpng-dev mesa-dev libxcb-dev xcb-util-cursor-dev libxcursor-dev ;;
             dnf) packages gcc gcc-c++ meson ninja-build pkgconf-pkg-config curl xz \
                 wayland-devel wayland-protocols-devel libxkbcommon-devel pixman-devel \
                 libinput-devel libevdev-devel systemd-devel libdrm-devel cairo-devel \
@@ -2525,6 +2525,52 @@ sys.exit(0 if match and tuple(map(int, match.groups())) >= (1, 4, 0) else 1)
     fi
 }
 
+prepare_glvnd() {
+    private_glvnd=
+    pkg-config --exists libglvnd && return
+    # Some distributions ship Mesa's direct loaders instead of GLVND. Keep
+    # their packages intact and provide dispatch with our private Mesa stack.
+    glvnd_version=1.7.0
+    glvnd_sha=073e7292788d4d3eeb45ea6c7bdcce9bfdb3b3eef8d7dbd47f2f30dce046ef98
+    private_glvnd=/opt/magicdesk/glvnd/$glvnd_version-$recipe
+    if [ ! -f "$private_glvnd/.complete" ]; then
+        glvnd_archive=/var/cache/magicdesk/mesa/downloads/libglvnd-$glvnd_version.tar.gz
+        if ! printf '%s  %s\n' "$glvnd_sha" "$glvnd_archive" | sha256sum -c - >/dev/null 2>&1; then
+            # EVENT_WAIT: download progress; a stalled transport fails before extraction.
+            curl --fail --location --proto '=https' --proto-redir '=https' \
+                --connect-timeout 30 --speed-limit 1 --speed-time 60 --retry 3 \
+                --output "$glvnd_archive.part" \
+                "https://codeload.github.com/NVIDIA/libglvnd/tar.gz/refs/tags/v$glvnd_version"
+            printf '%s  %s\n' "$glvnd_sha" "$glvnd_archive.part" | sha256sum -c -
+            mv "$glvnd_archive.part" "$glvnd_archive"
+        fi
+        if [ ! -f "$work/libglvnd-$glvnd_version/.extracted" ]; then
+            rm -rf "$work/libglvnd-$glvnd_version"
+            tar --no-same-owner -xzf "$glvnd_archive" -C "$work"
+            touch "$work/libglvnd-$glvnd_version/.extracted"
+        fi
+        set -- --prefix="$private_glvnd" --libdir=lib --sysconfdir=/etc \
+            --buildtype=release --wrap-mode=nodownload '-Dc_link_args=-Wl,-rpath,$ORIGIN' \
+            -Dglx=enabled -Dx11=enabled -Degl=true -Dgles1=true -Dgles2=true
+        if [ -f "$work/glvnd-build/build.ninja" ]; then
+            "$meson_tool" setup --reconfigure "$work/glvnd-build" "$work/libglvnd-$glvnd_version" "$@" </dev/null
+        else
+            "$meson_tool" setup "$work/glvnd-build" "$work/libglvnd-$glvnd_version" "$@" </dev/null
+        fi
+        ninja -C "$work/glvnd-build" -j "$jobs" </dev/null
+        rm -rf "$work/glvnd-stage"
+        "$meson_tool" install -C "$work/glvnd-build" --no-rebuild --destdir "$work/glvnd-stage" </dev/null
+        [ -f "$work/glvnd-stage$private_glvnd/lib/libEGL.so.1" ] || exit 1
+        [ -f "$work/glvnd-stage$private_glvnd/lib/libGLX.so.0" ] || exit 1
+        mkdir -p /opt/magicdesk/glvnd
+        [ ! -e "$private_glvnd" ] || { echo "Incomplete prefix exists: $private_glvnd" >&2; exit 1; }
+        printf '%s\n' "$recipe" > "$work/glvnd-stage$private_glvnd/.complete"
+        mv "$work/glvnd-stage$private_glvnd" "$private_glvnd"
+    fi
+    [ "$(cat "$private_glvnd/.complete")" = "$recipe" ] || exit 1
+    export PKG_CONFIG_PATH="$private_glvnd/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+}
+
 automatic=no
 if [ "$gpu" = auto ]; then
     automatic=yes
@@ -2561,7 +2607,7 @@ MESA_PATCH
         libxcb-xfixes0-dev ;;
     apk) packages build-base meson ninja pkgconf python3 py3-mako py3-yaml py3-ply py3-packaging bison flex \
         patch curl xz glslang-dev linux-headers libdrm-dev expat-dev zstd-dev zlib-dev elfutils-dev \
-        wayland-dev wayland-protocols libglvnd-dev vulkan-headers vulkan-tools \
+        wayland-dev wayland-protocols mesa-dev vulkan-headers vulkan-tools \
         libx11-dev libxext-dev libxfixes-dev libxxf86vm-dev libxrandr-dev libxshmfence-dev libxcb-dev ;;
     dnf) packages gcc gcc-c++ meson ninja-build pkgconf-pkg-config python3-mako python3-pyyaml \
         python3-ply python3-packaging bison flex patch curl xz glslang libdrm-devel expat-devel libzstd-devel zlib-ng-compat-devel \
@@ -2604,6 +2650,7 @@ MESA_PATCH
             rmdir "$work/unpack"
         fi
         prepare_meson
+        prepare_glvnd
         # Both KMDs are needed: Vulkan WSI also uses the DRM image allocator.
         set -- --prefix="$prefix" --libdir=lib --buildtype=release --wrap-mode=nodownload \
             "-Dc_link_args=-Wl,-rpath,\$ORIGIN:\$ORIGIN/..:$prefix/lib" \
@@ -2623,6 +2670,9 @@ MESA_PATCH
         # Install off to the side; a resumed/failed installation cannot alter active libraries.
         rm -rf "$work/stage"
         "$meson_tool" install -C "$work/build" --no-rebuild --destdir "$work/stage" </dev/null
+        if [ -n "$private_glvnd" ]; then
+            cp -a "$private_glvnd/lib/." "$work/stage$prefix/lib/"
+        fi
         # GLVND also accepts this profile override for capability-bearing tasks,
         # where LD_LIBRARY_PATH has already been removed by the ELF loader.
         python3 - "$work/stage$prefix/share/glvnd/egl_vendor.d/50_mesa.json" \
@@ -2688,7 +2738,7 @@ if [ -n "${MAGICDESK_MESA_PREFIX:-}" ]; then
     unset _md_paths _md_kept _md_item
 fi
 unset MAGICDESK_MESA_PREFIX LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE
-unset LIBGL_DRIVERS_PATH LIBGL_KOPPER_DRI2 __EGL_VENDOR_LIBRARY_FILENAMES VK_DRIVER_FILES VK_ICD_FILENAMES
+unset LIBGL_DRIVERS_PATH GBM_BACKENDS_PATH LIBGL_KOPPER_DRI2 __EGL_VENDOR_LIBRARY_FILENAMES VK_DRIVER_FILES VK_ICD_FILENAMES
 unset MESA_VK_WSI_DEBUG
 PROFILE
 }
@@ -2698,6 +2748,7 @@ if [ "$gpu" = turnip ]; then
     cat >> "$candidate" <<'PROFILE'
 export LD_LIBRARY_PATH="$MAGICDESK_MESA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export LIBGL_DRIVERS_PATH="$MAGICDESK_MESA_PREFIX/lib/dri"
+export GBM_BACKENDS_PATH="$MAGICDESK_MESA_PREFIX/lib/gbm"
 export __EGL_VENDOR_LIBRARY_FILENAMES="$MAGICDESK_MESA_PREFIX/share/glvnd/egl_vendor.d/50_mesa.json"
 export VK_DRIVER_FILES="$MAGICDESK_MESA_PREFIX/share/vulkan/icd.d/freedreno_icd.aarch64.json"
 # Zink can also present through the frontend when Kopper/DRI3 is unavailable.
