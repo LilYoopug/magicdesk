@@ -308,12 +308,13 @@ int md_inode_store_seal(struct md_inode_store *s) {
 }
 int md_inode_reopen(struct md_inode_store *s, int original, int flags, int mutable) {
     struct md_open_completion completion;
-    int fd = md_inode_prepare_reopen(s, original, flags, mutable, &completion);
+    int fd = md_inode_plan_reopen(s, original, flags, mutable, &completion, 0);
     return md_complete_open(fd, flags | O_CLOEXEC, completion);
 }
-int md_inode_prepare_reopen(struct md_inode_store *s, int original, int flags, int mutable,
-        struct md_open_completion *completion) {
+int md_inode_plan_reopen(struct md_inode_store *s, int original, int flags, int mutable,
+        struct md_open_completion *completion, int native_plan) {
     *completion = (struct md_open_completion){0};
+    if (native_plan && (mutable || !md_open_native_plan(flags,0))) return -EXDEV;
     if (flags & ~(O_PATH | O_CLOEXEC | O_NONBLOCK | O_DIRECTORY | O_LARGEFILE | O_ACCMODE
             | O_APPEND | O_TRUNC | O_NOFOLLOW | O_SYNC | O_DSYNC | O_DIRECT | O_NOCTTY | O_NOATIME)) return -EINVAL;
     if ((flags & O_ACCMODE) == O_ACCMODE) return -EINVAL;
@@ -325,6 +326,8 @@ int md_inode_prepare_reopen(struct md_inode_store *s, int original, int flags, i
     struct mdi_node node;
     r = mdi_fd(s, original, &node);
     if (!r && (flags & O_DIRECTORY) && node.kind != S_IFDIR) r = -ENOTDIR;
+    if (!r && node.kind==S_IFDIR && (flags&(O_WRONLY|O_RDWR|O_TRUNC))) r=-EISDIR;
+    if (!r && write && (mutable || node.kind==S_IFREG) && mdi_readonly(s)) r=-EROFS;
     int device=!r && (node.kind==S_IFCHR || node.kind==S_IFBLK) && !(flags&O_PATH);
     if (device && s->nodev) r=-EACCES;
     if (!r) r = mdi_open_permission(s, &node, flags);
@@ -336,17 +339,32 @@ int md_inode_prepare_reopen(struct md_inode_store *s, int original, int flags, i
         if (!r && st.st_uid != s->identity->uid.fs
                 && !md_identity_file_capable(s->identity,st.st_uid,st.st_gid,CAP_FOWNER)) r = -EPERM;
     }
-    if (!r && write && (mutable || node.kind==S_IFREG)) r=mdi_write(s);
-    if (!r && write && (mutable || node.kind==S_IFREG)) r=mdi_copy_up(s,&node);
+    if (!r && native_plan && !md_open_native_kind(flags,node.kind)) r=-EXDEV;
+    int copy_up=!r && write && (mutable || node.kind==S_IFREG)
+        && (node.shared || (s->overlay && !node.native));
+    int deferred=!r && node.kind==S_IFIFO && !(flags&O_PATH);
+    if (!r && s->read_depth>1 && (copy_up || deferred)) {
+        completion->kind=MD_OPEN_NEEDS_WRITE;
+        return mdi_finish(s,-EAGAIN);
+    }
+    if (copy_up) {
+        r=mdi_write(s);
+        if (!r) r=mdi_copy_up(s,&node);
+    }
     int fd = -1;
     int directory = r ? -1 : mdi_backing_directory(s, &node);
     if (!r && directory < 0) r = directory;
-    int deferred = !r && node.kind == S_IFIFO && !(flags & O_PATH);
-    if (!r && (fd=mdi_backing_open(s,&node,deferred || device ? O_PATH : flags))<0) r=fd;
-    if (!r && (flags&O_DSYNC)) s->sync_requested=1;
-    r = mdi_commit(s, r);
+    if (!r && (fd=mdi_backing_open(s,&node,deferred || device || native_plan ? O_PATH : flags))<0) r=fd;
+    struct stat st;
+    if (!r && native_plan) r=mdi_backing_fstat(&node,fd,&st);
+    if (!r && native_plan) r=md_open_plan_access(fd,flags);
+    if (!r && (flags&O_DSYNC) && (!native_plan || s->write_transaction)) s->sync_requested=1;
+    r = mdi_finish(s, r);
     if (r && fd >= 0) close(fd);
     if (!r && deferred) return mdi_fifo_prepare(s, fd, completion);
+    if (!r && native_plan) *completion=(struct md_open_completion){.kind=MD_OPEN_PLAN,
+        .backing_device=st.st_dev,.backing_inode=st.st_ino,.mode=st.st_mode&S_IFMT};
+    if (!r) completion->native_leaf=node.native;
     if (!r && device) *completion=(struct md_open_completion){.kind=MD_OPEN_DEVICE,.device=node.rdev,.mode=node.kind};
     return r ? r : fd;
 }

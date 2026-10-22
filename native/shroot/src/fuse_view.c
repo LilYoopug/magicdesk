@@ -594,6 +594,7 @@ struct view_operation {
     struct md_fs_anchor *origin;
     struct md_fuse_request *request;
     struct md_fuse_image *image;
+    char *image_path;
     struct fuse_attr attributes;
     uint64_t image_handle;
     int executable,image_opened,access_checked;
@@ -696,7 +697,7 @@ static void operation_destroy(struct md_fs_continuation *base) {
     md_fuse_image_destroy(p->image);
     if (p->image_opened) md_fuse_file_release_handle(p->view,p->node,&p->identity,p->image_handle,O_RDONLY);
     md_fs_anchor_release(p->origin); md_identity_release(&p->identity);
-    free(p->renamed); md_fuse_view_release(p->view); md_fs_continuation_clear(base); free(p);
+    free(p->image_path); free(p->renamed); md_fuse_view_release(p->view); md_fs_continuation_clear(base); free(p);
 }
 static void name_remove(struct fuse_view *v,struct fuse_node *parent,const char *name) {
     struct fuse_name *d=name_find(v,parent,name);
@@ -1009,7 +1010,8 @@ static void operation_resume(struct md_fs_continuation *base,struct md_filesyste
             else {
                 struct md_image_identity *identity=output->data;
                 memset(identity,0,sizeof(*identity));
-                out->error=md_view_path(fs,md_fs_anchor_fd(p->origin),p->origin->mount,identity->path,sizeof(identity->path));
+                snprintf(identity->path,sizeof(identity->path),"%s",p->image_path);
+                out->size=offsetof(struct md_image_identity,path)+strlen(identity->path)+1;
             }
         }
         if (out->error) close(fd);
@@ -1213,6 +1215,11 @@ int md_fs_fuse_operation(struct md_filesystem *fs,const struct md_fs_request *q,
         else { p->renamed->parent=destination; p->renamed->node=n; strcpy(p->renamed->name,p->target); }
     }
     if (!out->error) out->error=md_view_anchor_duplicate(fs,a->view,a->mount,a->fd<0 ? a->parent : a->fd,&p->origin);
+    if (!out->error && q->operation==MD_FS_OPEN_IMAGE) {
+        char path[PATH_MAX];
+        out->error=md_view_location_path(fs,a,path,sizeof(path));
+        if (!out->error && !(p->image_path=strdup(path))) out->error=-ENOMEM;
+    }
     if (!out->error) operation_resume(&p->base,fs,out,output);
     if (out->error!=-EINPROGRESS) operation_destroy(&p->base);
     return 1;

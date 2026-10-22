@@ -3,7 +3,8 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-/* Internal event, not a kernel signal or an application debugger stop. */
+/* Internal event, not a kernel signal or an application debugger stop.
+ * Registers retain the kernel's post-SVC PC, already at the continuation. */
 #define MD_TASK_CHECKPOINT_EVENT 256
 #define MD_INTERCEPT_CHECKPOINT 55
 #define MD_TASK_CHECKPOINT_BUCKETS 256
@@ -16,6 +17,8 @@ struct md_task_checkpoints {
     int (*marker)(uintptr_t);
     uintptr_t begin,end;
 };
+/* All caller ptrace requests use this owner. Stop decoding hands off each
+ * retained observation once; other requests/events invalidate the snapshot. */
 long md_task_checkpoint_trace(struct md_task_checkpoints *,int,pid_t,void *,void *);
 /* 1 consumed an intermediate stop; 0 publishes the original or typed
  * checkpoint event. Negative errno retains the actor for caller cleanup. */

@@ -97,10 +97,10 @@ int md_inode_view_create(struct md_inode_store *base, enum md_filesystem_kind ki
 }
 static int scope_delete(struct md_inode_store *s, const char *scope) {
     /* Other stores may retain these native bodies through source leases. Remove
-     * only the projection metadata while ordinary maintenance leases are held. */
+     * only the projection metadata while ordinary maintenance leases are held.
+     * Event rows have no live object ownership. Keep them until journal trimming:
+     * holes in its shared sequence would falsely overflow unrelated watchers. */
     static const char *const queries[]={
-        ("DELETE FROM events WHERE object IN (SELECT object FROM objects WHERE scope=?1) "
-            "OR parent IN (SELECT object FROM objects WHERE scope=?1)"),
         "DELETE FROM names WHERE parent IN (SELECT object FROM objects WHERE scope=?1)",
         "DELETE FROM file_paths WHERE object IN (SELECT object FROM objects WHERE scope=?1)",
         "DELETE FROM sockets WHERE object IN (SELECT object FROM objects WHERE scope=?1)",

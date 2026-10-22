@@ -83,8 +83,10 @@ def main():
               + root + "/store --deadline-seconds 90 -- /bin/test setns", "PASS guest setns:")
         check("guest overlay filesystems", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
               + root + "/store --deadline-seconds 90 -- /bin/test overlay", "PASS guest overlay:")
-        check("guest namespace handles", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
-              + root + "/store --deadline-seconds 90 -- /bin/test namespace-handles", "PASS guest namespace handles:")
+        for entry in (0, 1):
+            check(f"guest namespace handles entry={entry}", root + "/libmagicdesk_guest_run.so --user 0:0"
+                  + f" --env SHROOT_MACHINE_ENTRY={entry} --diagnostics --store "
+                  + root + "/store --deadline-seconds 90 -- /bin/test namespace-handles", "PASS guest namespace handles:")
         check("guest PID-scoped namespace mounts", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
               + root + "/store --deadline-seconds 90 -- /bin/test namespace-mounts-pid", "PASS PID-scoped namespace mounts:")
         check("guest mount flags", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --admit-elf /bin/test --store "

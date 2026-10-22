@@ -104,6 +104,7 @@ long md_proc_control_link_metadata(const struct md_proc_path *ref,long nr,const 
             result=md_write_memory((void *)a[1],&value,sizeof(value));
         } else if (nr==SYS_readlinkat) {
             if (!namespace) result=kind==MD_PROC_FD ? -EXDEV : -EINVAL;
+            else if (kind==MD_PROC_NONE && !S_ISLNK(st.st_mode)) result=-EINVAL;
             else if (!a[3]) result=-EINVAL;
             /* A namespace opened through a bind mount has a retained pathname,
              * unlike an anonymous /proc/PID/ns handle. Resolve it in the VFS. */
@@ -139,12 +140,10 @@ long md_proc_control_link_metadata(const struct md_proc_path *ref,long nr,const 
 long md_proc_control_metadata(const struct md_proc_path *ref,long nr,const unsigned long *a) {
     return md_proc_control_link_metadata(ref,nr,a,0);
 }
-long md_proc_control_call(long nr, const unsigned long *a) {
+long md_proc_control_call(long nr, const unsigned long *a, int kind) {
 #ifdef MD_USE_LIBC
-    (void)nr; (void)a; return MD_CALL_NATIVE;
+    (void)nr; (void)a; (void)kind; return MD_CALL_NATIVE;
 #else
-    long active=md_guest_buffer_control(MD_BUFFER_PROC_CHECK,0,0);
-    if (active<=0) return active<0 ? active : MD_CALL_NATIVE;
     if (nr==SYS_mmap) {
         long memory=md_adapter_buffer_take();
         if (memory<0) return memory;
@@ -157,7 +156,7 @@ long md_proc_control_call(long nr, const unsigned long *a) {
         return result<0 ? result : released<0 ? released : result;
     }
     if (nr==SYS_ioctl) {
-        if (!md_proc_file_namespace((enum md_proc_file_kind)(active-1))) {
+        if (!md_proc_file_namespace((enum md_proc_file_kind)kind)) {
             long packed=md_guest_buffer_control(MD_BUFFER_CONTROL_IOCTL_SPEC,0,0);
             if (packed<0) return packed;
             size_t size=(uint32_t)packed;
@@ -224,8 +223,8 @@ long md_proc_control_call(long nr, const unsigned long *a) {
         }
         return value;
     }
-    int sysctl=md_proc_file_sysctl((enum md_proc_file_kind)(active-1));
-    int control=active==MD_PROC_FILE_CONTROL+1;
+    int sysctl=md_proc_file_sysctl((enum md_proc_file_kind)kind);
+    int control=kind==MD_PROC_FILE_CONTROL;
     struct md_proc_io_spec spec;
     long decoded=md_proc_io_decode(nr,a,&spec);
     if (decoded) return decoded;
@@ -273,20 +272,18 @@ long md_proc_control_call(long nr, const unsigned long *a) {
         long released=md_adapter_buffer_release();
         return result<0 ? result : released<0 ? released : result;
     }
-    struct iovec vectors[1024]; unsigned count=1;
+    struct iovec vectors[MD_PROC_IO_VECTORS]; unsigned count=1;
     if (spec.seek || spec.command) count=0;
     else if (!vector) vectors[0]=(struct iovec){(void *)a[1],a[2]};
     else {
-        if (a[2]>1024) return -EINVAL;
+        if (a[2]>MD_PROC_IO_VECTORS) return -EINVAL;
         count=(unsigned)a[2];
         long result=md_read_memory(vectors,(void *)a[1],count*sizeof(*vectors));
         if (result) return result;
     }
     size_t total=0;
-    for (unsigned i=0;i<count;++i) {
-        if (vectors[i].iov_len>(size_t)PTRDIFF_MAX-total) return -EINVAL;
-        total+=vectors[i].iov_len;
-    }
+    long sized=md_proc_io_vector_size(vectors,count,&total);
+    if (sized) return sized;
     if (vector && !total) return 0;
     /* Legacy proc writev calls the write method for each vector. A successful
      * map write consumes its one publication; another vector cannot be joined
@@ -298,9 +295,17 @@ long md_proc_control_call(long nr, const unsigned long *a) {
     }
     _Static_assert(sizeof(struct md_fs_buffer_frame)>=MD_CONTROL_IO_MAX,"control IO fits adapter buffer");
     if (writing && !sysctl && !control && total>md_page_size-1) return -EINVAL;
-    long memory=md_adapter_buffer_take();
-    if (memory<0) return memory;
-    long result=0; size_t copied=0;
+    long memory, result=0;
+    int ready=!writing;
+    if (writing) {
+        memory=md_adapter_buffer_take();
+        if (memory<0) return memory;
+    } else {
+        struct md_adapter_input input=md_adapter_buffer_start(total);
+        if (!input.buffer) return input.value;
+        memory=(long)input.buffer; result=input.value;
+    }
+    size_t copied=0;
     if (writing) for (unsigned i=0;i<count;++i) {
         if (!sysctl) {
             size_t length=vectors[i].iov_len;
@@ -330,7 +335,8 @@ long md_proc_control_call(long nr, const unsigned long *a) {
     unsigned at=0;
     int more=0;
     do {
-        if (!result) result=md_guest_buffer_control(MD_BUFFER_PROC_IO,total-delivered,0);
+        if (!result && !ready) result=md_guest_buffer_control(MD_BUFFER_PROC_IO,total-delivered,0);
+        ready=0;
         more=!writing && !spec.seek && !spec.command && !spec.directory
             && result>=0 && (result&MD_BUFFER_PROC_MORE);
         if (more) result&=~MD_BUFFER_PROC_MORE;
@@ -351,8 +357,10 @@ long md_proc_control_call(long nr, const unsigned long *a) {
         }
         more=more && result==offered && result>0;
         if (offered>=0) {
-            long finished=md_guest_buffer_control(MD_BUFFER_PROC_ACK,
-                writing || spec.seek || spec.command ? 0 : (unsigned long)result,more);
+            long copied_result=writing || spec.seek || spec.command ? 0 : result;
+            long finished;
+            if (more) finished=md_guest_buffer_control(MD_BUFFER_PROC_ACK,(unsigned long)copied_result,1);
+            else return md_adapter_buffer_finish(copied_result,delivered ? (long)delivered : result);
             if (finished) { result=finished; more=0; }
         }
         if (more) result=0;

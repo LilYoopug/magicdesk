@@ -134,14 +134,15 @@ int md_catalogue_object_id(struct md_image_catalogue *c, struct md_inode_store *
     return md_inode_object_id(s, original_fd(c, s, fd), out);
 }
 int md_catalogue_reopen(struct md_image_catalogue *c, struct md_inode_store *s, int fd, int flags, int mutable,
-        struct md_open_completion *completion) {
+        struct md_open_completion *completion, int native_plan) {
     *completion = (struct md_open_completion){0};
     int original = original_fd(c, s, fd);
     if (c && original == c->entry.source) {
+        if (native_plan) return -EXDEV;
         int error=mutable ? -EROFS : md_inode_landlock_fd(s,original,flags);
         return error ? error : open_snapshot(c,flags);
     }
-    return md_inode_prepare_reopen(s, original, flags, mutable, completion);
+    return md_inode_plan_reopen(s, original, flags, mutable, completion, native_plan);
 }
 int md_catalogue_path(struct md_image_catalogue *c, struct md_inode_store *s, int fd, char *out, size_t size) {
     return md_inode_path(s, original_fd(c, s, fd), out, size);

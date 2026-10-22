@@ -12,8 +12,10 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <linux/magic.h>
+#include <linux/mount.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -26,6 +28,39 @@ static unsigned entries(const char *path) {
         ++count;
     }
     closedir(dir); return count;
+}
+static void limits(void) {
+    const char *path="/tmp/pts-limit";
+    assert(!mkdir(path,0700));
+    const char *invalid[]={"max=0","max=-1","max=1048577","max=4294967296","max=1x"};
+    for (unsigned i=0;i<sizeof(invalid)/sizeof(*invalid);++i)
+        assert(mount("devpts",path,"devpts",0,invalid[i])==-1 && errno==EINVAL);
+    for (int modern=0;modern<2;++modern) {
+        if (modern) {
+            int context=(int)syscall(SYS_fsopen,"devpts",FSOPEN_CLOEXEC); assert(context>=0);
+            assert(!syscall(SYS_fsconfig,context,FSCONFIG_SET_FLAG,"newinstance",NULL,0));
+            assert(!syscall(SYS_fsconfig,context,FSCONFIG_SET_STRING,"ptmxmode","0666",0));
+            assert(!syscall(SYS_fsconfig,context,FSCONFIG_SET_STRING,"max","1",0));
+            assert(!syscall(SYS_fsconfig,context,FSCONFIG_CMD_CREATE,NULL,NULL,0));
+            int tree=(int)syscall(SYS_fsmount,context,FSMOUNT_CLOEXEC,0); assert(tree>=0);
+            assert(!syscall(SYS_move_mount,tree,"",AT_FDCWD,path,MOVE_MOUNT_F_EMPTY_PATH));
+            close(tree); close(context);
+        } else assert(!mount("devpts",path,"devpts",0,"newinstance,ptmxmode=0666,max=1"));
+        int pin=open("/tmp/pts-limit/ptmx",O_PATH|O_CLOEXEC); assert(pin>=0);
+        assert(!entries(path));
+        int master=open("/tmp/pts-limit/ptmx",O_RDWR|O_NOCTTY|O_CLOEXEC);
+        /* Host-native numbering may have already occupied index zero. */
+        if (master>=0) {
+            unsigned index; assert(!ioctl(master,TIOCGPTN,&index) && !index);
+            int duplicate=dup(master); assert(duplicate>=0); close(master);
+            assert(open("/tmp/pts-limit/ptmx",O_RDWR|O_NOCTTY)==-1 && errno==ENOSPC);
+            close(duplicate);
+        } else assert(errno==ENOSPC);
+        assert(!entries(path));
+        close(pin);
+        assert(!umount2(path,0));
+    }
+    assert(!rmdir(path));
 }
 static void ownership(void) {
     struct stat st;
@@ -98,9 +133,10 @@ int test_devpts_guest(int pid_namespace) {
     }
     assert(!unshare(CLONE_NEWNS));
     assert(!mkdir("/tmp/pts-a",0700) && !mkdir("/tmp/pts-b",0700));
-    assert(!mount("devpts","/tmp/pts-a","devpts",MS_NOSUID|MS_NOEXEC,"newinstance,ptmxmode=0666,mode=620"));
+    assert(!mount("devpts","/tmp/pts-a","devpts",MS_NOSUID|MS_NOEXEC,"newinstance,ptmxmode=0666,mode=620,max=1048576"));
     assert(!mount("devpts","/tmp/pts-b","devpts",MS_NOSUID|MS_NOEXEC,"newinstance,ptmxmode=0666,mode=600"));
     assert(!entries("/tmp/pts-a") && !entries("/tmp/pts-b"));
+    limits();
     ownership();
     int master=open("/tmp/pts-a/ptmx",O_RDWR|O_NOCTTY|O_CLOEXEC); assert(master>=0);
     unsigned index; assert(!ioctl(master,TIOCGPTN,&index));

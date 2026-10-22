@@ -16,6 +16,10 @@ import queue
 import time
 import traceback
 
+client = next((path for name in ('squashfuse_ll', 'squashfuse', 'snapfuse')
+               if (path := shutil.which(name))), None)
+assert client, 'Install the distribution squashfuse package'
+print('FUSE squashfs client:', client, flush=True)
 work = Path(tempfile.mkdtemp(prefix='md-fuse-squashfs-'))
 work.chmod(0o755)
 source, mount = work / 'source', work / 'mount'
@@ -31,7 +35,8 @@ content = bytes(range(256)) * 1024
 shutil.copy2('/usr/bin/true', source / 'program')
 shutil.copy2('/usr/bin/id', source / 'identity')
 (source / 'identity').chmod(0o4755)
-shutil.copy2('/usr/lib/libm.so.6', source / 'library.so')
+libm = Path(subprocess.check_output(['cc', '-print-file-name=libm.so.6'], text=True).strip()).resolve(strict=True)
+shutil.copy2(libm, source / 'library.so')
 (source / 'script').write_text('#!/bin/sh\nprintf "fuse-script-ok\\n"\n')
 (source / 'script').chmod(0o755)
 (source / 'sourced').write_text('if :; then\n' + '# padding to span transport pages\n' * 8192
@@ -57,10 +62,11 @@ subprocess.run(['cc', '-shared', '-fPIC', str(work / 'origin-library.c'),
                 '-o', str(source / 'liborigin.so')], check=True)
 subprocess.run(['cc', str(work / 'origin-program.c'), '-L' + str(source), '-lorigin',
                 '-Wl,-rpath,$ORIGIN', '-o', str(source / 'origin-program')], check=True)
+os.link(source / 'origin-program', source / 'origin-alias')
 subprocess.run(['mksquashfs', str(source), str(work / 'image'), '-noappend',
                 '-processors', '1', '-no-progress'], check=True)
 log = open(work / 'daemon.log', 'w+')
-daemon = subprocess.Popen(['squashfuse_ll', '-f', '-d', '-o', 'ro,allow_other', str(work / 'image'), str(mount)],
+daemon = subprocess.Popen([client, '-f', '-d', '-o', 'ro,allow_other', str(work / 'image'), str(mount)],
                           stdout=log, stderr=log)
 try:
     deadline = time.monotonic() + 15
@@ -70,7 +76,7 @@ try:
         # Bounded mount-state observation, never a readiness settling delay.
         time.sleep(0.02)
     assert mount.stat().st_dev != source.stat().st_dev
-    assert sorted(p.name for p in mount.iterdir()) == ['directory', 'file', 'identity', 'liborigin.so', 'library.so', 'link', 'origin-program', 'program', 'script', 'sourced']
+    assert sorted(p.name for p in mount.iterdir()) == ['directory', 'file', 'identity', 'liborigin.so', 'library.so', 'link', 'origin-alias', 'origin-program', 'program', 'script', 'sourced']
     assert (mount / 'directory' / 'small').read_text() == 'nested\n'
     assert os.readlink(mount / 'link') == 'file'
     print('FUSE exec source', (mount / 'program').stat(), flush=True)
@@ -81,6 +87,10 @@ try:
     clean_env.pop('LD_LIBRARY_PATH', None)
     subprocess.run([str(mount / 'origin-program'), str(mount / 'origin-program')],
                    env=clean_env, check=True)
+    assert (mount / 'origin-alias').stat().st_ino == (mount / 'origin-program').stat().st_ino
+    for name in ('origin-alias', 'origin-program', 'origin-alias'):
+        subprocess.run([str(mount / name), str(mount / name)], env=clean_env, check=True)
+    print('PASS FUSE hardlink exec and reexec retain the selected dentry', flush=True)
     # Admission reads provider metadata, not the sealed executable snapshot's
     # carrier. Exercise it with and without a logical set-ID transition.
     subprocess.run(['mount', '-i', '-o', 'remount,bind,ro,suid', str(mount)], check=True)

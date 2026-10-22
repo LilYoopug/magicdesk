@@ -479,7 +479,7 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
             if (tail) return -ENOTDIR;
             if (nr==SYS_openat) return md_proc_control_reopen(ref.process,ref.descriptor,(int)a[2]&~(O_CREAT|O_EXCL));
             if (nr!=SYS_readlinkat || md_proc_file_namespace((enum md_proc_file_kind)(known-1))) {
-                long result=md_proc_control_metadata(&(struct md_proc_path){.process=ref.process,.descriptor=ref.descriptor},nr,a);
+                long result=md_proc_control_metadata(&ref,nr,a);
                 if (result!=-EXDEV) return result;
             }
         }

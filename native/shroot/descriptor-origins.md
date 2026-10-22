@@ -235,12 +235,13 @@ The direct broker prepares the annotation before atomic ADDFD_SEND, publishes
 the returned FD number, then releases its table turn. An observed shared-table
 mutation cannot overtake that publication. Failed atomic delivery discards the
 prepared annotation, not a guessed descriptor number. Notification ADDFD rejects
-O_PATH. An eligible caller-side native open can acquire its own descriptor, but
-O_PATH|O_NOFOLLOW retains exact descriptor custody: reopening a procfs magic link
-would either open the link itself or lose NOFOLLOW from F_GETFL. The common open
-admission rule therefore routes that combination through task-affine transport.
-An already matching O_PATH pin is duplicated; directory reopening uses its
-retained `/.` target, never a mutable guest name.
+O_PATH. An eligible caller-side native open can acquire its own descriptor.
+O_PATH|O_NOFOLLOW directories use the retained `fd/.` target, with a native
+search-permission check before offering the plan; their F_GETFL flags remain
+unchanged. Non-directories retain exact descriptor custody: reopening a procfs
+magic link would either open the link itself or lose NOFOLLOW. They keep the
+task-affine route, as do directories that cannot admit the extra search.
+An already matching O_PATH pin can be duplicated without another pathname lookup.
 
 Task-affine RPC captures input origins under a short send turn. A launch-local
 exchange ID binds them to the authenticated actor and exact table; wire values

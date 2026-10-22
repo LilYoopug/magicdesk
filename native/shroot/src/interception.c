@@ -93,9 +93,11 @@ extern char md_guest_task_collect[], md_guest_task_collected[];
 extern char md_guest_buffer_admitted[];
 #include "epoll_calls.h"
 #include "poll_calls.h"
+#include "clone_call.h"
 static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, unsigned long a1, unsigned long a2,
-        unsigned long a3, unsigned long a4, unsigned long a5) {
+        unsigned long a3, unsigned long a4, unsigned long a5, int control) {
     unsigned long args[] = {a0, a1, a2, a3, a4, a5};
+    if (nr==SYS_clone3) return md_clone3_prepare(a0,a1);
     if (nr==SYS_epoll_ctl || nr==SYS_epoll_pwait || nr==SYS_epoll_pwait2) return md_epoll_call(nr,args);
     if (nr==SYS_ppoll || nr==SYS_pselect6) return md_poll_call(nr,args);
     if (nr==SYS_seccomp || nr==SYS_prctl) {
@@ -108,13 +110,11 @@ static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, un
     if (nr==SYS_ioctl && md_pidfd_namespace_command((unsigned)a1)) return md_pidfd_namespace(args);
     if (nr==SYS_ioctl && md_terminal_identity_command((unsigned)a1))
         return md_pid_terminal(args);
-    if (nr==SYS_read || nr==SYS_write || nr==SYS_readv || nr==SYS_writev
+    if (control>=0 && (nr==SYS_read || nr==SYS_write || nr==SYS_readv || nr==SYS_writev
             || nr==SYS_pread64 || nr==SYS_pwrite64 || nr==SYS_preadv || nr==SYS_pwritev
             || nr==SYS_preadv2 || nr==SYS_pwritev2 || nr==SYS_lseek || nr==SYS_ioctl || nr==SYS_splice
-            || nr==SYS_ftruncate || nr==SYS_fsync || nr==SYS_fdatasync || nr==SYS_mmap) {
-        long result=md_proc_control_call(nr,args);
-        if (result!=MD_CALL_NATIVE) return result;
-    }
+            || nr==SYS_ftruncate || nr==SYS_fsync || nr==SYS_fdatasync || nr==SYS_mmap || nr==SYS_getdents64))
+        return md_proc_control_call(nr,args,control);
     if (nr==SYS_ioctl && md_terminal_attributes_command((unsigned)a1))
         return md_terminal_attributes(args);
     if (nr==SYS_ioctl && md_filesystem_ioctl_command((unsigned)a1))
@@ -158,10 +158,10 @@ static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, un
 /* A syscall's filesystem selection is task-local even with CLONE_VM and
  * independently unshared CLONE_FS. Ordinary launches do not copy md_fs. */
 __attribute__((noinline)) static long dispatch_scoped(long nr, unsigned long a0, unsigned long a1,
-        unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5) {
+        unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5, int control) {
     struct md_fs fs = md_files;
     fs.managed_paths = 1;
-    return dispatch_files(&fs, nr, a0, a1, a2, a3, a4, a5);
+    return dispatch_files(&fs, nr, a0, a1, a2, a3, a4, a5, control);
 }
 long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned long a2,
         unsigned long a3, unsigned long a4, unsigned long a5, unsigned scoped) {
@@ -191,8 +191,9 @@ long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned lon
         unsigned long args[]={a0,a1,a2,a3,a4,a5};
         return md_socket_pair(&fs,args,1);
     }
-    return (scoped&MD_DISPATCH_PATHS) ? dispatch_scoped(nr,a0,a1,a2,a3,a4,a5)
-        : dispatch_files(&md_files,nr,a0,a1,a2,a3,a4,a5);
+    int control=md_dispatch_control_kind(scoped);
+    return (scoped&MD_DISPATCH_PATHS) ? dispatch_scoped(nr,a0,a1,a2,a3,a4,a5,control)
+        : dispatch_files(&md_files,nr,a0,a1,a2,a3,a4,a5,control);
 }
 #include "cooperative_native.h"
 #include "svc_runtime.h"
@@ -346,7 +347,7 @@ int md_interception_install(int inherited) {
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_ENTER_IMAGE, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-            DESCRIPTOR(clone) OBSERVE(clone3) OBSERVE(chroot)
+            DESCRIPTOR(clone) DESCRIPTOR(clone3) OBSERVE(chroot)
             MD_FD_CLOSE_FILTER,
             MD_DOMAIN_FD_CALLS(DESCRIPTOR)
             /* Descriptor commands use the kernel's unsigned-int argument. */

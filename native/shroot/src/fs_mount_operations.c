@@ -394,7 +394,6 @@ static void inode(struct md_filesystem *fs, struct md_mount_namespace *view, str
 }
 static void inode_selected(struct md_filesystem *fs, const struct md_fs_request *q,
         const struct md_view_location *a, struct md_fs_result *out, const struct md_fs_output *output) {
-    if (output && output->native_open_plan) { out->error=-EXDEV; return; }
     struct md_fs_request local=*q;
     local.directory[0]=a->fd; local.path[0]=NULL; local.origin[0]=NULL;
     local.directory[1]=-1; local.path[1]=NULL; local.origin[1]=NULL; local.resolve=0;
@@ -438,17 +437,7 @@ static void inode_selected(struct md_filesystem *fs, const struct md_fs_request 
     struct md_filesystem owner=*fs; owner.mounts=a->view;
     struct md_view_object *object=NULL;
     int r=a->view!=fs->mounts ? -ENOENT : md_view_record(&owner,a->fd,a->mount,&object);
-    /* Named lookup already selected the dentry. Reconstructing the final
-     * component from its inode loses hardlink identity unnecessarily. */
-    if (!r && strcmp(a->name,".")) {
-        r=md_view_path(fs,a->parent,a->mount,identity->path,sizeof(identity->path));
-        if (!r) {
-            size_t length=strlen(identity->path);
-            int n=snprintf(identity->path+length,sizeof(identity->path)-length,"%s%s",
-                length==1 ? "" : "/",a->name);
-            if (n<0 || (size_t)n>=sizeof(identity->path)-length) r=-ERANGE;
-        }
-    } else if (!r) r=md_view_path(fs,a->fd,a->mount,identity->path,sizeof(identity->path));
+    if (!r) r=md_view_location_path(fs,a,identity->path,sizeof(identity->path));
     if (!r) {
         memcpy(identity->object,object->id,sizeof(identity->object));
         out->size=offsetof(struct md_image_identity,path)+strlen(identity->path)+1;
@@ -513,6 +502,20 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
         struct stat existing;
         if (a->fd >= 0 && fstat(a->fd, &existing)) { r = -errno; break; }
         if (a->fd>=0 && (r=device_open(a->mount,flags,existing.st_mode))) break;
+        if (output && output->native_open_plan) {
+            /* The walker pins the exact native object and its mount policy.
+             * Data-open effects belong to the caller, just as for inode plans.
+             * No creation, typed endpoint or provider operation is speculative. */
+            if (a->fd<0 || !md_open_native_kind(flags,existing.st_mode)) { r=-EXDEV; break; }
+            if ((flags&O_CREAT) && S_ISDIR(existing.st_mode)) { r=-EISDIR; break; }
+            if ((r=md_open_plan_access(a->fd,flags))) break;
+            out->fd=fcntl(a->fd,F_DUPFD_CLOEXEC,3);
+            if (out->fd<0) { r=-errno; break; }
+            out->open_completion=(struct md_open_completion){.kind=MD_OPEN_PLAN,
+                .backing_device=existing.st_dev,.backing_inode=existing.st_ino,.mode=existing.st_mode&S_IFMT};
+            md_view_capture(fs,a->view,a->mount,out,output);
+            break;
+        }
         int fifo = a->fd >= 0 && S_ISFIFO(existing.st_mode);
         if (fifo && q->operation == MD_FS_OPEN_IMAGE) { r = -EACCES; break; }
         if (fifo && (flags & O_CREAT) && (flags & O_EXCL)) { r = -EEXIST; break; }
@@ -795,9 +798,10 @@ paths:;
         if (r==-EINPROGRESS) goto suspended;
         md_view_walk_destroy(pending); pending=NULL;
     }
-    /* Only the inode provider currently produces a side-effect-free open plan.
-     * Do not open a device/control endpoint and then decline its result. */
-    if (!r && output && output->native_open_plan && !md_view_inode(a.mount)) r=-EXDEV;
+    /* Plain native mounts can pin an existing regular file/directory as well.
+     * Typed providers must not open an endpoint and then decline its result. */
+    if (!r && output && output->native_open_plan && !md_view_inode(a.mount)
+            && a.mount->backing!=MD_MOUNT_NATIVE) r=-EXDEV;
     if (!r && pair) {
         operand=1;
         r=pending ? md_view_walk_resume(fs,pending,&b)

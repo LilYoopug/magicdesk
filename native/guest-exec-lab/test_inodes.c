@@ -1462,15 +1462,22 @@ static void native_plans(void) {
     CHECK(md_inode_plan_open(s,-1,"missing",O_CREAT|O_RDWR,0600,0,&completion,1,NULL)==-EXDEV);
     CHECK(md_inode_stat(s,-1,"missing",0,&st)==-ENOENT);
     CHECK(md_inode_plan_open(s,-1,"value",O_TRUNC,0,0,&completion,1,NULL)==-EINVAL);
-    const unsigned directories[]={O_RDONLY,O_DIRECTORY,O_PATH|O_DIRECTORY};
+    const unsigned directories[]={O_RDONLY,O_DIRECTORY,O_PATH|O_DIRECTORY,
+        O_PATH|O_NOFOLLOW,O_PATH|O_DIRECTORY|O_NOFOLLOW};
     for (unsigned i=0;i<sizeof(directories)/sizeof(*directories);++i) {
         int directory=md_inode_plan_open(s,-1,"directory",directories[i],0,0,&completion,1,NULL);
         CHECK(directory>=0 && completion.kind==MD_OPEN_PLAN);
         CHECK(!fstat(directory,&st) && S_ISDIR(st.st_mode));
+        char path[64]; unsigned flags=md_open_plan_path(path,0,(unsigned)directory,directories[i]);
+        int opened=open(path,flags); CHECK(opened>=0);
+        if (directories[i]&O_PATH) CHECK(fcntl(opened,F_GETFL)==(int)directories[i]);
+        close(opened);
         CHECK(!close(directory));
         CHECK(md_inode_plan_open(s,-1,"missing",directories[i],0,0,&completion,1,NULL)==-ENOENT);
     }
     CHECK(md_inode_plan_open(s,-1,"value",O_DIRECTORY,0,0,&completion,1,NULL)==-ENOTDIR);
+    CHECK(md_inode_plan_open(s,-1,"value",O_PATH|O_NOFOLLOW,0,0,&completion,1,NULL)==-EXDEV);
+    CHECK(md_inode_plan_open(s,-1,"link",O_PATH|O_NOFOLLOW,0,0,&completion,1,NULL)==-EXDEV);
     CHECK(md_inode_plan_open(s,-1,"fifo",O_RDONLY,0,0,&completion,1,NULL)==-EXDEV);
     CHECK(!md_inode_read_scope_begin(s));
     CHECK(md_inode_plan_open(s,-1,"fifo",O_RDONLY,0,0,&completion,0,NULL)==-EAGAIN);
@@ -1509,17 +1516,23 @@ static void native_plans(void) {
     CHECK(!md_inode_link(source,-1,"shared",-1,"alias",0));
     CHECK(!md_inode_store_seal(source));
     CHECK(!md_inode_snapshot(source,copy));
+    int selected=md_inode_open(copy,-1,"alias",O_PATH,0); CHECK(selected>=0);
     CHECK(!md_inode_read_scope_begin(copy));
     int spare=fcntl(copy->objects,F_DUPFD_CLOEXEC,0); CHECK(spare>=0 && !close(spare));
     for (unsigned i=0;i<64;++i) {
         CHECK(md_inode_plan_open(copy,-1,"alias",O_CREAT|O_WRONLY|O_TRUNC,0600,0,&completion,1,NULL)==-EAGAIN);
         CHECK(completion.kind==MD_OPEN_NEEDS_WRITE && copy->read_depth==1 && !copy->write_transaction);
+        CHECK(md_inode_plan_reopen(copy,selected,O_WRONLY|O_TRUNC,0,&completion,1)==-EAGAIN);
+        CHECK(completion.kind==MD_OPEN_NEEDS_WRITE && copy->read_depth==1 && !copy->write_transaction);
     }
     CHECK(fcntl(copy->objects,F_DUPFD_CLOEXEC,0)==spare && !close(spare));
     CHECK(!md_inode_read_scope_end(copy));
     CHECK(!md_inode_operation_window_begin(copy));
-    pin=md_inode_plan_open(copy,-1,"alias",O_CREAT|O_WRONLY|O_TRUNC,0600,0,&completion,1,NULL);
+    pin=md_inode_plan_reopen(copy,selected,O_WRONLY|O_TRUNC,0,&completion,1);
     CHECK(pin>=0 && completion.kind==MD_OPEN_PLAN);
+    struct stat physical; CHECK(!fstat(pin,&physical));
+    CHECK(completion.backing_device==(uint64_t)physical.st_dev && completion.backing_inode==(uint64_t)physical.st_ino);
+    close(selected);
     CHECK(!md_inode_stat(copy,-1,"shared",0,&st) && st.st_size==6 && st.st_nlink==2);
     snprintf(proc,sizeof(proc),"/proc/self/fd/%d",pin);
     fd=open(proc,O_WRONLY|O_TRUNC|O_CLOEXEC); CHECK(fd>=0); put(fd,"new"); close(fd); close(pin);
@@ -1529,6 +1542,9 @@ static void native_plans(void) {
     CHECK(!md_inode_read_scope_begin(copy));
     pin=md_inode_plan_open(copy,-1,"shared",O_WRONLY|O_APPEND,0,0,&completion,1,NULL);
     CHECK(pin>=0 && completion.kind==MD_OPEN_PLAN && copy->read_depth==1 && !copy->write_transaction);
+    selected=md_inode_plan_reopen(copy,pin,O_WRONLY|O_APPEND,0,&completion,1);
+    CHECK(selected>=0 && completion.kind==MD_OPEN_PLAN && copy->read_depth==1 && !copy->write_transaction);
+    close(selected);
     close(pin); CHECK(!md_inode_read_scope_end(copy));
     md_inode_store_close(copy); md_inode_store_close(source);
     puts("PASS native open plans: pin identity, deferred write/append/truncate, readonly policy, permissions and pre-effect decline");

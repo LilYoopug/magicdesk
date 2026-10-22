@@ -550,7 +550,10 @@ ownership, denied changes, readonly views and retired FDs. This allows stock
 
 `cgroup.events` publishes recursive `populated` transitions through the shared
 typed watch source. Inotify receives IN_MODIFY; poll/epoll receive POLLPRI and
-POLLERR until the open description rereads the state. Membership, task birth and
+POLLERR until the open description reads the state. A newly opened description
+also starts ready, as kernfs does; dup aliases share that observation, while
+independent opens do not. An unchanged thaw does not manufacture another event.
+Membership, task birth and
 exit update only affected ancestor branches. Moving between sibling groups does
 not publish a false empty parent. Birth publishes the child before the parent
 resumes, including children held at their first stop by a debugger. Removed

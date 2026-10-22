@@ -565,8 +565,9 @@ static void inode_execute(struct md_filesystem *fs,
     case MD_FS_XATTR_OBJECT:
         md_inode_xattr_origin(s,q,out,output,md_fs_anchor_native_leaf(q->origin[0],s,first)); return;
     case MD_FS_REOPEN:
-        r=md_catalogue_reopen(images,s,first,(int)q->flags,!!(q->mode&MD_FS_REOPEN_MUTABLE),&out->open_completion);
-        if (r==-EXDEV && (q->mode&MD_FS_REOPEN_NATIVE)) {
+        r=md_catalogue_reopen(images,s,first,(int)q->flags,!!(q->mode&MD_FS_REOPEN_MUTABLE),
+            &out->open_completion,output && output->origin && output->native_open_plan);
+        if (r==-EXDEV && (q->mode&MD_FS_REOPEN_NATIVE) && !(output && output->native_open_plan)) {
             r=md_reopen_file(first,(int)q->flags,&out->open_completion);
             if ((r==-EACCES || r==-EPERM) && !(q->flags&(O_ACCMODE|O_PATH|O_TRUNC|O_DIRECTORY
                     |O_DIRECT|O_ASYNC|O_NOFOLLOW|O_CREAT|O_EXCL))) {

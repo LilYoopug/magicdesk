@@ -25,6 +25,14 @@ enum { MD_IMAGE_PROGRAM=0, MD_IMAGE_LOADER=1, MD_IMAGE_TAKE_PROGRAM=2, MD_IMAGE_
 #define MD_GUEST_PROC_FILE 0x4d44010b
 enum md_dispatch_policy { MD_DISPATCH_PATHS=1, MD_DISPATCH_NETWORK_SCOPED=2, MD_DISPATCH_OFFLINE_SOCKET=4,
     MD_DISPATCH_NETWORK_CONTROL=8, MD_DISPATCH_NETWORK_DATA=16, MD_DISPATCH_DEVICE_EVENTS=32 };
+/* Upper bits identify the already retained typed OFD; zero means no control.
+ * This is call-local admission, never a cache indexed by a guest FD number. */
+static inline unsigned md_dispatch_control(unsigned policy,int kind) {
+    return policy|((unsigned)(kind+1)<<16);
+}
+static inline int md_dispatch_control_kind(unsigned policy) {
+    return (int)(policy>>16)-1;
+}
 #define MD_GUEST_PID_FILTER 0x4d44010c
 #define MD_GUEST_PID_SIGNAL_GROUP 0x4d44010d
 #define MD_GUEST_PIDFD_SIGNAL 0x4d44010e
@@ -37,6 +45,7 @@ struct md_export_reply { long endpoint; uint64_t token; };
 /* Finish adapter ownership before a native call can block or deliver signals. */
 #define MD_CALL_NATIVE (MD_WATCH_TASK_AFFINE + 2)
 #define MD_IPC_WAIT (MD_WATCH_TASK_AFFINE + 3)
+#define MD_CALL_CLONE (MD_WATCH_TASK_AFFINE + 4)
 
 enum md_interception_kind {
     MD_INTERCEPT_DISPATCH = 41,
@@ -62,7 +71,7 @@ enum { MD_INTERCEPT_CLOSE=0x8000, MD_INTERCEPT_CLOSE_MAX=0x7fff };
  * supervisor reads this descriptor at each image handshake, not linker symbols. */
 struct md_interception_abi {
     uint64_t magic, size;
-    /* dispatch: x0 syscall, x1..x6 arguments, x9 md_dispatch_policy.
+    /* dispatch: x0 syscall, x1..x6 arguments, x9 policy and retained control kind.
      * x7 is reserved by the kernel at ARM64 syscall stops. */
     uintptr_t ready, done, allocate, allocated, dispatch, export_fd, exported;
     uintptr_t done_entry, exported_entry;

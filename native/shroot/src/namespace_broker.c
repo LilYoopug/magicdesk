@@ -666,11 +666,9 @@ static int native_offer(struct operation *op) {
             error=op->custody ? md_fd_origins_prepare_custody(&op->update,op->custody,&op->order) : -ENOMEM;
             if (error) return error;
         }
-        md_descriptor_path(c->native_path,op->owner->process,(unsigned)md_fs_anchor_fd(op->output_origin));
         n->args[0]=(uint64_t)(int64_t)AT_FDCWD;
-        unsigned flags=op->request.flags;
-        if (flags&O_PATH) flags&=O_PATH|O_CLOEXEC|O_DIRECTORY|O_NOFOLLOW;
-        n->args[2]=md_open_endpoint_flags(flags);
+        n->args[2]=md_open_plan_path(c->native_path,op->owner->process,
+            (unsigned)md_fs_anchor_fd(op->output_origin),op->request.flags);
     } else memcpy(n->args,op->notification.data.args,sizeof(n->args));
     if (op->owner->counts) {
         if (n->number==SYS_openat) ++op->owner->native_open;

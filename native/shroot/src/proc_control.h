@@ -7,6 +7,17 @@
 #include <stdint.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
+enum { MD_PROC_IO_VECTORS=1024 };
+static inline int md_proc_io_vector_size(const struct iovec *vectors,unsigned count,size_t *out) {
+    if (count>MD_PROC_IO_VECTORS) return -EINVAL;
+    size_t total=0;
+    for (unsigned i=0;i<count;++i) {
+        if (vectors[i].iov_len>(size_t)PTRDIFF_MAX-total) return -EINVAL;
+        total+=vectors[i].iov_len;
+    }
+    *out=total; return 0;
+}
 struct md_proc_io_spec { int writing, vector, seek, directory, positional, splice, command; int64_t offset; int whence; };
 static inline int md_proc_io_decode(long nr, const unsigned long *a, struct md_proc_io_spec *out) {
     *out=(struct md_proc_io_spec){0};
@@ -55,5 +66,5 @@ long md_proc_control_known(int fd);
 long md_proc_control_reopen(int process, int fd, int flags);
 long md_proc_control_metadata(const struct md_proc_path *, long nr, const unsigned long *);
 long md_proc_control_link_metadata(const struct md_proc_path *, long nr, const unsigned long *,uint64_t mount);
-long md_proc_control_call(long nr, const unsigned long *);
+long md_proc_control_call(long nr, const unsigned long *, int kind);
 #endif

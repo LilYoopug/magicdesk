@@ -60,9 +60,9 @@ long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsign
     if (nr == SYS_openat2) return open_extended(fs, exe, a);
     int descriptor=nr==SYS_fstat || nr==SYS_fstatfs || nr==SYS_fchown || nr==SYS_fchmod
         || nr==SYS_getdents64 || nr==SYS_fchdir || (nr==SYS_utimensat && !a[1]);
-    if (nr==SYS_newfstatat || nr==SYS_statx || nr==SYS_faccessat2 || nr==SYS_fchownat || nr==SYS_fchmodat2) {
+    if (nr==SYS_readlinkat || nr==SYS_newfstatat || nr==SYS_statx || nr==SYS_faccessat2 || nr==SYS_fchownat || nr==SYS_fchmodat2) {
         unsigned index=nr==SYS_statx ? 2 : nr==SYS_fchownat ? 4 : 3;
-        if (a[index]&AT_EMPTY_PATH) {
+        if (nr==SYS_readlinkat || (a[index]&AT_EMPTY_PATH)) {
             char first;
             long error=md_read_memory(&first,(void *)a[1],1);
             if (error<0) return error;
@@ -72,10 +72,10 @@ long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsign
     if (descriptor) {
         long known=md_descriptor_kind((int)a[0]);
         if (known<0) return known;
-        if (known==MD_DESCRIPTOR_ANONYMOUS) return md_descriptor_metadata(fs,(int)a[0],nr,a);
+        if (known==MD_DESCRIPTOR_ANONYMOUS)
+            return nr==SYS_readlinkat ? -EINVAL : md_descriptor_metadata(fs,(int)a[0],nr,a);
         if (known && (known!=MD_DESCRIPTOR_FILESYSTEM || nr==SYS_getdents64)) {
-            long result=nr==SYS_getdents64 ? md_proc_control_call(nr,a)
-                : md_proc_control_metadata(&(struct md_proc_path){.process=(int)RAW0(gettid),.descriptor=(int)a[0]},nr,a);
+            long result=md_proc_control_metadata(&(struct md_proc_path){.process=(int)RAW0(gettid),.descriptor=(int)a[0]},nr,a);
             if (result!=-EXDEV) return result;
         }
     }

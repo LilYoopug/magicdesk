@@ -461,7 +461,7 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
                 if (capture && (scenario==CANCEL_CAPTURE || scenario==REPLACE_PATH)
                         && pid!=child && WIFSTOPPED(status) && event==MD_TASK_CHECKPOINT_EVENT) {
                     struct user_pt_regs r=registers(pid);
-                    if (r.pc==(uintptr_t)helper_return && r.regs[8]==SYS_openat && (long)r.regs[0]>=0) {
+                    if (r.pc==(uintptr_t)helper_return+4 && r.regs[8]==SYS_openat && (long)r.regs[0]>=0) {
                         if (scenario==CANCEL_CAPTURE) {
                             assert(!md_task_helper_detach(helpers,child)); cancelled=1;
                         } else {
@@ -474,7 +474,7 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
                 if ((scenario==CANCEL_EXPORT || scenario==CANCEL_SECOND) && !cancelled && pid!=child && WIFSTOPPED(status)
                         && event==MD_TASK_CHECKPOINT_EVENT) {
                     struct user_pt_regs r=registers(pid);
-                    if (r.pc==(uintptr_t)helper_return && r.regs[8]==SYS_sendmsg) {
+                    if (r.pc==(uintptr_t)helper_return+4 && r.regs[8]==SYS_sendmsg) {
                         ++sent;
                         if (scenario==CANCEL_EXPORT || sent==2) {
                             assert(!md_task_helper_detach(helpers,child)); cancelled=1;
@@ -484,7 +484,7 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
                 if ((scenario==CANCEL_IMPORT || scenario==ANCHOR_CANCEL) && !cancelled && pid!=child && WIFSTOPPED(status)
                         && event==MD_TASK_CHECKPOINT_EVENT) {
                     struct user_pt_regs r=registers(pid);
-                    if (r.pc==(uintptr_t)helper_return && r.regs[8]==SYS_recvmsg) {
+                    if (r.pc==(uintptr_t)helper_return+4 && r.regs[8]==SYS_recvmsg) {
                         assert((long)r.regs[0]==sizeof(uint64_t));
                         assert(!md_task_helper_detach(helpers,child)); cancelled=1;
                     }

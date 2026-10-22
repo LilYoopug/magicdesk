@@ -49,6 +49,57 @@ static void captured_lifetime(struct md_filesystem *fs, const char *parent) {
         assert(fs->mounts->tree->objects==objects && descriptors()==before);
     }
 }
+static void native_open_plans(struct md_filesystem *fs,const char *parent) {
+    char path[PATH_MAX]; snprintf(path,sizeof(path),"%s/planned",parent);
+    int fd=open(path,O_CREAT|O_WRONLY|O_CLOEXEC,0600); assert(fd>=0);
+    assert(write(fd,"plan",4)==4); close(fd);
+    unsigned before=descriptors();
+    for (unsigned flags_index=0;flags_index<3;++flags_index) {
+        unsigned flags=flags_index==0 ? O_RDONLY : flags_index==1 ? O_PATH : O_WRONLY|O_TRUNC;
+        for (unsigned readonly=0;readonly<2;++readonly) {
+            struct md_fs_anchor *origin=NULL;
+            struct md_fs_request q={.operation=MD_FS_OPEN,.directory={-1,-1},
+                .path={readonly ? "/ro/planned" : "/rw/planned",NULL},.flags=flags};
+            struct md_fs_result r;
+            md_fs_execute(fs,&q,&r,&(struct md_fs_output){.origin=&origin,.native_open_plan=1});
+            if (readonly && flags_index==2) { assert(r.error==-EROFS && !origin && r.fd<0); continue; }
+            assert(!r.error && r.fd==-1 && origin && r.open_completion.kind==MD_OPEN_PLAN);
+            assert(md_fs_anchor_policy(origin)&MD_MOUNT_READONLY ? readonly : !readonly);
+            struct stat st; assert(!fstat(md_fs_anchor_fd(origin),&st) && st.st_size==4);
+            assert(r.open_completion.backing_device==(uint64_t)st.st_dev
+                && r.open_completion.backing_inode==(uint64_t)st.st_ino);
+            /* Admission must not perform O_TRUNC. Cancellation only drops pins. */
+            md_fs_anchor_release(origin);
+            assert(descriptors()==before);
+        }
+    }
+    struct md_fs_anchor *origin=NULL;
+    struct md_fs_request q={.operation=MD_FS_OPEN,.directory={-1,-1},
+        .path={"/rw/planned",NULL},.flags=O_RDONLY};
+    struct md_fs_result r;
+    md_fs_execute(fs,&q,&r,&(struct md_fs_output){.origin=&origin,.native_open_plan=1});
+    assert(!r.error && origin);
+    assert(!unlink(path));
+    int opened=md_open_pinned(md_fs_anchor_fd(origin),O_RDONLY); assert(opened>=0);
+    char data[4]; assert(read(opened,data,sizeof(data))==4 && !memcmp(data,"plan",4));
+    close(opened); md_fs_anchor_release(origin);
+    q.path[0]="/rw/missing-plan"; q.flags=O_CREAT|O_RDWR; q.mode=0600;
+    origin=NULL;
+    md_fs_execute(fs,&q,&r,&(struct md_fs_output){.origin=&origin,.native_open_plan=1});
+    assert(r.error==-EXDEV && !origin && r.fd<0);
+    q.flags=O_RDONLY;
+    md_fs_execute(fs,&q,&r,NULL); assert(r.error==-ENOENT);
+    snprintf(path,sizeof(path),"%s/no-search",parent); assert(!mkdir(path,0000));
+    q.path[0]="/rw/no-search"; q.flags=O_PATH|O_NOFOLLOW;
+    md_fs_execute(fs,&q,&r,&(struct md_fs_output){.origin=&origin,.native_open_plan=1});
+    assert(r.error==-EXDEV && !origin && r.fd<0);
+    md_fs_execute(fs,&q,&r,&(struct md_fs_output){.origin=&origin});
+    assert(!r.error && r.fd>=0 && origin && fcntl(r.fd,F_GETFL)==(O_PATH|O_NOFOLLOW));
+    close(r.fd); md_fs_anchor_release(origin);
+    assert(!chmod(path,0700) && !rmdir(path));
+    assert(descriptors()==before);
+    puts("PASS native mount open plans: policy, cancellation, no speculative effects and unlinked identity");
+}
 static void file_aliases(struct md_filesystem *fs, const char *path, int reverse) {
     int created=open(path,O_CREAT|O_WRONLY|O_CLOEXEC,0600); assert(created>=0);
     assert(write(created,"value",5)==5); close(created);
@@ -162,6 +213,7 @@ void test_mount_alias(const char *base) {
     close(ro->source); ro->source=fcntl(rw->source,F_DUPFD_CLOEXEC,3); assert(ro->source>=0);
     ro->native=rw->native;
     captured_lifetime(&fs,host[0]);
+    native_open_plans(&fs,host[0]);
     file_aliases(&fs,files[0],0); file_aliases(&fs,files[0],1); root_aliases(&fs);
     md_fs_mounts_close(&fs); md_inode_store_close(s);
     assert(descriptors()==before);

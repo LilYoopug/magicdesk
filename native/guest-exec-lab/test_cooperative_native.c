@@ -9,6 +9,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
@@ -60,12 +61,18 @@ static void open_admission(void) {
             | (i&4 ? O_NOFOLLOW : 0);
         uint64_t args[]={AT_FDCWD,1,flags,0,0,0};
         for (unsigned birth=0;birth<2;++birth)
-            assert(md_open_native_plan(flags,birth)==!(flags&O_NOFOLLOW));
-        assert(md_entry_native_open(SYS_openat,args)==!(flags&O_NOFOLLOW));
+            assert(md_open_native_plan(flags,birth));
+        assert(md_entry_native_open(SYS_openat,args));
+        assert(md_open_native_kind(flags,S_IFDIR));
+        assert(md_open_native_kind(flags,S_IFREG)==!(flags&O_NOFOLLOW));
+        assert(!md_open_native_kind(flags,S_IFLNK));
+        char path[64];
+        unsigned opened=md_open_plan_path(path,123,456,flags);
+        assert(opened==flags && !strcmp(path,flags&O_NOFOLLOW ? "/proc/123/fd/456/." : "/proc/123/fd/456"));
     }
     assert(md_open_native_plan(O_RDONLY|O_NOFOLLOW,0));
     assert(md_open_native_plan(O_CREAT|O_EXCL|O_RDWR,1));
-    puts("PASS native open admission: exact O_PATH NOFOLLOW custody, ordinary plans unchanged");
+    puts("PASS native open admission: directory NOFOLLOW plans, exact non-directory custody and source flags");
 }
 
 static unsigned descriptors(void) {

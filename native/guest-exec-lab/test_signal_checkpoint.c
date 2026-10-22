@@ -1030,6 +1030,13 @@ static long task_trace(int request,pid_t pid,void *address,void *data) {
     return ptrace(request,pid,address,data);
 }
 static int checkpoint_restricted;
+static unsigned checkpoint_register_reads,checkpoint_register_writes,checkpoint_event_reads;
+static long checkpoint_trace(int request,pid_t pid,void *address,void *data) {
+    if (request==PTRACE_GETREGSET && (uintptr_t)address==NT_PRSTATUS) ++checkpoint_register_reads;
+    if (request==PTRACE_SETREGSET && (uintptr_t)address==NT_PRSTATUS) ++checkpoint_register_writes;
+    if (request==PTRACE_GETEVENTMSG) ++checkpoint_event_reads;
+    return ptrace(request,pid,address,data);
+}
 static int checkpoint_policy(pid_t pid) { (void)pid; return checkpoint_restricted; }
 extern char unified_native[],md_guest_buffer_control_checkpoint[];
 __asm__(".text\n.balign 4\n.global unified_native\nunified_native:\nsvc #0\n"
@@ -1059,6 +1066,8 @@ static void unified_checkpoint(int protected,int restricted,int denied,int inval
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|ENOKEY),
             BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,UINT32_MAX,0,1),
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_PROCESS),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_write,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|73),
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
         };
         struct sock_fprog program={sizeof(code)/sizeof(*code),code};
@@ -1078,23 +1087,75 @@ static void unified_checkpoint(int protected,int restricted,int denied,int inval
     gate.regs[23]=(uintptr_t)output; gate.regs[24]=(uintptr_t)(output+1);
     gate.regs[25]=invalid_number ? UINT64_MAX : SYS_gettid;
     checkpoint_restricted=restricted;
-    struct md_task_checkpoints runtime={.trace=task_trace,.restricted=checkpoint_policy,.marker=checkpoint_site,
+    struct md_task_checkpoints runtime={.trace=checkpoint_trace,.restricted=checkpoint_policy,.marker=checkpoint_site,
         .begin=(uintptr_t)unified_native,.end=(uintptr_t)unified_native+16};
     struct iovec io={&gate,sizeof(gate)};
     assert(!md_task_checkpoint_trace(&runtime,PTRACE_SETREGSET,pid,(void *)NT_PRSTATUS,&io));
     assert(!md_task_checkpoint_trace(&runtime,PTRACE_CONT,pid,NULL,NULL));
-    int status;
+    unsigned writes=checkpoint_register_writes;
+    int status,native_stops=0;
     for (unsigned stops=0;;++stops) {
         assert(stops<16 && waitpid(pid,&status,0)==pid && WIFSTOPPED(status));
         int owned=md_task_checkpoint_event(&runtime,pid,&status);
         assert(owned>=0);
         if (owned) continue;
+        if ((unsigned)status>>16==PTRACE_EVENT_SECCOMP) {
+            assert(!denied && !native_stops++);
+            unsigned reads=checkpoint_register_reads,events=checkpoint_event_reads;
+            struct user_pt_regs actual=registers(pid),delivered;
+            unsigned long cookie=0;
+            io=(struct iovec){&delivered,sizeof(delivered)};
+            if (protected) {
+                uint64_t mask;
+                assert(!md_task_checkpoint_trace(&runtime,PTRACE_GETSIGMASK,pid,(void *)sizeof(mask),&mask));
+            }
+            /* Both consumer orders retain exactly the same kernel stop. */
+            if (invalid_number) assert(!md_task_checkpoint_trace(&runtime,PTRACE_GETREGSET,pid,(void *)NT_PRSTATUS,&io));
+            assert(!md_task_checkpoint_trace(&runtime,PTRACE_GETEVENTMSG,pid,NULL,&cookie));
+            if (!invalid_number) assert(!md_task_checkpoint_trace(&runtime,PTRACE_GETREGSET,pid,(void *)NT_PRSTATUS,&io));
+            assert(cookie==73 && !memcmp(&actual,&delivered,sizeof(actual)));
+            assert(checkpoint_register_reads==reads+protected && checkpoint_event_reads==events+protected);
+            assert(!md_task_checkpoint_trace(&runtime,PTRACE_GETEVENTMSG,pid,NULL,&cookie));
+            assert(cookie==73 && checkpoint_event_reads==events+protected+1);
+            assert(!md_task_checkpoint_trace(&runtime,PTRACE_GETREGSET,pid,(void *)NT_PRSTATUS,&io));
+            assert(checkpoint_register_reads==reads+protected+1 && !memcmp(&actual,&delivered,sizeof(actual)));
+            assert(!md_task_checkpoint_trace(&runtime,PTRACE_CONT,pid,NULL,NULL));
+            continue;
+        }
         assert((unsigned)status>>16==MD_TASK_CHECKPOINT_EVENT); break;
     }
+    assert(native_stops==!denied);
     struct user_pt_regs observed=registers(pid);
-    assert(observed.pc==(uintptr_t)md_guest_buffer_control_checkpoint && observed.regs[7]==saved.regs[7]);
+    assert(observed.pc==(uintptr_t)md_guest_buffer_control_checkpoint+4 && observed.regs[7]==saved.regs[7]);
+    /* Only replay of the native call needs a register write, never the marker. */
+    assert(checkpoint_register_writes==writes+restricted);
     assert(observed.regs[8]==SYS_gettid);
     assert((long)observed.regs[0]==(denied ? -ENOKEY : 1));
+    unsigned reads=checkpoint_register_reads;
+    struct user_pt_regs delivered;
+    if (protected && restricted) {
+        /* An intervening register write must never expose the old stop. */
+        observed.regs[9]^=0x1234;
+        io=(struct iovec){&observed,sizeof(observed)};
+        assert(!md_task_checkpoint_trace(&runtime,PTRACE_SETREGSET,pid,(void *)NT_PRSTATUS,&io));
+    } else if (protected) {
+        uint64_t mask;
+        assert(!md_task_checkpoint_trace(&runtime,PTRACE_GETSIGMASK,pid,(void *)sizeof(mask),&mask));
+    } else if (restricted) {
+        /* Partial regsets retain the kernel's own size/error semantics. */
+        io=(struct iovec){&delivered,sizeof(delivered.regs[0])};
+        assert(!md_task_checkpoint_trace(&runtime,PTRACE_GETREGSET,pid,(void *)NT_PRSTATUS,&io));
+        assert(io.iov_len==sizeof(delivered.regs[0]) && delivered.regs[0]==observed.regs[0]);
+        assert(checkpoint_register_reads==++reads);
+    }
+    io=(struct iovec){&delivered,sizeof(delivered)};
+    assert(!md_task_checkpoint_trace(&runtime,PTRACE_GETREGSET,pid,(void *)NT_PRSTATUS,&io));
+    assert(io.iov_len==sizeof(delivered) && !memcmp(&delivered,&observed,sizeof(delivered)));
+    assert(checkpoint_register_reads==reads+(protected || restricted));
+    reads=checkpoint_register_reads;
+    /* Even an unchanged stop is handed off at most once. */
+    assert(!md_task_checkpoint_trace(&runtime,PTRACE_GETREGSET,pid,(void *)NT_PRSTATUS,&io));
+    assert(checkpoint_register_reads==reads+1 && !memcmp(&delivered,&observed,sizeof(delivered)));
     assert(output[0]==(denied ? -ENOKEY : 1) && !output[1]);
     char bytes[2];
     if (!denied) assert(read(data[0],bytes,2)==1 && bytes[0]=='q');

@@ -2,6 +2,7 @@
 #define MD_FILE_OPEN_H
 #include <fcntl.h>
 #include <stdint.h>
+#include <sys/stat.h>
 
 /* A deferred pin is an authorized O_PATH descriptor, not a data endpoint.
  * FIFO rendezvous and terminal acquisition finish outside the filesystem
@@ -16,13 +17,16 @@ static inline int md_open_readonly_plan(unsigned flags) {
  * custody. Keep offer, provider and execution-window admission in agreement. */
 static inline int md_open_native_plan(unsigned flags,int birth) {
     if (birth) flags&=~O_EXCL;
-    /* Reopening a pin crosses a procfs magic link. O_PATH|O_NOFOLLOW must
-     * transfer the exact descriptor instead, preserving its F_GETFL value. */
-    if (flags&O_PATH) return !(flags&O_NOFOLLOW);
+    /* The provider additionally checks kind: NOFOLLOW metadata opens can
+     * reopen directories through fd/. without changing their status flags. */
+    if (flags&O_PATH) return 1;
     return (flags&(O_CREAT|O_EXCL))!=(O_CREAT|O_EXCL)
         && (flags&O_ACCMODE)!=O_ACCMODE && !(flags & ~(O_ACCMODE | O_CLOEXEC
         | O_NOFOLLOW | O_LARGEFILE | O_APPEND | O_TRUNC | O_NONBLOCK | O_NOCTTY
         | O_NOATIME | O_SYNC | O_DSYNC | O_DIRECT | O_CREAT | O_DIRECTORY));
+}
+static inline int md_open_native_kind(unsigned flags,unsigned mode) {
+    return S_ISDIR(mode) || (S_ISREG(mode) && (flags&(O_PATH|O_NOFOLLOW))!=(O_PATH|O_NOFOLLOW));
 }
 struct md_open_completion {
     enum md_open_kind kind;
@@ -48,6 +52,11 @@ int md_reopen_file(int fd, int flags, struct md_open_completion *);
 int md_open_pinned(int fd, int flags);
 /* Positive pid selects another process; zero names the calling process. */
 void md_descriptor_path(char path[64], unsigned pid, unsigned fd);
+/* Only after native-plan kind admission; returns the matching open flags. */
+unsigned md_open_plan_path(char path[64], unsigned pid, unsigned fd, unsigned flags);
+/* fd/. additionally needs native directory search permission. Decline before
+ * publication when the exact-descriptor route is required instead. */
+int md_open_plan_access(int fd, unsigned flags);
 static inline int md_open_endpoint_flags(int flags) {
     return flags & ~(O_CREAT | O_EXCL | O_NOFOLLOW);
 }

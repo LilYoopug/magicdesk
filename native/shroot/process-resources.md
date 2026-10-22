@@ -38,6 +38,25 @@ See [namespace execution](namespace-execution.md) for the launch filesystem and
 | Guest Networking | [networking.md](networking.md) |
 | Resource Ownership Verification | [resource-tests.md](resource-tests.md) |
 
+## Clone Admission
+
+Legacy `clone` and versioned `clone3` use the same resource, PID, file-table and
+application-filter admission. `clone_call` copies and validates the `clone3`
+argument structure in the caller, including protected processes. The original
+application memory is unchanged. Only implemented namespace flags and
+`CLONE_UNTRACED` are removed from the private kernel argument copy; the kernel
+still creates the task at its original syscall site and requested child stack.
+The existing signal shield covers preparation and replay, then restores the
+application mask immediately before kernel creation so the child inherits it.
+Denied or failed creation releases the same reservations and shield.
+
+`set_tid` allocation and `CLONE_INTO_CGROUP` remain explicit `EOPNOTSUPP` cases;
+host PID or cgroup identities must not substitute for guest ones. Clone-created
+pidfds support native wait/poll, but their logical descriptor annotation is not
+yet complete. `test_clone3.py` covers Base and lazy entry, fork/vfork/thread
+stacks, TID writes, pidfd wait, protected callers, namespace birth, seccomp
+denial and signal-handler reentry with unchanged parent/child masks.
+
 ## Process Limits
 
 `process_limits` owns guest `RLIMIT_NPROC`, `RLIMIT_NOFILE` and real-UID/user-namespace task counters

@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "inode_internal.h"
 #include "inode_watch.h"
+#include "inode_view.h"
 #include "watch_source.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -126,6 +127,31 @@ static void provider_lifetime(struct md_inode_store *s) {
     close(b); CHECK(!md_inode_watch_pump(s) && md_inode_watch_pollfd(s)==-1);
     puts("PASS shared provider lifetime: mask updates, last close/remove/oneshot, re-registration and unmount");
 }
+static void collected_view_journal(const char *base) {
+    char path[PATH_MAX]; snprintf(path,sizeof(path),"%s/collected",base);
+    struct md_inode_store *s,*writer,*view=NULL;
+    CHECK(!md_inode_store_open(path,1,&s) && !md_inode_store_open(path,0,&writer));
+    int root=md_inode_open(s,-1,"/",O_PATH|O_DIRECTORY,0); CHECK(root>=0);
+    int reader=md_inode_watch_create(s,IN_NONBLOCK|IN_CLOEXEC); CHECK(reader>=0);
+    int wd=md_inode_watch_add(s,reader,root,IN_CREATE); CHECK(wd>0);
+    logical_create(writer,"/before");
+    CHECK(!md_inode_view_create(writer,MD_FILESYSTEM_OVERLAY,&view));
+    logical_create(view,"/temporary");
+    logical_create(writer,"/after");
+    md_inode_store_close(view);
+    CHECK(!mdi_begin(writer,1));
+    CHECK(!mdi_views_collect(writer));
+    CHECK(!mdi_commit(writer,0));
+    union { struct inotify_event align; char bytes[1024]; } bytes;
+    ssize_t length=md_inode_watch_read(s,reader,bytes.bytes,sizeof(bytes.bytes),NULL,NULL);
+    CHECK(length==64);
+    const struct inotify_event *first=(void *)bytes.bytes,*second=(void *)(bytes.bytes+32);
+    CHECK(first->wd==wd && first->mask==IN_CREATE && !strcmp(first->name,"before"));
+    CHECK(second->wd==wd && second->mask==IN_CREATE && !strcmp(second->name,"after"));
+    CHECK(md_inode_watch_read(s,reader,bytes.bytes,sizeof(bytes.bytes),NULL,NULL)==-EAGAIN);
+    close(reader); close(root); md_inode_store_close(writer); md_inode_store_close(s);
+    puts("PASS overlay collection retains journal continuity without unrelated overflow");
+}
 int main(int argc, char **argv) {
     CHECK(argc == 2);
     sigset_t mask; sigemptyset(&mask); sigaddset(&mask, SIGPIPE); CHECK(!sigprocmask(SIG_BLOCK, &mask, NULL));
@@ -189,5 +215,6 @@ int main(int argc, char **argv) {
     provider_lifetime(s);
     md_inode_store_close(writer); md_inode_store_close(s);
     native_transitions(argv[1]);
+    collected_view_journal(argv[1]);
     return 0;
 }

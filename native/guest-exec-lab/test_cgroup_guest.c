@@ -162,7 +162,19 @@ static void population_events(void) {
     int fd=open("/tmp/cgv2/events/cgroup.events",O_RDONLY|O_CLOEXEC); assert(fd>=0);
     int ep=epoll_create1(EPOLL_CLOEXEC); assert(ep>=0);
     struct epoll_event event={.events=EPOLLPRI,.data.fd=fd};
-    assert(!epoll_ctl(ep,EPOLL_CTL_ADD,fd,&event)); event_state(fd,0);
+    assert(!epoll_ctl(ep,EPOLL_CTL_ADD,fd,&event));
+    /* New kernfs OFDs are ready before any change, including a no-op thaw. */
+    assert(writing("/tmp/cgv2/events/cgroup.freeze","0")==1);
+    assert(epoll_wait(ep,&event,1,0)==1 && (event.events&(EPOLLPRI|EPOLLERR))==(EPOLLPRI|EPOLLERR));
+    int alias=dup(fd); assert(alias>=0);
+    event_state(alias,0); close(alias);
+    assert(!epoll_wait(ep,&event,1,0));
+    int separate=open("/tmp/cgv2/events/cgroup.events",O_RDONLY|O_CLOEXEC); assert(separate>=0);
+    struct pollfd fresh={.fd=separate,.events=POLLPRI};
+    assert(poll(&fresh,1,0)==1 && (fresh.revents&POLLPRI));
+    assert(!epoll_wait(ep,&event,1,0));
+    event_state(separate,0); close(separate);
+    assert(writing("/tmp/cgv2/events/cgroup.freeze","0")==1);
     assert(!epoll_wait(ep,&event,1,0));
     assert(writing("/tmp/cgv2/events/leaf/cgroup.procs","0")==1);
     assert(events_read(watch,first,second)==3);

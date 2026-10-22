@@ -747,6 +747,16 @@ int test_namespace_handles_guest(void) {
         assert(!strcmp(label,expected));
         assert(open(path,O_WRONLY)<0 && errno==EACCES);
         assert(open(path,O_RDONLY|O_NOFOLLOW)<0 && errno==ELOOP);
+        int linkfd=open(path,O_PATH|O_NOFOLLOW|O_CLOEXEC); assert(linkfd>=0);
+        assert(!fstat(linkfd,&value) && S_ISLNK(value.st_mode));
+        n=readlinkat(linkfd,"",label,sizeof(label)-1); assert(n>0); label[n]=0;
+        assert(!strcmp(label,expected));
+        assert(readlinkat(linkfd,"",label,1)==1 && label[0]==expected[0]);
+        assert(readlinkat(linkfd,"",label,0)<0 && errno==EINVAL);
+        int linkcopy=dup(linkfd); assert(linkcopy>=0); close(linkfd);
+        n=readlinkat(linkcopy,"",label,sizeof(label)-1); assert(n>0); label[n]=0;
+        assert(!strcmp(label,expected)); close(linkcopy);
+        assert(readlinkat(fds[i],"",label,sizeof(label))<0 && errno==EINVAL);
         int type=ioctl(fds[i],NS_GET_NSTYPE);
         if (type!=types[i]) fprintf(stderr,"namespace %s ioctl type=%d errno=%d expected=%d\n",names[i],type,errno,types[i]);
         assert(type==types[i]);

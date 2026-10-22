@@ -96,6 +96,7 @@ struct opened {
     struct md_identity opener;
     struct md_watch_listener *listener;
     uint64_t observed;
+    int sampled;
 };
 static void group_event(struct md_cgroup_view *v,struct group *g,unsigned mask) {
     ++g->generation;
@@ -615,7 +616,9 @@ static long control_read(void *ctx,const struct md_control_actor *actor,void *da
     }
     if (ferror(stream)) error=-EIO;
     if (fclose(stream) && !error) error=-errno;
-    if (!error && o->file==EVENTS && !offset && size) o->observed=o->group->generation;
+    if (!error && o->file==EVENTS && !offset && size) {
+        o->observed=o->group->generation; o->sampled=1;
+    }
     pthread_mutex_unlock(&v->world->lock);
     if (!error) {
         if ((uint64_t)offset>=length) size=0;
@@ -710,7 +713,8 @@ static long events_poll(void *ctx) {
     struct md_watch_event event;
     if (o->listener) while (md_watch_listener_next(o->listener,&event)) {}
     long result=POLLIN|POLLRDNORM;
-    if (o->observed!=o->group->generation) result|=POLLPRI|POLLERR;
+    /* Like kernfs, a new OFD is ready until its first read samples the state. */
+    if (!o->sampled || o->observed!=o->group->generation) result|=POLLPRI|POLLERR;
     if (retired(o)) result|=POLLHUP|POLLERR;
     pthread_mutex_unlock(&o->view->world->lock); return result;
 }
@@ -758,7 +762,7 @@ int md_cgroup_open(struct md_cgroup_view *v,int fd,int flags,const struct md_ide
             else {
                 atomic_init(&o->refs,1); o->view=md_cgroup_retain(v); o->group=g; o->file=file;
                 o->namespace=md_cgroup_namespace_retain(ns); o->opener=md_identity_copy(id);
-                o->stat=g->files[file]; o->observed=g->generation;
+                o->stat=g->files[file];
                 o->next=g->opened; g->opened=o;
                 o->origin=md_fs_anchor_retain(origin); *out=&ops[file==EVENTS ? 2 : v->devices]; *context=o;
             }

@@ -21,8 +21,11 @@ Java class name or environment-variable switch selects an implementation.
 The bootstrap also publishes an optional [cooperative entry](cooperative-entry.md)
 for source-level callers. It reuses the same worker and execution context;
 unmodified and filtered code retain their original SVC paths.
-The dispatch gate receives policy in x9 and moves it to the C argument register
-in userspace. It does not rely on changing x7 at an ARM64 syscall stop: the
+The dispatch gate receives policy and the retained typed-descriptor kind in x9
+and moves them to the C argument register in userspace. Descriptor classification
+belongs to the supervisor's ordered OFD capture; the adapter does not ask for
+the same classification again or cache guest FD numbers. It does not rely on
+changing x7 at an ARM64 syscall stop: the
 [kernel restores that register](https://github.com/torvalds/linux/blob/v5.15/arch/arm64/kernel/ptrace.c#L1694-L1726)
 after the stop. Notification cancellation, ordinary
 seccomp entry and debugger syscall stepping share this entry contract.
@@ -135,10 +138,21 @@ control capacity. They are leased lazily and returned on task retirement.
 filesystem, SysV packet and shared-memory metadata views. Filesystem requests
 clear only their bounded header, not the entire payload capacity. SysV calls
 return their slot before blocking; their inotify watcher remains supervisor-owned.
+Typed descriptor IO without an input payload acquires its buffer and begins the
+operation in one request. Buffer exhaustion retains no OFD turn; ordinary pool
+release resumes admission. Provider completion returns both the result and the
+leased address, including interrupted or failed IO that still needs cleanup.
+Typed descriptor IO combines its final copy acknowledgement, buffer release
+and syscall completion in one checkpoint. Intermediate pages retain the OFD turn
+and buffer; the last acknowledgement commits only confirmed bytes before releasing
+the slot. Acknowledgement and cleanup errors retain their original precedence,
+including partial reads. Both terminal IO and ordinary adapter returns use the
+same completion owner for signal/debugger state, registers and scratch-stack
+retirement. This transport is shared by proc files, FUSE and other virtual devices.
 
 All guest filesystem operations, including opens/reopens and root changes, use this
 transport before admission when their inputs can be captured. The task-local
-path uses immutable BRK gates to lease, submit and release a slot after copying
+path uses signal-neutral control checkpoints to lease, submit and release a slot after copying
 the result. No temporary guest FD, socket, mmap or pool allocation is needed per
 call. Each admitted request owns one host allocation, a pinned output slot and a
 captured filesystem context. Requests copy both validated paths, scalar fields

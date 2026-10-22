@@ -1148,6 +1148,14 @@ static void filesystem_operations(void) {
     assert(direct6(SYS_mkdirat,AT_FDCWD,(uintptr_t)directory,0700,0,0,0)==-EEXIST);
     int base=direct6(SYS_openat,AT_FDCWD,(uintptr_t)directory,O_DIRECTORY|O_RDONLY|O_CLOEXEC,0,0,0);
     assert(base>=0);
+    for (unsigned i=0;i<4;++i) {
+        unsigned flags=O_PATH|O_NOFOLLOW|(i&1 ? O_DIRECTORY : 0)|(i&2 ? O_CLOEXEC : 0);
+        int pin=direct6(SYS_openat,base,(uintptr_t)".",flags,0,0,0);
+        assert(pin>=0 && fcntl(pin,F_GETFL)==(int)(flags&~O_CLOEXEC)
+            && fcntl(pin,F_GETFD)==(flags&O_CLOEXEC ? FD_CLOEXEC : 0));
+        struct stat a,b; assert(!fstat(base,&a) && !fstat(pin,&b) && a.st_ino==b.st_ino && a.st_dev==b.st_dev);
+        assert(!direct6(SYS_close,pin,0,0,0,0,0));
+    }
     assert(!direct6(SYS_linkat,AT_FDCWD,(uintptr_t)path,base,(uintptr_t)"linked",0,0));
     assert(!direct6(SYS_symlinkat,(uintptr_t)"linked",base,(uintptr_t)"symlink",0,0,0));
     struct statx sx;

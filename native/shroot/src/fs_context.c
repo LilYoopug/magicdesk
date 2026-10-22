@@ -124,7 +124,8 @@ static int parameter(struct filesystem_context *c,const struct md_fs_request *q)
         known=!strcmp(key,"lowerdir") || !strcmp(key,"upperdir") || !strcmp(key,"workdir") || !strcmp(key,"userxattr");
         expect_string=strcmp(key,"userxattr")!=0; break;
     case MD_FS_MOUNT_DEVPTS:
-        known=!strcmp(key,"mode") || !strcmp(key,"ptmxmode") || !strcmp(key,"uid") || !strcmp(key,"gid") || !strcmp(key,"newinstance");
+        known=!strcmp(key,"mode") || !strcmp(key,"ptmxmode") || !strcmp(key,"uid") || !strcmp(key,"gid")
+            || !strcmp(key,"max") || !strcmp(key,"newinstance");
         expect_string=strcmp(key,"newinstance")!=0; break;
     case MD_FS_MOUNT_CGROUP: known=!strcmp(key,"devices"); expect_string=0; break;
     case MD_FS_MOUNT_CGROUP2: {

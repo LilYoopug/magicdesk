@@ -85,7 +85,7 @@ int md_inode_snapshot(struct md_inode_store *source, struct md_inode_store *empt
 /* Retained FD identity selects its logical object, even after copy-up. Flags
  * select a new descriptor; the caller's original open description is untouched. */
 int md_inode_reopen(struct md_inode_store *, int fd, int flags, int mutable);
-int md_inode_prepare_reopen(struct md_inode_store *, int, int, int, struct md_open_completion *);
+int md_inode_plan_reopen(struct md_inode_store *, int, int, int, struct md_open_completion *, int native_plan);
 int md_inode_create(struct md_inode_store *, int dirfd, const char *path, mode_t mode);
 int md_inode_mkdir(struct md_inode_store *, int dirfd, const char *path, mode_t mode);
 int md_inode_mkfifo(struct md_inode_store *, int dirfd, const char *path, mode_t mode);

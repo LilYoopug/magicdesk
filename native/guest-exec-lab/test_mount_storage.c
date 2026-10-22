@@ -45,6 +45,32 @@ static void contents(struct md_filesystem *fs, const char *path,
     assert(read(fd,data,sizeof(data))==(ssize_t)strlen(text) && !memcmp(data,text,strlen(text)));
     close(fd);
 }
+static void planned(struct md_filesystem *fs,const char *path,unsigned flags,const char *text,int error) {
+    struct md_fs_anchor *origin=NULL;
+    struct md_fs_result r=call(fs,(struct md_fs_request){.operation=MD_FS_OPEN,
+        .directory={-1,-1},.path={path,NULL},.flags=flags},
+        &(struct md_fs_output){.origin=&origin,.native_open_plan=1});
+    assert(r.error==error && r.fd<0);
+    if (error) { assert(!origin); return; }
+    assert(origin && r.open_completion.kind==MD_OPEN_PLAN);
+    struct stat st; assert(!fstat(md_fs_anchor_fd(origin),&st));
+    assert(r.open_completion.backing_device==(uint64_t)st.st_dev
+        && r.open_completion.backing_inode==(uint64_t)st.st_ino);
+    if (flags&O_PATH) {
+        char path[64];
+        unsigned native=md_open_plan_path(path,0,(unsigned)md_fs_anchor_fd(origin),flags);
+        int fd=open(path,native); assert(fd>=0);
+        struct stat actual; assert(!fstat(fd,&actual) && actual.st_ino==st.st_ino && actual.st_dev==st.st_dev);
+        assert(fcntl(fd,F_GETFL)==(int)(flags&~O_CLOEXEC)); close(fd);
+    }
+    if (text) {
+        /* A cancelled truncating open must leave the data untouched. */
+        int fd=md_open_pinned(md_fs_anchor_fd(origin),O_RDONLY); assert(fd>=0);
+        char data[64]; ssize_t n=read(fd,data,sizeof(data)); close(fd);
+        assert(n==(ssize_t)strlen(text) && !memcmp(data,text,(size_t)n));
+    }
+    md_fs_anchor_release(origin);
+}
 static void mount_call(struct md_filesystem *fs, unsigned mode, unsigned flags,
         const char *target, const char *source) {
     struct md_fs_result r=call(fs,(struct md_fs_request){.operation=MD_FS_MOUNT,
@@ -331,6 +357,18 @@ void test_mount_storage(const char *base) {
     mount_call(&fs,MD_FS_MOUNT_BIND,MS_BIND,"/alias","/volume");
     assert(fs.mounts->tree->mounts[0].storage==fs.mounts->tree->mounts[1].storage);
     image_aliases(&fs);
+    planned(&fs,"/volume/value",O_RDONLY,"second",0);
+    planned(&fs,"/alias/value",O_WRONLY|O_TRUNC,"second",0);
+    planned(&fs,"/alias/dir",O_PATH|O_DIRECTORY,NULL,0);
+    planned(&fs,"/alias/dir",O_PATH|O_NOFOLLOW,NULL,0);
+    planned(&fs,"/alias/dir",O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC,NULL,0);
+    planned(&fs,"/alias/value",O_PATH|O_NOFOLLOW,NULL,-EXDEV);
+    planned(&fs,"/alias/program-link",O_PATH|O_NOFOLLOW,NULL,-EXDEV);
+    planned(&fs,"/alias/dir",O_WRONLY,NULL,-EISDIR);
+    planned(&fs,"/alias/value",O_CREAT|O_EXCL|O_WRONLY,NULL,-EEXIST);
+    struct md_identity user=md_identity_new(2000,2000); main->identity=&user;
+    planned(&fs,"/alias/value",O_RDONLY,NULL,-EACCES);
+    main->identity=&root; md_identity_release(&user);
     struct md_fs_anchor *held=NULL;
     fd=opened(&fs,"/alias/dir",O_PATH|O_DIRECTORY,NULL,&held); close(fd);
     watches(&fs,extra);
@@ -348,6 +386,9 @@ void test_mount_storage(const char *base) {
     fd=opened(&copy,"/volume/value",O_WRONLY|O_TRUNC,NULL,NULL);
     assert(write(fd,"shared",6)==6); close(fd); contents(&fs,"/alias/value",NULL,"shared");
     mount_call(&copy,MD_FS_MOUNT_REMOUNT,MS_REMOUNT|MS_BIND|MS_RDONLY,"/volume",NULL);
+    planned(&copy,"/volume/value",O_WRONLY|O_TRUNC,NULL,-EROFS);
+    planned(&copy,"/volume/value",O_RDONLY,"shared",0);
+    planned(&copy,"/alias/value",O_WRONLY|O_TRUNC,"shared",0);
     r=call(&copy,(struct md_fs_request){.operation=MD_FS_OPEN,.directory={-1,-1},
         .path={"/volume/value",NULL},.flags=O_WRONLY},NULL);
     assert(r.error==-EROFS);

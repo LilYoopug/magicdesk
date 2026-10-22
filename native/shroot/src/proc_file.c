@@ -294,10 +294,8 @@ int md_proc_file_task_access(const struct md_identity *id,const struct stat *st,
     if (mode&~7U) return -EINVAL;
     if ((mode&X_OK) && !S_ISDIR(st->st_mode)) return -EACCES;
     if ((mode&W_OK) && S_ISDIR(st->st_mode)) return -EACCES;
-    if (!(mode&W_OK)) return 0;
     struct md_identity actor=md_identity_access(id,effective);
-    if (actor.uid.fs==st->st_uid) return 0;
-    return md_identity_capable_in(&actor,NULL,CAP_DAC_OVERRIDE) ? 0 : -EACCES;
+    return md_file_permissions(st,mode,&actor);
 }
 static void *task_retain(void *context) { return md_proc_file_retain(context); }
 static void task_release(void *context) { md_proc_file_release(context); }

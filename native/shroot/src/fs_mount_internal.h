@@ -173,6 +173,7 @@ int md_view_record(struct md_filesystem *, int fd, struct md_view_mount *, struc
 int md_view_backing_contains(struct md_filesystem *,const struct md_view_mount *,int root,int object);
 int md_view_identity(struct md_filesystem *, int fd, struct md_view_object **);
 int md_view_path(struct md_filesystem *, int fd, struct md_view_mount *, char *, size_t);
+int md_view_location_path(struct md_filesystem *,const struct md_view_location *,char *,size_t);
 int md_view_backing_path(struct md_filesystem *, int fd, const struct md_view_mount *, char *, size_t);
 /* Worker-only publication of an already prepared filesystem. The caller owns
  * mount authorization; failure keeps the source and destination unchanged. */

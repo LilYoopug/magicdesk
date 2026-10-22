@@ -64,6 +64,20 @@ void md_descriptor_path(char path[64], unsigned pid, unsigned fd) {
     prefix="/fd/"; while (*prefix) *path++=*prefix++;
     *decimal(path,fd)=0;
 }
+unsigned md_open_plan_path(char path[64],unsigned pid,unsigned fd,unsigned flags) {
+    md_descriptor_path(path,pid,fd);
+    if (flags&O_PATH) flags&=O_PATH|O_CLOEXEC|O_DIRECTORY|O_NOFOLLOW;
+    if ((flags&(O_PATH|O_NOFOLLOW))==(O_PATH|O_NOFOLLOW)) {
+        char *end=path; while (*end) ++end;
+        *end++='/'; *end++='.'; *end=0;
+        return flags;
+    }
+    return md_open_endpoint_flags(flags);
+}
+int md_open_plan_access(int fd,unsigned flags) {
+    if ((flags&(O_PATH|O_NOFOLLOW))!=(O_PATH|O_NOFOLLOW)) return 0;
+    return C(faccessat2,fd,"",X_OK,AT_EMPTY_PATH|AT_EACCESS,0,0) ? -EXDEV : 0;
+}
 int md_open_pinned(int fd,int flags) {
     char path[64]; md_descriptor_path(path,0,(unsigned)fd);
     if ((flags&(O_PATH|O_NOFOLLOW))==(O_PATH|O_NOFOLLOW)) {
@@ -77,8 +91,7 @@ int md_open_pinned(int fd,int flags) {
         long error=C(fstat,fd,&st,0,0,0,0);
         if (error) return (int)error;
         if (S_ISDIR(st.st_mode)) {
-            char *end=path; while (*end) ++end;
-            *end++='/'; *end++='.'; *end=0;
+            flags=md_open_plan_path(path,0,(unsigned)fd,flags);
             return (int)C(openat,AT_FDCWD,path,flags|O_CLOEXEC,0,0,0);
         }
     }

@@ -20,5 +20,8 @@ CONTROL md_guest_exported
 CONTROL md_guest_export_control
 CONTROL md_guest_fd_control
 CONTROL md_guest_buffer_control
+/* Same checkpoint, with the standard two-register C aggregate return ABI. */
+.global md_guest_buffer_start
+.set md_guest_buffer_start, md_guest_buffer_control
 CONTROL md_guest_task_control
 .section .note.GNU-stack,"",%progbits

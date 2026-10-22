@@ -733,16 +733,16 @@ int md_task_helper_event(struct md_task_helpers *manager, pid_t pid, int status)
     } else if (event==MD_TASK_CHECKPOINT_EVENT) {
         struct user_pt_regs r;
         error=registers(m,pid,&r,0);
-        if (!error && !child && m->parent_operation==ALLOCATE && r.pc==m->abi.allocated) {
+        if (!error && !child && m->parent_operation==ALLOCATE && r.pc==m->abi.allocated+4) {
             long top=r.regs[0];
             if (top<0) { m->result=top; complete(m); return 1; }
             if (!top || top%(size_t)getpagesize()) return protocol_error(m,__LINE__);
             m->stack=top;
             error=md_memory_stack_add(m->memory,m->stack);
             if (!error) error=clone_begin(m);
-        } else if (!error && child && m->operation==RECEIVE_COLLECT && r.pc==m->abi.task_collected) {
+        } else if (!error && child && m->operation==RECEIVE_COLLECT && r.pc==m->abi.task_collected+4) {
             error=advance(m,(long)r.regs[0]);
-        } else if (!error && r.pc==m->abi.task_return) {
+        } else if (!error && r.pc==m->abi.task_return+4) {
             if (child) error=advance(m,(long)r.regs[0]);
             else {
                 if ((long)r.regs[0]<0) {

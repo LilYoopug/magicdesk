@@ -26,12 +26,14 @@ struct md_devpts {
     struct attributes directory,ptmx;
     uid_t uid; gid_t gid;
     int fixed_uid,fixed_gid;
+    unsigned maximum;
     int storage,root;
 };
 struct md_devpts *md_devpts_new(int parent,const char *options,const struct md_identity *id) {
     if (!id) { errno=EPERM; return NULL; }
     struct md_devpts *p=calloc(1,sizeof(*p)); if (!p) return NULL;
     atomic_init(&p->references,1); p->mode=0600; p->uid=id->uid.fs; p->gid=id->gid.fs;
+    p->maximum=1U<<20;
     p->directory=(struct attributes){id->uid.fs,id->gid.fs,0755};
     p->ptmx=(struct attributes){id->uid.fs,id->gid.fs,0};
     p->storage=p->root=-1;
@@ -44,7 +46,8 @@ struct md_devpts *md_devpts_new(int parent,const char *options,const struct md_i
         unsigned key=(unsigned)(equal-at),base=10,value=0;
         int mode=key==4 && !memcmp(at,"mode",4),ptmx=key==8 && !memcmp(at,"ptmxmode",8);
         int uid=key==3 && !memcmp(at,"uid",3),gid=key==3 && !memcmp(at,"gid",3);
-        if (!mode && !ptmx && !uid && !gid) { errno=EOPNOTSUPP; goto failed; }
+        int maximum=key==3 && !memcmp(at,"max",3);
+        if (!mode && !ptmx && !uid && !gid && !maximum) { errno=EOPNOTSUPP; goto failed; }
         if (mode || ptmx) base=8;
         for (const char *digit=equal+1;digit<end;++digit) {
             unsigned d=(unsigned char)*digit-'0';
@@ -54,6 +57,9 @@ struct md_devpts *md_devpts_new(int parent,const char *options,const struct md_i
         if (mode || ptmx) {
             if (value&~0777U) { errno=EINVAL; goto failed; }
             if (mode) p->mode=value; else p->ptmx.mode=value;
+        } else if (maximum) {
+            if (!value || value>(1U<<20)) { errno=EINVAL; goto failed; }
+            p->maximum=value;
         } else {
             value=md_user_namespace_into(id->user_namespace,gid,value);
             if (value==UINT32_MAX) { errno=EINVAL; goto failed; }
@@ -144,6 +150,9 @@ int md_devpts_open(struct md_devpts *p,int fd,int flags,const struct md_identity
     if (!(flags&O_PATH) && ptmx(&st)) {
         unsigned number;
         if (ioctl(opened,TIOCGPTN,&number)) { r=-errno; goto failed; }
+        /* devpts max bounds the allocated index. Native numbering deliberately
+         * remains shared with the host; never publish an out-of-range PTY. */
+        if (number>=p->maximum) { r=-ENOSPC; goto failed; }
         snprintf(path,sizeof(path),"/dev/pts/%u",number);
         struct stat slave;
         if (stat(path,&slave)) { r=-errno; goto failed; }

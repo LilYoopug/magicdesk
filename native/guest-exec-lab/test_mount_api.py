@@ -820,7 +820,7 @@ if sys.argv[-1] == '0':
         print('PASS shared structure reader: openat2 zero extension and invalid buffers', flush=True)
 
         for kind, options in [('tmpfs', 'mode=0755,size=65536k,strictatime'), ('cgroup2', None), ('cgroup', 'devices'),
-                              ('proc', None), ('devpts', 'newinstance,ptmxmode=0666,mode=0620')]:
+                              ('proc', None), ('devpts', 'newinstance,ptmxmode=0666,mode=0620,max=1028')]:
             command = ['strace', '-e', 'trace=fsopen,fsconfig,fsmount,move_mount,mount_setattr',
                        'mount', '-t', kind]
             if options:

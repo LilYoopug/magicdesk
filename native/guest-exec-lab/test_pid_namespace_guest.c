@@ -4,6 +4,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/ioprio.h>
+#include <linux/capability.h>
 #include <sched.h>
 #include <pthread.h>
 #include <poll.h>
@@ -58,8 +59,16 @@ static void proc_cases(void) {
     assert(!mkdir("/tmp/pid-proc",0700));
     assert(!mount("proc","/tmp/pid-proc","proc",MS_NOSUID|MS_NODEV|MS_NOEXEC,NULL));
     assert(!syscall(SYS_faccessat2,AT_FDCWD,"/tmp/pid-proc/1/status",R_OK,0x200));
+    assert(!syscall(SYS_faccessat2,AT_FDCWD,"/tmp/pid-proc/1/status",W_OK,0x200));
+    struct __user_cap_header_struct header={.version=_LINUX_CAPABILITY_VERSION_3};
+    struct __user_cap_data_struct saved[2],reduced[2];
+    assert(!syscall(SYS_capget,&header,saved));
+    memcpy(reduced,saved,sizeof(saved));
+    reduced[0].effective&=~(1U<<CAP_DAC_OVERRIDE);
+    assert(!syscall(SYS_capset,&header,reduced));
     errno=0;
     assert(syscall(SYS_faccessat2,AT_FDCWD,"/tmp/pid-proc/1/status",W_OK,0x200)==-1 && errno==EACCES);
+    assert(!syscall(SYS_capset,&header,saved));
     link_is("/tmp/pid-proc/self","1");
     link_is("/tmp/pid-proc/thread-self","1/task/1");
     DIR *dir=opendir("/tmp/pid-proc"); assert(dir);

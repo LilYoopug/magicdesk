@@ -221,6 +221,19 @@ int md_view_path(struct md_filesystem *fs, int fd, struct md_view_mount *m, char
     }
     return r;
 }
+int md_view_location_path(struct md_filesystem *fs,const struct md_view_location *location,char *out,size_t size) {
+    if (location->view!=fs->mounts) return -ENOENT;
+    /* A named lookup selects a dentry, not an arbitrary alias of its inode. */
+    if (location->parent<0 || !strcmp(location->name,"."))
+        return md_view_path(fs,location->fd,location->mount,out,size);
+    int error=md_view_path(fs,location->parent,location->mount,out,size);
+    if (!error) {
+        size_t length=strlen(out);
+        int n=snprintf(out+length,size-length,"%s%s",length==1 ? "" : "/",location->name);
+        if (n<0 || (size_t)n>=size-length) error=-ERANGE;
+    }
+    return error;
+}
 int md_fs_root_capture(struct md_filesystem *fs, int fd, const struct md_fs_anchor *origin,
         struct md_fs_location *out) {
     *out = (struct md_fs_location){0};

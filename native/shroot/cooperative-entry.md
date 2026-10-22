@@ -133,6 +133,18 @@ original IP and arguments. Register copies, C adapter returns, helper custody,
 memory repair and readiness use this same event; actual SIGTRAP and guest
 debugger steps are not service completions. `task_call` separately owns native
 call entry/exit and exact continuation restoration without a return BRK.
+Marker decoding uses the PC and seccomp cookie from `PTRACE_GET_SYSCALL_INFO`;
+it does not read the full register set merely to identify a known site.
+Stop decoding hands each exact observation to its consumer once, without another
+kernel read: registers for a completed checkpoint, or registers and event cookie
+for an ordinary TRACE inside the adapter. These two retained observations may be
+consumed in either order. All caller ptrace requests use this owner; any other
+request or kernel event discards the remaining snapshot. There is no register
+cache across execution, signals or debugger writes.
+Checkpoint registers retain the kernel's post-SVC PC. Consumers identify the
+marker at PC-4 and resume from the unchanged continuation; there is no preliminary
+register write just to rewind the marker. Native-call entry/exit stops remain
+distinct from this typed event, including when they share a helper's code site.
 The C-facing gates in `checkpoint_entry.S` set x8 explicitly before the marker:
 ARM64 otherwise replaces x0 with ENOSYS before tracing syscall(-1). Entry and
 marker addresses are distinct; this adds one instruction, not another stop.
@@ -203,6 +215,13 @@ that exact object through the
 supervisor's proc FD, so rename, unlink and pathname replacement cannot redirect
 the data open. Each open creates an independent native OFD. Only the guest owns
 the data FD; the worker reserves its origin update before any effect.
+
+The same plan covers plain native mounts and selected inode objects reached
+through bind or copied mount views. Reopening a selected inode shares the
+catalogue's permission, readonly and COW owner; private bodies do not start a
+write transaction merely to reopen. O_PATH|O_NOFOLLOW directory plans retain
+the flag through `fd/.`; non-directories and directories lacking native search
+permission decline before effects and keep exact descriptor transfer.
 
 Native-leaf path resolution can retain the final O_PATH descriptor and its fresh
 fstat together, avoiding a separate pathname stat followed by reopening. The
@@ -319,10 +338,10 @@ Other ineligible providers retain their original creating carrier rather than
 claiming native-plan semantics.
 Pin-only existing-file preparation does not need an umask;
 birth preparation reads it freshly through the retained proc-status descriptor.
-FIFOs,
-devices, typed providers, executable snapshots and selected-object reopens retain
-their current route before a data open. Inode-backed mount paths may produce a
-plan; nested/native providers do not inherit that capability implicitly.
+FIFOs, devices, typed providers, executable snapshots and mutable-image reopens
+retain their current route before a data open. Inode-backed and plain native
+mount paths explicitly admit plans; typed providers do not inherit that
+capability implicitly.
 Openat2 captures and validates the exact known open_how structure, including
 BENEATH/IN_ROOT/symlink restrictions; extended sizes retain the original decoder.
 O_PATH symlink endpoints also retain their existing route.
@@ -477,6 +496,24 @@ PTRACE_GET_SYSCALL_INFO supplies the actual syscall and descriptor, never an
 application-controlled TRACE cookie. The existing table turn and observed exit
 result still own retirement. Filter denials do not retire a slot; debugger,
 pending-loan and conflicting-owner cases retain the full path.
+
+Kernel-admitted writes to typed control files can capture their input with
+`process_vm_readv` before entering the guest adapter. Scalar and vectored calls
+share the adapter's size validation and bounded payload contract. This includes
+FUSE transport and provider-backed file writes, not a Snap-specific route.
+Only a complete input capture admits the existing OFD operation; protected
+callers, copy faults, debugger ownership and buffer exhaustion retain the guest
+path without provider effects. The same IO queue, asynchronous completion,
+signal/restart and cancellation owners retire both paths. Application seccomp
+still admits the original call; ordinary native files do not use this capture.
+
+Deferred file, close and control operations use one syscall-stop-aware poll
+entry. A seccomp-admitted call can still owe its original exit stop before the
+synthetic poll reaches entry. The wait owner drains that exit and re-arms all
+poll registers before admitting readiness, cancellation or signal delivery.
+This check belongs only to deferred waits; immediate completion adds no stop
+query. The supervisor-state fixture exercises both entry origins against real
+ptrace stops, in addition to provider/FUSE and signal-restart coverage.
 
 ## Machine-Code Frontend
 

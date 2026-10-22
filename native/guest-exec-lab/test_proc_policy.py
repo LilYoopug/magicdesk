@@ -526,6 +526,36 @@ def guest():
     print('PASS proc: O_NOATIME ownership/reopen/fcntl, hidepid modes/gid, retained FD, credentials/dumpability, subset, fsconfig, bind and namespace copy', flush=True)
 
 
+def namespace_guest():
+    # Guest root owns the parent user namespace. Publish its maps directly;
+    # unshare's newuidmap policy depends on unrelated distribution subuid files.
+    parent, child = socket.socketpair()
+    pid = os.fork()
+    if not pid:
+        parent.close()
+        libc = ctypes.CDLL(None, use_errno=True)
+        assert libc.unshare(0x10000000 | 0x20000 | 0x20000000) == 0, ctypes.get_errno()
+        child.sendall(b'R')
+        # EVENT_WAIT: parent publishes both maps; launch deadline bounds loss.
+        assert child.recv(1) == b'G'
+        child.close()
+        init = os.fork()
+        if not init:
+            guest()
+            sys.exit(0)
+        assert os.waitpid(init, 0)[1] == 0
+        sys.exit(0)
+    child.close()
+    try:
+        assert parent.recv(1) == b'R'
+        Path('/proc/%d/uid_map' % pid).write_text('0 0 65536\n')
+        Path('/proc/%d/gid_map' % pid).write_text('0 0 65536\n')
+        parent.sendall(b'G')
+    finally:
+        parent.close()
+        assert os.waitpid(pid, 0)[1] == 0
+
+
 def main():
     from test_oci_services import Suite, add_machine_entry_argument
     parser = argparse.ArgumentParser()
@@ -547,10 +577,8 @@ def main():
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/test.py')
         suite.command(prefix + ['--', '/bin/mkdir', target])
         suite.command(prefix + ['--bind-ro', suite.base, target, '--deadline-seconds', '90', '--',
-                               '/usr/bin/unshare', '--user', '--map-users=0:0:65536',
-                               '--map-groups=0:0:65536', '--mount', '--pid', '--fork',
                                '/usr/bin/env', 'MD_TEST_PSI=' + psi,
-                               '/usr/bin/python3', target + '/test.py', '--guest'], timeout=110)
+                               '/usr/bin/python3', target + '/test.py', '--guest-namespace'], timeout=110)
         suite.report['passed'] = True
     finally:
         try:
@@ -562,6 +590,8 @@ def main():
 if __name__ == '__main__':
     if sys.argv[1:] == ['--guest']:
         guest()
+    elif sys.argv[1:] == ['--guest-namespace']:
+        namespace_guest()
     elif sys.argv[1:] == ['--guest-detached']:
         detached_proc()
     else:
