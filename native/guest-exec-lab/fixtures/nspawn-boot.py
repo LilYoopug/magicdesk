@@ -5,11 +5,12 @@ import json
 import os
 from pathlib import Path
 import re
-import socket
 import subprocess
 import threading
 import time
 import uuid
+from systemd_ready import wait_systemd
+from network_exchange import exchange
 
 
 def main():
@@ -37,20 +38,10 @@ def main():
         return run('systemd-run', '-M', machine, '--wait', '--pipe', '--collect', *argv)
 
     def ready():
-        deadline = time.monotonic() + 90
-        while True:
-            result = run('systemctl', '-M', machine, 'is-system-running', '--wait', required=False)
-            if result.returncode == 0:
-                assert result.stdout.strip() == 'running'
-                return
-            # A started nspawn unit precedes the nested manager's bus listener.
-            # Retry only connection readiness, never a failed/degraded boot.
-            assert 'Failed to connect' in result.stderr and any(
-                text in result.stderr for text in ('No such file or directory', 'Connection refused'))
-            assert time.monotonic() < deadline, 'Nested system bus did not become ready'
-            assert run('systemctl', 'is-active', unit).stdout.strip() == 'active'
-            # EVENT_WAIT: bounded retry backoff for nested bus creation, not a settling assumption.
-            threading.Event().wait(0.1)
+        def active(timeout):
+            assert run('systemctl', 'is-active', unit, timeout=timeout).stdout.strip() == 'active'
+        wait_systemd(lambda timeout: run('systemctl', '-M', machine, 'is-system-running', '--wait',
+                                         required=False, timeout=timeout), active)
 
     assert run('systemctl', 'is-active', unit, required=False).returncode != 0, 'Machine must be idle'
     started = False
@@ -102,44 +93,7 @@ def main():
             run('ip', 'link', 'set', interface, 'up')
             service('/usr/bin/env', 'ip', 'address', 'add', '10.231.247.2/30', 'dev', 'host0')
             service('/usr/bin/env', 'ip', 'link', 'set', 'host0', 'up')
-            errors = []
-
-            def echo(stream):
-                try:
-                    for _ in range(20):
-                        if stream.type == socket.SOCK_STREAM:
-                            connection, _ = stream.accept()
-                            with connection:
-                                connection.settimeout(30)
-                                connection.sendall(connection.recv(64))
-                        else:
-                            data, peer = stream.recvfrom(64)
-                            stream.sendto(data, peer)
-                except Exception as error:
-                    errors.append(repr(error))
-
-            with socket.socket() as tcp, socket.socket(type=socket.SOCK_DGRAM) as udp:
-                for stream in (tcp, udp):
-                    stream.bind(('10.231.247.1', 0))
-                    stream.settimeout(30)
-                tcp.listen(4)
-                threads = [threading.Thread(target=echo, args=(stream,), daemon=True) for stream in (tcp, udp)]
-                for thread in threads:
-                    thread.start()
-                endpoints = [(int(socket.SOCK_STREAM), tcp.getsockname()[1]),
-                             (int(socket.SOCK_DGRAM), udp.getsockname()[1])]
-                code = ('import socket\nfor kind,port in ' + repr(endpoints) + ':\n'
-                        ' for i in range(20):\n'
-                        '  with socket.socket(type=kind) as s:\n'
-                        '   s.settimeout(5); s.connect(("10.231.247.1",port)); s.sendall(b"nspawn"); '
-                        'assert s.recv(64)==b"nspawn"\nprint("NS_NETWORK_OK")')
-                try:
-                    assert 'NS_NETWORK_OK' in service('/usr/bin/python3', '-c', code).stdout
-                finally:
-                    for thread in threads:
-                        thread.join(timeout=35)
-                assert not errors and not any(thread.is_alive() for thread in threads), errors
-            record['network'] = dict(tcp=20, udp=20, interface=interface)
+            record['network'] = dict(exchange(service, '10.231.247.1'), interface=interface)
             if repeat == 1:
                 run('machinectl', '--kill-whom=leader', '--signal=KILL', 'kill', machine)
                 deadline = time.monotonic() + 90

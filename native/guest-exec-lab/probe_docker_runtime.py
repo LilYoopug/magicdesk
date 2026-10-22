@@ -28,7 +28,7 @@ PROFILES = ('default', 'no-network', *NETWORK_PROFILES, *ROOTLESS_PROFILES)
 
 def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_runtime=False,
           no_new_keyring=False, trace_filesystem=False, create_count=0, trace_network=False, observer='',
-          storage_driver='vfs', data_root='', userland_proxy=True, internet=False):
+          storage_driver='vfs', data_root='', userland_proxy=True, internet=False, endpoint=''):
     os.environ['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     preparation = []
     def mount(*args):
@@ -51,10 +51,15 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
             (root / 'devices').mkdir()
             mount('-t', 'cgroup', '-o', 'devices', 'none', str(root / 'devices'))
     base = Path(tempfile.mkdtemp(prefix='md-docker-'))
+    external = bool(endpoint)
+    if external:
+        assert cgroup == 'none' and not any((trace, trace_runtime, trace_filesystem, trace_network,
+                                            no_new_keyring, data_root))
     # Probe profiles must not collide with the installer's system daemon config.
     config = base / 'daemon.json'
-    config.write_text('{}\n')
-    endpoint = 'unix://' + str(base / 'docker.sock')
+    if not external:
+        config.write_text('{}\n')
+        endpoint = 'unix://' + str(base / 'docker.sock')
     argv = ['dockerd', '--config-file', str(config), '--debug', '--host', endpoint,
             '--pidfile', str(base / 'docker.pid'), '--data-root', data_root or str(base / 'data'),
             '--exec-root', str(base / 'run')]
@@ -98,13 +103,14 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
         argv = ['strace', '-f', '-yy', '-s', '256', '-e', 'trace=fchown,fchownat', *argv]
     report = {'profile': profile, 'cgroup': cgroup, 'cgroupns': cgroupns, 'preparation': preparation,
               'newKeyringDisabled': no_new_keyring,
-              'command': argv, 'directory': str(base),
+              'command': [] if external else argv, 'externalDaemon': external, 'endpoint': endpoint,
+              'directory': str(base),
               'apiReady': False, 'commands': [], 'portPublicationTested': False}
     records = queue.Queue()
     first, tail, important = [], collections.deque(maxlen=30), collections.deque(maxlen=60)
     log_count = 0
-    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               text=True, errors='replace')
+    process = None if external else subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                                     text=True, errors='replace')
 
     def drain():
         nonlocal log_count
@@ -124,8 +130,10 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
         finally:
             records.put('eof')
 
-    reader = threading.Thread(target=drain)
-    reader.start()
+    reader = None
+    if process:
+        reader = threading.Thread(target=drain)
+        reader.start()
 
     def client(*args):
         command = ['docker', '--host', endpoint, *args]
@@ -151,7 +159,7 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
         names = ('md-port-first', 'md-port-second')
         network = 'md-network-ports'
         ports = []
-        assert client('network', 'create', '--subnet', '10.92.0.0/24', network)
+        assert client('network', 'create', network)
         try:
             for name in names:
                 port = observe(observer, operation='allocate')['port']
@@ -186,6 +194,13 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
         except Exception:
             report['networkRules'] = subprocess.run(['nft', '-a', 'list', 'ruleset'], capture_output=True,
                                                     text=True, timeout=15).stdout
+            report['containerDiagnostics'] = []
+            for name in names:
+                for operation in ('inspect', 'logs'):
+                    diagnostic = subprocess.run(['docker', '--host', endpoint, operation, name],
+                                                capture_output=True, text=True, timeout=15)
+                    report['containerDiagnostics'].append(dict(name=name, operation=operation,
+                        exitCode=diagnostic.returncode, output=(diagnostic.stdout + diagnostic.stderr)[-12000:]))
             raise
         finally:
             removed = client('rm', '-f', *names, 'md-port-conflict')
@@ -197,7 +212,7 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
 
     try:
         # EVENT_WAIT: daemon API log or output EOF; timeout is not readiness.
-        event = records.get(timeout=45)
+        event = 'ready' if external else records.get(timeout=45)
         if event == 'ready':
             report['apiReady'] = client('version', '--format', '{{json .Server}}')
             client('info', '--format', 'driver={{.Driver}} cgroup={{.CgroupDriver}} '
@@ -213,7 +228,7 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
                 for network in ('host', 'none'):
                     client('run', '--rm', '--network', network, '--cgroupns', cgroupns, image,
                            '/bin/sh', '-c', 'echo DOCKER_CONTAINER_EXECUTED; id')
-                if profile in NETWORK_PROFILES:
+                if profile in NETWORK_PROFILES or external:
                     if observer:
                         exercise_ports()
                     else:
@@ -228,21 +243,24 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
     except Exception:
         report['failure'] = traceback.format_exc()
     finally:
-        if process.poll() is None:
-            process.terminate()
-        try:
-            # EVENT_WAIT: Docker shutdown; escalation is scoped to this daemon.
-            process.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=10)
-            report['forcedShutdown'] = True
-        reader.join(timeout=10)
-        report['daemonExitCode'] = process.returncode
+        if process:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                # EVENT_WAIT: Docker shutdown; escalation is scoped to this daemon.
+                process.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
+                report['forcedShutdown'] = True
+            reader.join(timeout=10)
+            report['daemonExitCode'] = process.returncode
+        else:
+            report['daemonRetained'] = client('version', '--format', '{{json .Server}}')
         report['logLines'] = log_count
         report['log'] = ''.join(first + list(tail))
         report['errors'] = list(important)
-        report['readerDrained'] = not reader.is_alive()
+        report['readerDrained'] = reader is None or not reader.is_alive()
         if trace_runtime:
             report['runtimeTraces'] = {}
             for path in sorted(base.glob('runc-*.log')):
@@ -275,7 +293,7 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
                 report['networkTrace'] = list(collections.deque((line for line in stream
                     if not any(marker in line for marker in ('--- SIGURG ', '--- SIGCHLD ', '+++ exited with'))), maxlen=180))
         print('DOCKER_REPORT ' + json.dumps(report), flush=True)
-        if reader.is_alive():
+        if reader and reader.is_alive():
             os._exit(2)
 
 

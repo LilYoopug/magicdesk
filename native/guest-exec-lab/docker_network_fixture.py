@@ -48,7 +48,8 @@ def exchange(host, port, token, repeats=1):
     host = socket.gethostbyname(host)
     with socket.create_connection((host, port), timeout=10) as connection:
         connection.sendall(b'PING')
-        assert connection.recv(100).decode() == token
+        data = connection.recv(100).decode()
+        assert data == token, ('TCP reply', host, port, data, token)
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
         connection.settimeout(10)
         connection.sendto(b'PING', (host, port))

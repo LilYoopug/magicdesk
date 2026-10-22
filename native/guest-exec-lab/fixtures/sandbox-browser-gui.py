@@ -35,7 +35,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--browser', choices=('firefox', 'chromium'), default='firefox')
-    parser.add_argument('--package', choices=('snap', 'flatpak'), default='snap')
+    parser.add_argument('--package', choices=('snap', 'flatpak', 'native'), default='snap')
     parser.add_argument('--common', type=Path)
     parser.add_argument('--port', type=int, default=18080)
     parser.add_argument('--require-webgl', action='store_true')
@@ -43,7 +43,8 @@ def main():
     app_id = {'firefox': 'org.mozilla.firefox', 'chromium': 'org.chromium.Chromium'}[args.browser]
     if args.common is None:
         args.common = (Path.home() / 'snap' / args.browser / 'common' if args.package == 'snap'
-                       else Path.home() / '.var/app' / app_id / 'cache')
+                       else Path.home() / '.var/app' / app_id / 'cache' if args.package == 'flatpak'
+                       else Path.home() / '.cache/shroot-browser' / args.browser)
     args.output.mkdir(parents=True, exist_ok=True)
     args.common.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix='shroot-gui-', dir=args.common))
@@ -63,7 +64,7 @@ def main():
         options = ['--user-data-dir=' + str(profile), '--no-first-run', '--no-default-browser-check',
                    '--ozone-platform=wayland']
     launcher = (['snap', 'run', args.browser] if args.package == 'snap'
-                else ['flatpak', 'run', app_id])
+                else ['flatpak', 'run', app_id] if args.package == 'flatpak' else [args.browser])
     receipts = []
     downloads = []
     lock = threading.Lock()

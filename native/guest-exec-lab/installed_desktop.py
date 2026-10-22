@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Retained Weston/systemd fixture using an installed named environment and APK.
+"""Retained init fixture with optional Weston in an installed environment.
 
 Default-target boot is independently checked by test_os_boot.py. This focused
 session hosts the existing browser, portal, container and VS Code fixtures.
@@ -7,19 +7,43 @@ Use stop after inspection; state and logs are kept under build/installed-NAME.
 """
 import argparse
 import base64
+import errno
 import importlib.util
 import json
 from pathlib import Path
 import re
 import shlex
 import subprocess
+import threading
+import time
 import tomllib
+import urllib.error
 import urllib.request
 import uuid
 
 from graphical_recipe import compile_recipe
-from init_fixture import PREPARE
+from init_fixture import installed_boot
 from test_oci_services import Suite, port
+
+
+def wait_controller(state, timeout=90):
+    deadline = time.monotonic() + timeout
+    request = urllib.request.Request('http://127.0.0.1:' + str(state['rootPort']),
+                                     headers={'Authorization': 'Bearer ' + state['token']})
+    while True:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, 'Root controller did not become ready'
+        try:
+            with urllib.request.urlopen(request, timeout=min(remaining, 5)) as response:
+                result = json.load(response)
+            assert result['uid'] == 0, result
+            return
+        except urllib.error.URLError as error:
+            if not isinstance(error.reason, OSError) or error.reason.errno != errno.ECONNREFUSED:
+                raise
+        # PROTOCOL_BACKOFF: retry only an unbound control socket. The deadline
+        # fails startup; success requires an authenticated response from this run.
+        threading.Event().wait(min(0.1, remaining))
 
 
 def main():
@@ -28,6 +52,8 @@ def main():
     parser.add_argument('--name', required=True)
     parser.add_argument('--user', default='mdtester')
     parser.add_argument('--root', action='store_true')
+    parser.add_argument('--init', choices=('systemd', 'openrc'), default='systemd')
+    parser.add_argument('--headless', action='store_true', help='Boot control/init only, without user session, display or GPU')
     parser.add_argument('--build', type=Path, help='Stage a native build; otherwise use the installed APK')
     parser.add_argument('value', nargs='?')
     args = parser.parse_args()
@@ -44,12 +70,13 @@ def main():
         suite = Suite(out,args.build)
         client = suite.client
         before = client.call('get_state')
-        if before['workspaces'] or before['graphics']:
+        if not args.headless and (before['workspaces'] or before['graphics']):
             suite.finish()
             parser.error('Stop the active graphics fixture before starting an isolated desktop fixture')
         state = suite.report
-        state.update(name=args.name, user=args.user, token=uuid.uuid4().hex,
+        state.update(name=args.name, user=args.user, init=args.init, headless=args.headless, token=uuid.uuid4().hex,
                      rootPort=port(), userPort=port(), target=target)
+        state['homeLeaseBefore'] = before['homeLease']
         info = json.loads(suite.command(['shroot', 'inspect', args.name], quiet=True))
         assert not info['launches'], 'Environment must be idle before boot'
         state['environment'] = info
@@ -58,72 +85,49 @@ def main():
         state['runner'] = suite.runner
         state['prefix'] = prefix
         suite.command(prefix + ['--', '/bin/mkdir', '-p', target])
+        boot, driver = installed_boot(target, state['rootPort'], state['token'], args.init,
+                                      None if args.headless else args.user)
+        if args.headless:
+            files = {'boot.sh': boot, 'session-controller.py':
+                     (Path(__file__).with_name('fixtures') / 'session-controller.py').read_text()}
+            for name, content in files.items():
+                path = out / name
+                path.write_text(content)
+                suite.transport.upload(client, path, suite.base + '/' + name)
+            suite.command(['chmod', '755', suite.base])
+            suite.command(['chmod', '644', suite.base + '/boot.sh', suite.base + '/session-controller.py'])
+            command = shlex.join(['/usr/bin/unshare', '--mount', '--pid', '--fork', '--mount-proc',
+                                  '--uts', '--ipc', '--cgroup', '/bin/sh', target + '/boot.sh'])
+            launch = shlex.join([*prefix, '--network', 'routed', '--env', 'MAGICDESK_GUEST_LABEL=' + state['id'],
+                                '--bind', suite.base, target, '--', '/usr/bin/script', '-q', '-e', '-c', command, '/dev/null'])
+            state['launch'] = launch
+            statefile.write_text(json.dumps(state, indent=2))
+            state['supervisorPid'] = int(suite.command(['/system/bin/sh', '-c',
+                launch + ' >' + shlex.quote(suite.base + '/boot.log') + ' 2>&1 </dev/null & echo $!'], quiet=True))
+            statefile.write_text(json.dumps(state, indent=2))
+            wait_controller(state)
+            state['ready'] = True
+            statefile.write_text(json.dumps(state, indent=2))
+            print(statefile)
+            return
         home = suite.command(prefix + ['--', '/bin/sh', '-ec',
                              'getent passwd "$1" | cut -d: -f6', 'fixture', args.user], quiet=True).strip()
         assert home.startswith('/home/')
         state['home'] = home
         user = shlex.quote(args.user)
         control = '/usr/bin/python3 ' + target + '/session-controller.py ' + target
+        bus_options = '--systemd ' if args.init == 'systemd' else ''
         autostart = ('#!/bin/sh\nset -eu\nenv > ' + target + '/desktop.env\n'
-                     'dbus-update-activation-environment --systemd DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP\n'
+                     'dbus-update-activation-environment ' + bus_options + 'DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP\n'
                      'exec ' + control + ' ')
         autostart += str(state['userPort']) + ' ' + state['token'] + '\n'
-        boot = PREPARE.replace('umount /run/md-host-dev', '''
-for node in kgsl-3d0 fuse dma_heap dri; do
-    if [ -d /run/md-host-dev/$node ]; then mkdir -p /dev/$node
-    elif [ -e /run/md-host-dev/$node ]; then touch /dev/$node
-    else continue
-    fi
-    mount --bind /run/md-host-dev/$node /dev/$node
-done
-umount /run/md-host-dev
-''') + '''
-mount --make-rshared /
-mkdir -p /run/systemd/system
-unset XDG_DATA_DIRS XDG_CONFIG_DIRS XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
-cat > /run/systemd/system/md-installed.target <<EOF
-[Unit]
-DefaultDependencies=no
-Requires=md-installed.service md-installed-control.service
-After=md-installed.service
-EOF
-cat > /run/systemd/system/md-installed.service <<EOF
-[Unit]
-DefaultDependencies=no
-Conflicts=shutdown.target
-Before=shutdown.target
-[Service]
-Type=simple
-ExecStart=/bin/bash /opt/md-installed-fixture/driver.sh
-StandardOutput=append:/opt/md-installed-fixture/driver.log
-StandardError=inherit
-EOF
-exec /usr/bin/setpriv --bounding-set=-sys_module /usr/lib/systemd/systemd --system --unit=md-installed.target --show-status=no --crash-shell=no --crash-reboot=no
-'''
-        boot = boot.replace('cat > /run/systemd/system/md-installed.service', f'''cat > /run/systemd/system/md-installed-control.service <<EOF
-[Unit]
-DefaultDependencies=no
-Conflicts=shutdown.target
-Before=shutdown.target
-[Service]
-Type=simple
-ExecStart={control} {state['rootPort']} {state['token']}
-StandardOutput=append:{target}/control.log
-StandardError=inherit
-EOF
-cat > /run/systemd/system/md-installed.service''')
-        driver = f'''#!/bin/bash
-set -eux
-uid=$(id -u {user})
-systemctl start dbus.socket systemd-logind.service systemd-user-sessions.service
-systemctl start user@$uid.service
-exec systemd-run --unit=md-installed-desktop --wait --collect --uid={user} --property=PAMName=login /bin/bash {target}/session.sh
-'''
+        bus = ('export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus\n'
+               if args.init == 'systemd' else 'unset DBUS_SESSION_BUS_ADDRESS\n')
         session = f'''#!/bin/bash
 set -eux
 export HOME={shlex.quote(home)} USER={user} LOGNAME={user}
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
-export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
+{bus.rstrip()}
 export WAYLAND_DISPLAY=/tmp/magicdesk-wayland/wayland-0
 exec magicdesk-desktop-session weston --socket=wayland-1 --config={target}/weston.ini --width=1200 --height=800 --idle-time=0
 '''
@@ -158,7 +162,7 @@ exec magicdesk-desktop-session weston --socket=wayland-1 --config={target}/westo
         state['display'] = client.call('create_display', dict(type='virtual', width=1200, height=800, densityDpi=160))
         statefile.write_text(json.dumps(state, indent=2))
         state['sessionId'] = client.call('graphics.start', dict(protocol='wayland', backend='shell',
-            connection='routed', wholeDesktop=True, name=args.name + ' systemd', keyboardDirectory='guest:' + store))['sessionId']
+            connection='routed', wholeDesktop=True, name=args.name + ' ' + args.init, keyboardDirectory='guest:' + store))['sessionId']
         statefile.write_text(json.dumps(state, indent=2))
 
         def wait(condition, **kwargs):
@@ -204,6 +208,7 @@ exec magicdesk-desktop-session weston --socket=wayland-1 --config={target}/westo
         return result['output']
 
     if args.action == 'run':
+        assert args.root or not state.get('headless'), 'Headless fixture exposes only --root commands'
         ident = uuid.uuid4().hex
         request = urllib.request.Request('http://127.0.0.1:' + str(state['rootPort' if args.root else 'userPort']),
             data=json.dumps(dict(id=ident, command=args.value)).encode(),
@@ -222,6 +227,7 @@ exec magicdesk-desktop-session weston --socket=wayland-1 --config={target}/westo
             destination.parent.mkdir(parents=True, exist_ok=True)
             transport.download(client, state['directory'] + '/' + path.as_posix(), destination, overwrite=True)
     elif args.action == 'capture':
+        assert not state.get('headless'), 'Headless fixture has no display'
         result = client.call_result('capture_screenshot', dict(displayId=state['display']['id']))
         path = out / (args.value or 'desktop.png')
         path.write_bytes(base64.b64decode(next(i['data'] for i in result['content'] if i['type'] == 'image')))
@@ -242,15 +248,18 @@ exec magicdesk-desktop-session weston --socket=wayland-1 --config={target}/westo
             client.call('graphics.stop', dict(sessionId=state['sessionId']))
             assert client.call('wait_for_state', dict(condition='graphics_session_absent',
                 sessionId=state['sessionId'], timeoutMillis=30000))['matched']
-        display = state['display']
-        client.call('remove_display', dict(displayId=display['id'], uniqueId=display['uniqueId']))
-        assert client.call('wait_for_state', dict(condition='display_absent',
-            displayId=display['id'], timeoutMillis=30000))['matched']
-        for name in ('boot.log', 'driver.log', 'desktop.env'):
+        if state.get('display'):
+            display = state['display']
+            client.call('remove_display', dict(displayId=display['id'], uniqueId=display['uniqueId']))
+            assert client.call('wait_for_state', dict(condition='display_absent',
+                displayId=display['id'], timeoutMillis=30000))['matched']
+        for name in ('boot.log', 'control.log', 'desktop.log', 'driver.log', 'desktop.env'):
             if shell('test ! -f ' + shlex.quote(state['directory'] + '/' + name) + ' || echo present').strip():
                 transport.download(client, state['directory'] + '/' + name, out / name, overwrite=True)
         after = client.call('get_state')
-        assert not after['workspaces'] and after['homeLease'] == state['homeLeaseBefore']
+        assert after['homeLease'] == state['homeLeaseBefore']
+        if not state.get('headless'):
+            assert not after['workspaces']
         client.call('console.close', dict(sessionId=state['consoleId']))
         state['closed'] = True
         statefile.write_text(json.dumps(state, indent=2))

@@ -6,12 +6,12 @@ import re
 import shlex
 import subprocess
 
+from benchmark_cpu import observe_suite_cpu
 from init_fixture import PREPARE as INIT_PREPARE
 from test_oci_services import Suite, add_machine_entry_argument
 
 
-PREPARE = INIT_PREPARE.replace('for device in null zero full random urandom tty;',
-                             'for device in null zero full random urandom tty fuse;') + r'''
+PREPARE = INIT_PREPARE + r'''
 # Snap needs shared mount propagation before its image mounts exist. systemd
 # inside a container leaves this to the launcher; unshare defaults to private.
 mount --make-rshared /
@@ -71,6 +71,8 @@ def main():
     parser.add_argument('--trace', action='store_true')
     parser.add_argument('--debug', action='store_true', help='Enable snapd diagnostics without syscall tracing')
     parser.add_argument('--statistics', action='store_true', help='Collect Shroot counters for this launch')
+    parser.add_argument('--profile', action='store_true',
+                        help='Sample the host process tree with simpleperf; invalidates timing comparisons')
     parser.add_argument('--trace-app', action='store_true', help='Trace application mappings, not install hooks')
     parser.add_argument('--namespace-only', action='store_true',
                         help='Verify one cold confined-shell launch without running or removing the app')
@@ -96,6 +98,8 @@ def main():
     suite = Suite(args.output, args.build, machine_entry=args.machine_entry)
     suite.report['store'] = args.store
     suite.report['snap'] = args.snap
+    suite.report['diagnostics'] = dict(debug=args.debug, statistics=args.statistics,
+                                      profile=args.profile, traceCold=args.trace_cold)
     target = '/opt/md-snap-' + suite.report['id']
     prefix = suite.guest(args.store, '--user', '0:0', '--network', 'routed')
     if args.statistics and not args.machine_entry:
@@ -156,7 +160,7 @@ for attempt in range(count):
                        'trace=%file,mount,unshare,setns,pivot_root', *command]
         result = subprocess.run(command,
                                 stdout=log, stderr=subprocess.STDOUT,
-                                env=dict(os.environ, SNAPD_DEBUG='1'))
+                                env=dict(os.environ, SNAPD_DEBUG='1') if @DEBUG@ else os.environ)
         elapsed = time.monotonic() - start
     markers = {}
     for line in (directory / ('cold-launch-%d.log' % attempt)).read_text().splitlines():
@@ -171,7 +175,7 @@ for attempt in range(count):
     (directory / 'cold-launch.json').write_text(json.dumps(results, indent=2) + '\n')
     print('COLD_LAUNCH', json.dumps(results[-1]), flush=True)
     result.check_returncode()
-PY'''.replace('@SNAP@', args.snap).replace('@COUNT@', str(args.cold_launch_checks)).replace('@TRACE@', str(args.trace_cold))
+PY'''.replace('@SNAP@', args.snap).replace('@COUNT@', str(args.cold_launch_checks)).replace('@TRACE@', str(args.trace_cold)).replace('@DEBUG@', str(args.debug))
         prepare = prepare.replace('@COLD_LAUNCH@', cold_launch)
         if args.namespace_only:
             start = prepare.index(program)
@@ -204,8 +208,14 @@ PY'''.replace('@SNAP@', args.snap).replace('@COUNT@', str(args.cold_launch_check
                 '-o "$1/app-$attempt.trace" snap run firefox --headless')
         boot = ['/usr/bin/unshare', '--mount', '--pid', '--fork', '--mount-proc',
                 '--uts', '--ipc', '--cgroup', '/bin/sh', '-ec', prepare, 'snap-test', target]
-        suite.command(prefix + ['--bind', suite.base, target, '--deadline-seconds', str(args.timeout), '--',
-                                '/usr/bin/script', '-q', '-e', '-c', shlex.join(boot), '/dev/null'], timeout=args.timeout+20)
+        command = prefix + ['--bind', suite.base, target, '--deadline-seconds', str(args.timeout), '--',
+                            '/usr/bin/script', '-q', '-e', '-c', shlex.join(boot), '/dev/null']
+        if args.profile:
+            command = ['/system/bin/simpleperf', 'record', '-e', 'cpu-clock:u', '-f', '500',
+                       '--call-graph', 'dwarf', '-o', suite.base + '/perf.data', '--', *command]
+        with observe_suite_cpu(suite) as cpu:
+            suite.report['cpu'] = cpu
+            suite.command(command, timeout=args.timeout+20)
         result = suite.command(['/system/bin/cat', suite.base + '/result'])
         assert ('PASS cold snap namespace' if args.namespace_only else 'PASS snapd') in result
         if args.snap == 'firefox' and not args.namespace_only:
@@ -236,6 +246,10 @@ PY'''.replace('@SNAP@', args.snap).replace('@COUNT@', str(args.cold_launch_check
         suite.report['passed'] = True
     finally:
         try:
+            if args.profile:
+                profile = args.output / (suite.report['id'] + '-perf.data')
+                suite.transport.download(suite.client, suite.base + '/perf.data', profile, overwrite=True)
+                suite.report['profile'] = str(profile)
             for name in ('snap.log', 'daemon.log', 'journal.log', 'trace.log', 'daemon-trace.log',
                          'sandbox-features.log', 'apparmor.log', 'cold-launch.json', 'result',
                          *('app-%d.trace' % i for i in range(args.app_launches) if args.trace_app),

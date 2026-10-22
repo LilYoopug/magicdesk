@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Authenticated loopback command channel for a disposable desktop fixture."""
+"""Authenticated loopback command channel for a retained init/desktop fixture."""
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -21,9 +21,21 @@ def execute(ident, command):
 
 
 class Handler(BaseHTTPRequestHandler):
-    def do_POST(self):
+    def authorized(self):
         if not hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + token):
             self.send_error(403)
+            return False
+        return True
+
+    def do_GET(self):
+        if not self.authorized():
+            return
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(json.dumps({'uid': os.getuid()}).encode())
+
+    def do_POST(self):
+        if not self.authorized():
             return
         size = int(self.headers.get('Content-Length', '0'))
         if not 0 < size <= 65536:

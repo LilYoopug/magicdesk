@@ -125,7 +125,7 @@ def guest(options):
             run(prefix + ['pull', image], timeout=180)
         if run(prefix + ['network', 'exists', network], required=False).get('exitCode') == 0:
             run(prefix + ['network', 'rm', '-f', network])
-        run(prefix + ['network', 'create', '--subnet', '10.92.0.0/24', network])
+        run(prefix + ['network', 'create', network])
         tracer = None
         try:
             for name in names:

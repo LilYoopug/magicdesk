@@ -95,6 +95,23 @@ Traffic assertions use local native peers, independently of internet stability.
 `test_os_boot.py --network bridge --dns IPv4` applies the same profile to stock
 init boot; its default remains routed. Reports identify the native binaries.
 
+Retained recipe-installed sessions can run `test_booted_containers.py --session
+build/installed-NAME/session.json --engine podman --internet` (or `--engine
+docker`). Start a non-graphical session with `installed_desktop.py start --name
+NAME --headless --build BUILD`; add `--init openrc` for Alpine. This uses the same
+init/control owner without acquiring a display, GPU, HOME role or user desktop;
+it requires the guest's Python, D-Bus and init packages, not Weston. Use `run
+--root` for commands and always `stop --name NAME` afterward. Default-target
+boot remains a separate `test_os_boot.py` assertion. Docker defaults to its stock
+service; alternate daemon profiles are
+explicit diagnostic cases. `test_booted_nspawn.py --session SESSION --machine
+MACHINE` uses an existing `/var/lib/machines/MACHINE`, while
+`test_booted_lxc.py --session SESSION --archive ROOTFS.tar.gz` creates and removes
+its own container from a systemd/D-Bus/iproute2/Python rootfs. The latter two
+share readiness and TCP/UDP assertions and run three boot/service/network/stop
+cycles, including forced termination. Retain original application sandbox
+policy; successful command-only startup is not boot acceptance.
+
 The Docker and Podman network probes allocate paired TCP/UDP ports through an
 observer outside Shroot, then check publication, collision rejection, and port
 release. They do not assume fixed test ports are unused. Docker diagnostic
@@ -110,9 +127,10 @@ Both engine probes keep internet checks opt-in (`--internet`); local TCP/UDP,
 container-name DNS, conflicts and cleanup must pass independently. A token-scoped
 HTTP endpoint on the native host interface also verifies outbound request and
 response routing without a public server. This catches reverse-NAT/raw-chain
-ordering failures independently of external connectivity. Podman uses
-`--host-limits` to retain the inherited Android hard limits, not claim that
-guest root can raise them.
+ordering failures independently of external connectivity. Podman's optional
+`--host-limits` is diagnostic: normal acceptance uses the common logical
+NOFILE/NPROC contract without explicit container limit overrides. The physical
+Android limits still apply.
 `test_routed_network.py` adds libc interface lookup, IPv4 packet information
 with absent/truncated receive buffers, a datagram queued before sender close,
 and receiver-close/rebind without reusing stale reply mappings.

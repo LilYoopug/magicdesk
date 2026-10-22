@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run existing container network probes in a retained installed systemd session."""
+"""Run container network probes in a retained installed init session."""
 import argparse
 import json
 from pathlib import Path
@@ -15,7 +15,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--session', required=True, type=Path)
     parser.add_argument('--engine', choices=('docker', 'podman'), required=True)
-    parser.add_argument('--docker-profile', choices=('routed', 'iptables', 'nftables'), default='nftables')
+    parser.add_argument('--docker-profile', choices=('service', 'routed', 'iptables', 'nftables'), default='service')
     parser.add_argument('--internet', action='store_true')
     args = parser.parse_args()
     state = json.loads(args.session.read_text())
@@ -36,14 +36,23 @@ def main():
                     '0', '0', '0', '0', '0', observer.address, 'overlay2',
                     '/var/lib/md-fixture-docker', str(int(args.docker_profile == 'routed')),
                     str(int(args.internet))]
+            if args.docker_profile == 'service':
+                argv = ['python3', '-c',
+                    'from probe_docker_runtime import guest; guest("service", "python:3.14-alpine", '
+                    'observer=' + repr(observer.address) + ', internet=' + repr(args.internet) + ', '
+                    'endpoint="unix:///var/run/docker.sock")']
+                command = 'systemctl start docker.service && cd ' + shlex.quote(state['target']) + ' && ' + shlex.join(argv)
+            else:
+                command = shlex.join(argv)
         else:
             options = dict(directory='/tmp/md-podman-' + tag, cache='/var/lib/md-fixture-podman',
                 storage='overlay', network='bridge', image='docker.io/library/alpine:3.23',
                 cgroups='enabled', internet=args.internet, portsImage='docker.io/library/python:3.14-alpine',
                 trace=False, hostLimits=False, unlimitedPids=False, execRepeats=3, observer=observer.address)
             argv = ['python3', state['target'] + '/probe_podman_runtime.py', '--guest', json.dumps(options)]
+            command = shlex.join(argv)
         request = urllib.request.Request('http://127.0.0.1:' + str(state['rootPort']),
-            data=json.dumps(dict(id=tag, command=shlex.join(argv), wait=True)).encode(),
+            data=json.dumps(dict(id=tag, command=command, wait=True)).encode(),
             headers={'Authorization': 'Bearer ' + state['token']})
         print('Container log: ' + state['directory'] + '/' + tag + '.log', flush=True)
         # EVENT_WAIT: probe completion through the exact booted session; no replay on timeout.
@@ -62,7 +71,10 @@ def main():
             assert report['passed'], report.get('failure')
         else:
             assert report.get('portPublicationPassed') and report.get('containerPeerExchangePassed'), report
-            assert report['daemonExitCode'] == 0 and report['readerDrained'], report
+            if args.docker_profile == 'service':
+                assert report['externalDaemon'] and report['daemonRetained'], report
+            else:
+                assert report['daemonExitCode'] == 0 and report['readerDrained'], report
             if args.internet:
                 assert report['internetPassed'], report
             for item in report['commands']:

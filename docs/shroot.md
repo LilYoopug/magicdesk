@@ -621,7 +621,11 @@ lost on power failure; process-crash tests do not establish hardware power-loss
 guarantees. See [inode-store transactions](../native/shroot/inode-store.md#transactions).
 
 `backup` requires an inactive store and includes its shared data; a restored
-instance has no lower dependencies. `remove` also requires an inactive store.
+instance has no lower dependencies. `remove` also requires an inactive store,
+but does not open or validate its database: obsolete or damaged instances use
+the same command, without a force flag. Other stores' dependency lists and
+native lifetime locks still protect shared data; unreadable dependency lists
+fail explicitly instead of authorizing deletion.
 Explicit `prune` checks dependencies and lifetime locks before removing unused
 stores, images, layers and downloads. Busy or uninspectable resources stop
 cleanup; attached host directories are never removed. There is no background GC.
@@ -849,6 +853,12 @@ published ports commit atomically; unsupported expressions fail explicitly.
 Unfiltered internal/outbound streams retain native data IO. Filtered/NAT flows
 use an event-driven relay with cached decisions, not syscall-by-syscall packet
 interpretation. Root-fabric published ports also use this relay.
+
+In `routed`, explicit binds in the initial network namespace reserve the same
+port on Android, including loopback binds. Android can deny a privileged port
+even to guest root. Use `bridge` for private services such as a DNS stub on port
+53; publish only the required ports, using an available host port. Shroot does
+not silently turn a failed publication into a private listener.
 
 Changes apply to existing relayed flows. A rule that would deny an already-open
 direct native flow is rejected atomically with `EBUSY`; Shroot cannot insert a

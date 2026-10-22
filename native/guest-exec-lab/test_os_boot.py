@@ -17,6 +17,8 @@ import subprocess
 import sys
 import time
 
+from init_fixture import OPENRC_PREPARE
+
 SYSTEMD = r'''
 mkdir -p /run/systemd/system/default.target.wants
 date +%s > "$1/started"
@@ -74,22 +76,7 @@ EOF
 exec /usr/lib/systemd/systemd --system --show-status=yes --crash-shell=no --crash-reboot=no
 '''
 
-OPENRC = r'''
-# The image has no enabled runlevels. Select OpenRC's container service policy,
-# without changing packaged init or service scripts. All configuration is private.
-cp /etc/rc.conf /run/rc.conf
-printf '\nrc_sys="docker"\nrc_verbose=yes\nrc_nocolor=yes\n' >> /run/rc.conf
-mount --bind /run/rc.conf /etc/rc.conf
-cp -a /etc/conf.d /run/conf.d
-printf '\nlog_dmesg=no\n' >> /run/conf.d/bootmisc
-mount --bind /run/conf.d /etc/conf.d
-mount -t tmpfs tmpfs /etc/runlevels
-mkdir -p /etc/runlevels/sysinit /etc/runlevels/boot /etc/runlevels/default /etc/runlevels/shutdown
-for service in procfs sysfs cgroups; do rc-update add "$service" sysinit; done
-for service in bootmisc hostname; do rc-update add "$service" boot; done
-for service in syslog crond local; do rc-update add "$service" default; done
-mount -t tmpfs tmpfs /etc/local.d
-mkdir -p /run/openrc
+OPENRC = OPENRC_PREPARE + r'''
 printf '#!/bin/sh\nexec /usr/bin/python3 %s/observer.py --openrc-observer %s\n' "$1" "$1" > /etc/local.d/observer.start
 chmod 755 /etc/local.d/observer.start
 exec /sbin/openrc-init
@@ -250,6 +237,8 @@ def main():
         created = True
         if args.init == 'openrc':
             suite.transport.upload(suite.client, Path(__file__), suite.base + '/observer.py')
+            suite.transport.upload(suite.client, Path(__file__).with_name('init_fixture.py'),
+                                   suite.base + '/init_fixture.py')
         program = {'systemd': SYSTEMD, 'openrc': OPENRC, 'runit': RUNIT}[args.init]
         if args.rtkit:
             checks = '''
