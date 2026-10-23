@@ -165,11 +165,6 @@ static long send_captured(const struct msghdr *original, const unsigned long *a,
         if (CMSG_ALIGN(h.cmsg_len)>original->msg_controllen-pos) break;
         pos+=CMSG_ALIGN(h.cmsg_len);
     }
-    long native_pid=0;
-    if (!result && frame->options.credentials) {
-        native_pid=md_pid_native(frame->options.claimed.pid);
-        if (native_pid<=0) result=-EPERM;
-    }
     if (!result) result=md_socket_capture_inputs(md_guest_buffer_control(MD_FS_BUFFER_SEND_PREPARE,0,0),
         &frame->scratch.capture.capture,frame->input.keep,frame->input.count);
     if (!result) {

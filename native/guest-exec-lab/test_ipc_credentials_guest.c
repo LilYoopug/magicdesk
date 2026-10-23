@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
+#include <linux/capability.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <netinet/in.h>
@@ -144,21 +145,24 @@ static void socket_mount_paths(const char *self) {
     CHECK(!umount(directory) && !rmdir(directory));
     puts("PASS socket names: tmpfs, unlink, detached mounts, inherited/exec descriptors and peer addresses");
 }
-static void send_identity(int fd, uid_t uid, int right, int success) {
+static void send_claim(int fd, pid_t pid, uid_t uid, int right, int error) {
     char data='m'; struct iovec io={&data,1};
     union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(struct ucred))+CMSG_SPACE(sizeof(int))]; } c={0};
     struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=c.bytes,
         .msg_controllen=CMSG_SPACE(sizeof(struct ucred))+(right>=0?CMSG_SPACE(sizeof(int)):0)};
     struct cmsghdr *h=CMSG_FIRSTHDR(&m);
     *h=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(struct ucred)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_CREDENTIALS};
-    struct ucred cred={getpid(),uid,getgid()}; memcpy(CMSG_DATA(h),&cred,sizeof(cred));
+    struct ucred cred={pid,uid,getgid()}; memcpy(CMSG_DATA(h),&cred,sizeof(cred));
     if (right>=0) {
         h=(void *)(c.bytes+CMSG_SPACE(sizeof(cred)));
         *h=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(int)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_RIGHTS};
         memcpy(CMSG_DATA(h),&right,sizeof(right));
     }
-    if (success) CHECK(sendmsg(fd,&m,0)==1);
-    else { errno=0; CHECK(sendmsg(fd,&m,0)==-1 && errno==EPERM); }
+    if (!error) CHECK(sendmsg(fd,&m,0)==1);
+    else { errno=0; CHECK(sendmsg(fd,&m,0)==-1 && errno==error); }
+}
+static void send_identity(int fd, uid_t uid, int right, int success) {
+    send_claim(fd,getpid(),uid,right,success ? 0 : EPERM);
 }
 static void receive_identity(int fd, pid_t pid, uid_t uid, int flags, int batch, int rights) {
     char data; struct iovec io={&data,1};
@@ -451,6 +455,26 @@ static void messages(void) {
     receive_identity(pair[0],child,1234,0,0,0);
     close(pair[0]); close(pair[1]); close(transferred[0]); close(transferred[1]);
     puts("PASS explicit message credentials: queued identity, rejected forgery, peek, recv batch, SCM_RIGHTS");
+}
+static void claimed_process(void) {
+    int pair[2], one=1;
+    CHECK(!socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0,pair)
+        && !setsockopt(pair[0],SOL_SOCKET,SO_PASSCRED,&one,sizeof(one)));
+    pid_t parent=getpid(), child=fork(); CHECK(child>=0);
+    if (!child) {
+        send_claim(pair[1],parent,1234,-1,0);
+        send_claim(pair[1],0,0,-1,ESRCH);
+        CHECK(!setuid(1234));
+        send_claim(pair[1],parent,1234,-1,EPERM);
+        send_claim(pair[1],getpid(),1234,-1,0);
+        _exit(0);
+    }
+    done(child);
+    receive_identity(pair[0],parent,1234,MSG_PEEK,0,0);
+    receive_identity(pair[0],parent,1234,0,0,0);
+    receive_identity(pair[0],child,1234,0,0,0);
+    CHECK(!close(pair[0]) && !close(pair[1]));
+    puts("PASS claimed process: privileged parent PID, unauthorized/missing rejection, peek and sender exit");
 }
 static void truncation(void) {
     int p[2], one=1; CHECK(!socketpair(AF_UNIX,SOCK_STREAM,0,p));
@@ -757,6 +781,13 @@ static void origin_send(unsigned mode, int protected) {
         *h=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(struct ucred)),.cmsg_level=SOL_SOCKET,.cmsg_type=SCM_CREDENTIALS};
         struct ucred cred={getpid()+(mode==14),1234,2345}; memcpy(CMSG_DATA(h),&cred,sizeof(cred));
         messages[0].msg_hdr.msg_controllen+=CMSG_SPACE(sizeof(cred));
+        if (mode==14) {
+            struct __user_cap_header_struct header={_LINUX_CAPABILITY_VERSION_3,0};
+            struct __user_cap_data_struct caps[2];
+            CHECK(!syscall(SYS_capget,&header,caps));
+            caps[CAP_SYS_ADMIN/32].effective&=~(1U<<(CAP_SYS_ADMIN%32));
+            CHECK(!syscall(SYS_capset,&header,caps));
+        }
     } else if (mode==11 || mode==12) {
         struct cmsghdr *h=(void *)(control.bytes+messages[0].msg_hdr.msg_controllen);
         *h=(struct cmsghdr){.cmsg_len=CMSG_LEN(sizeof(int)),.cmsg_level=mode==11 ? SOL_SOCKET : IPPROTO_IP,
@@ -1167,6 +1198,13 @@ int main(int argc,char **argv) {
         custody(!strcmp(argv[1],"--custody"),atoi(argv[2]),atoi(argv[3])); return 0;
     }
     CHECK(getuid()==0);
+    if (argc==2 && !strcmp(argv[1],"--claimed-process")) {
+        alarm(30); claimed_process();
+        CHECK(!unshare(CLONE_NEWPID));
+        pid_t child=fork(); CHECK(child>=0);
+        if (!child) { CHECK(getpid()==1); claimed_process(); _exit(0); }
+        done(child); return 0;
+    }
     if (argc==4 && !strcmp(argv[1],"--socket-name")) {
         struct sockaddr_un observed={0}; socklen_t n=sizeof(observed);
         CHECK(!getsockname(atoi(argv[2]),(void *)&observed,&n));
@@ -1213,6 +1251,7 @@ int main(int argc,char **argv) {
     close(p[0]); close(p[1]);
     stream(0); stream(1);
     messages();
+    claimed_process();
     truncation();
     bound_reuse();
     puts("PASS connection snapshots: pair, groups, pathname, abstract, fork, drop, dup, peer exit");

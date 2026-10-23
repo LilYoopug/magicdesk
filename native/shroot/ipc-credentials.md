@@ -375,18 +375,21 @@ forbids clone and SO_DOMAIN in both ordinary and nondumpable processes.
 
 ## Explicit Credential Messages
 
-SCM_CREDENTIALS validates the claimed guest IDs against the sending task. PID
-must identify that task's process in its active PID namespace; virtual root may
-select guest UID/GID, while
-other users may select only their real/effective/saved IDs. On adapted connections the kernel receives
+SCM_CREDENTIALS validates the claimed guest IDs against the captured sending
+task. Another PID requires CAP_SYS_ADMIN in the owner of the active PID
+namespace and an existing subject. A child user namespace cannot authorize
+claims in its ancestor-owned PID namespace. UID/GID selection requires
+CAP_SETUID/CAP_SETGID or the sender's real/effective/saved IDs. The worker pins
+the claimed process and captures its namespace numbers; reaping cannot retarget
+the claim to a reused native PID. On adapted connections the kernel receives
 the actual Android credentials, plus an identity bundle as one extra
 SCM_RIGHTS descriptor. The bundle retains a sealed identity record, the original
-sender PIDFD, and the IPC epoch/store leases. Its random nonce, connection identity, kernel file identity
+claimed-process PIDFD, and the IPC epoch/store leases. Its random nonce, connection identity, kernel file identity
 and sending side are recorded by the metadata authority. Only the
 opposite side of the same connection can validate it; replay toward the sender,
 another connection or another store does not translate the token. The receiving
 adapter removes that descriptor and publishes the validated guest credentials instead.
-The token also binds the retained PIDFD's kernel identity and records the sender's immutable PID-number snapshot at send time.
+The token also binds the retained PIDFD's kernel identity and records the subject's immutable PID-number snapshot at send time.
 Queued messages and peeks retain those numbers after sender exit/reaping, even
 if the native PID has been assigned to another process.
 

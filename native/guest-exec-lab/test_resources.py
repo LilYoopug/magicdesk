@@ -381,6 +381,10 @@ def main():
         if args.case == "ipc-paths":
             check("guest socket paths", shlex.join(run + ["--socket-paths"]), "PASS socket paths:")
             return
+        for entry in (0, 1):
+            claimed = run[:1] + ["--env", f"SHROOT_MACHINE_ENTRY={entry}"] + run[1:]
+            check(f"guest claimed PID entry={entry}", shlex.join(claimed + ["--claimed-process"]),
+                  "PASS claimed process:")
         for mode in range(32):
             for guest in (False, True):
                 check(f"filtered socket IO {mode} guest={guest}",

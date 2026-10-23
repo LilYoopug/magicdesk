@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -154,7 +155,7 @@ static void pid_namespaces(struct md_ipc_credentials *owner) {
     md_ipc_credentials_execute(owner,&identity,sender,&q,&out,NULL); assert(!out.error);
     q.flags=MD_IPC_MESSAGE_CREATE; q.offset=getpid();
     md_ipc_credentials_execute(owner,&identity,sender,&q,&out,NULL);
-    assert(out.error==-EPERM && out.fd==-1);
+    assert(out.error==-ESRCH && out.fd==-1);
     q.offset=expected[1];
     md_ipc_credentials_execute(owner,&identity,sender,&q,&out,NULL); assert(!out.error && out.fd>=0);
     int token=out.fd;
@@ -180,6 +181,65 @@ static void pid_namespaces(struct md_ipc_credentials *owner) {
     md_pid_namespace_release(other); md_pid_namespace_release(child); md_pid_namespace_release(parent);
     md_identity_release(&identity);
     puts("PASS IPC PID credentials: connection/send snapshots, receiver-relative numbers, reaping and native PID reuse");
+}
+static void claimed_pid(struct md_ipc_credentials *owner) {
+    int ready[2]; assert(!pipe(ready));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        close(ready[1]); char byte; assert(read(ready[0],&byte,1)==0); _exit(0);
+    }
+    close(ready[0]);
+    struct md_identity identity=md_identity_new(0,0);
+    struct md_pid_namespace *space=md_pid_namespace_new(NULL,NULL);
+    struct md_pid_identity *sender=NULL, *subject=NULL;
+    assert(space && !md_pid_identity_prepare(space,&sender)
+        && !md_pid_identity_prepare(space,&subject));
+    assert(!md_pid_identity_publish(sender,getpid(),getpid())
+        && !md_pid_identity_publish(subject,child,child));
+    pid_t logical=md_pid_identity_number(subject,space);
+    int pair[2]; assert(!socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0,pair));
+    assert(!request(owner,MD_IPC_PAIR,pair[0],pair[1],NULL,0).error);
+    struct md_fs_request q={.operation=MD_FS_IPC,.flags=MD_IPC_MESSAGE_CREATE,
+        .directory={pair[0],-1},.peer=getpid(),.offset=logical};
+    struct md_fs_result out;
+    identity.caps.effective&=~(UINT64_C(1)<<CAP_SYS_ADMIN);
+    md_ipc_credentials_execute(owner,&identity,sender,&q,&out,NULL);
+    assert(out.error==-EPERM && out.fd==-1);
+    identity.caps.effective|=UINT64_C(1)<<CAP_SYS_ADMIN;
+    struct md_identity nested=md_identity_copy(&identity);
+    assert(!md_identity_enter_user_namespace(&nested));
+    struct md_user_authority authority={.caps=UINT64_MAX};
+    struct md_id_extent map={0,0,1};
+    assert(!md_user_namespace_map(nested.user_namespace,0,&authority,&authority,&map,1)
+        && !md_user_namespace_map(nested.user_namespace,1,&authority,&authority,&map,1));
+    md_ipc_credentials_execute(owner,&nested,sender,&q,&out,NULL);
+    assert(out.error==-EPERM && out.fd==-1);
+    md_identity_release(&nested);
+    md_ipc_credentials_execute(owner,&identity,sender,&q,&out,NULL);
+    assert(!out.error && out.fd>=0); int token=out.fd;
+    q.offset=0;
+    md_ipc_credentials_execute(owner,&identity,sender,&q,&out,NULL);
+    assert(out.error==-ESRCH && out.fd==-1);
+    struct ucred native={child,0,0}; struct md_ipc_claim claim;
+    assert(!md_ipc_credentials_claim(&identity,NULL,getpid(),&native,&claim)
+        && claim.native==child && claim.count==0); close(claim.pidfd);
+    close(ready[1]); int status;
+    assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    md_pid_identity_exit(subject); md_pid_identity_reap(subject);
+    q.offset=logical;
+    md_ipc_credentials_execute(owner,&identity,sender,&q,&out,NULL);
+    assert(out.error==-ESRCH && out.fd==-1);
+    for (unsigned i=0;i<2;++i) {
+        q.flags=MD_IPC_MESSAGE_READ; q.directory[0]=pair[1]; q.directory[1]=token;
+        md_ipc_credentials_execute(owner,&identity,i ? NULL : sender,&q,&out,NULL);
+        assert(!out.error && out.position==(i ? child : logical) && out.fd>=0);
+        struct pollfd p={out.fd,POLLIN,0}; assert(poll(&p,1,0)==1 && (p.revents&POLLIN));
+        close(out.fd);
+    }
+    close(token); close(pair[0]); close(pair[1]);
+    md_pid_identity_release(subject); md_pid_identity_release(sender);
+    md_pid_namespace_release(space); md_identity_release(&identity);
+    puts("PASS IPC claimed PID: namespace-owner capability, native/logical IDs, subject pidfd and queued exit snapshot");
 }
 static void paired(struct md_ipc_credentials *first, struct md_ipc_credentials *second,
         struct md_ipc_credentials *foreign, int type) {
@@ -544,6 +604,7 @@ void test_ipc_connections(const char *directory) {
     for (unsigned i=0;i<3;++i) paired(first,second,foreign,types[i]);
     user_namespaces(first);
     pid_namespaces(first);
+    claimed_pid(first);
     independent(directory,first,second,SOCK_STREAM,1,MD_IPC_TRANSPORT_NATIVE,MD_IPC_TRANSPORT_NATIVE);
     independent(directory,first,second,SOCK_SEQPACKET,2,MD_IPC_TRANSPORT_NATIVE,MD_IPC_TRANSPORT_NATIVE);
     admission(first,3,0,0); admission(first,4,1,1);

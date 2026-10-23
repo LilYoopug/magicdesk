@@ -60,6 +60,9 @@ if test "$code" = 0; then
         # The outer launch deadline fails a stalled journal, never implies success.
         journalctl --sync
         journalctl -t md-boot-test --no-pager -o cat | grep -Fx "$marker"
+        logger --id=$$ -t md-boot-logger "$marker"
+        journalctl --sync
+        journalctl _PID=$$ SYSLOG_IDENTIFIER=md-boot-logger --no-pager -o cat | grep -Fx "$marker"
         systemctl restart systemd-logind.service
         systemctl is-active systemd-logind.service
         test "$(systemctl is-system-running)" = running

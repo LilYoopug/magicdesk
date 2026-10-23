@@ -212,9 +212,10 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     }
     if (!error && r->kind==PREPARE && bound) error=credentials(r,authority,&binding);
     if (!error && r->kind==PREPARE && !bound && r->options.credentials) {
-        uint32_t uid,gid;
+        struct md_ipc_claim claim;
         error=md_ipc_credentials_claim(&r->task.task.identity,r->task.task.pid_group,
-            r->task.peer,&r->options.claimed,&uid,&gid);
+            r->task.peer,&r->options.claimed,&claim);
+        if (!error) close(claim.pidfd);
     }
     md_ipc_binding_release(&binding); r->error=error;
 }

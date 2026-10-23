@@ -674,20 +674,47 @@ int md_ipc_credentials_destination(struct md_ipc_credentials *s,const struct soc
 struct message_token { uint64_t magic; unsigned char nonce[16]; uint64_t sender_device, sender_inode; };
 #define MESSAGE_MAGIC UINT64_C(0x4d44495043494431)
 int md_ipc_credentials_claim(const struct md_identity *id, const struct md_pid_identity *process,
-        pid_t peer, const struct ucred *claim, uint32_t *uid, uint32_t *gid) {
-    *uid=md_user_namespace_into(id->user_namespace,0,claim->uid);
-    *gid=md_user_namespace_into(id->user_namespace,1,claim->gid);
-    if (*uid==UINT32_MAX || *gid==UINT32_MAX) return -EINVAL;
-    pid_t self=process ? md_pid_identity_number(process,md_pid_identity_namespace(process)) : peer;
-    if (claim->pid!=self
-            || (!md_identity_capable(id,CAP_SETUID) && *uid!=id->uid.real
-                && *uid!=id->uid.effective && *uid!=id->uid.saved)
-            || (!md_identity_capable(id,CAP_SETGID) && *gid!=id->gid.real
-                && *gid!=id->gid.effective && *gid!=id->gid.saved)) return -EPERM;
+        pid_t peer, const struct ucred *claim, struct md_ipc_claim *out) {
+    uint32_t uid=md_user_namespace_into(id->user_namespace,0,claim->uid);
+    uint32_t gid=md_user_namespace_into(id->user_namespace,1,claim->gid);
+    if (uid==UINT32_MAX || gid==UINT32_MAX) return -EINVAL;
+    struct md_pid_namespace *space=md_pid_identity_namespace(process);
+    pid_t self=process ? md_pid_identity_number(process,space) : peer;
+    if ((claim->pid!=self && !md_identity_capable_in(id,md_pid_namespace_owner(space),CAP_SYS_ADMIN))
+            || (!md_identity_capable(id,CAP_SETUID) && uid!=id->uid.real
+                && uid!=id->uid.effective && uid!=id->uid.saved)
+            || (!md_identity_capable(id,CAP_SETGID) && gid!=id->gid.real
+                && gid!=id->gid.effective && gid!=id->gid.saved)) return -EPERM;
+    struct md_pid_identity *selected=NULL;
+    const struct md_pid_identity *subject=process;
+    if (claim->pid!=self) {
+        if (space) {
+            selected=md_pid_namespace_lookup(space,claim->pid);
+            if (!selected) return -ESRCH;
+        } else if (claim->pid<=0) return -ESRCH;
+        subject=selected;
+    }
+    pid_t native=subject ? md_pid_identity_native(subject) : claim->pid;
+    int fd=(int)syscall(SYS_pidfd_open,native,0), error=fd<0 ? -errno : 0;
+    if (!error && selected) {
+        /* Reaping may race the worker. Never bind a reused native PID to the
+         * retired logical identity that was found before pidfd_open. */
+        struct md_pid_identity *current=md_pid_namespace_lookup(space,claim->pid);
+        if (current!=selected) error=-ESRCH;
+        md_pid_identity_release(current);
+    }
+    if (error) {
+        if (fd>=0) close(fd);
+        md_pid_identity_release(selected); return error;
+    }
+    *out=(struct md_ipc_claim){.native=native,.pidfd=fd,.uid=uid,.gid=gid};
+    out->count=md_pid_identity_export(subject,out->numbers);
+    md_pid_identity_release(selected);
     return 0;
 }
 static int message_record(struct md_ipc_credentials *s, const struct md_identity *id, const struct md_pid_identity *process,
-        const struct md_fs_request *req, struct md_ipc_connection connection, int sender, struct md_fs_result *out) {
+        const struct md_fs_request *req, struct md_ipc_connection connection, int sender,
+        const struct md_ipc_claim *claim, struct md_fs_result *out) {
     int r=0;
     sqlite3_stmt *q=NULL;
     struct message_token token = {.magic=MESSAGE_MAGIC};
@@ -696,10 +723,6 @@ static int message_record(struct md_ipc_credentials *s, const struct md_identity
     struct stat sender_stat;
     if (fstat(sender,&sender_stat)) return -errno;
     if (req->flags == MD_IPC_MESSAGE_CREATE || req->flags == MD_IPC_MESSAGE_SENDER) {
-        int implicit=req->flags==MD_IPC_MESSAGE_SENDER;
-        uint32_t uid=id->uid.effective, gid=id->gid.effective;
-        struct ucred claim={(pid_t)req->offset,req->attributes.uid,req->attributes.gid};
-        if (!implicit && (r=md_ipc_credentials_claim(id,process,req->peer,&claim,&uid,&gid))) return r;
         if (getrandom(token.nonce, sizeof(token.nonce), 0) != sizeof(token.nonce)) return -EIO;
         token.sender_device=sender_stat.st_dev; token.sender_inode=sender_stat.st_ino;
         fd = (int)syscall(SYS_memfd_create, "guest-ipc-message", MFD_CLOEXEC | MFD_ALLOW_SEALING);
@@ -712,11 +735,9 @@ static int message_record(struct md_ipc_credentials *s, const struct md_identity
             sqlite3_bind_blob(q, 1, token.nonce, sizeof(token.nonce), SQLITE_STATIC);
             sqlite3_bind_blob(q, 2, connection.link, sizeof(connection.link), SQLITE_STATIC);
             sqlite3_bind_int64(q, 3, st.st_dev); sqlite3_bind_int64(q, 4, st.st_ino);
-            sqlite3_bind_int(q, 5, req->peer); sqlite3_bind_int64(q, 6, uid); sqlite3_bind_int64(q, 7, gid);
+            sqlite3_bind_int(q, 5, claim->native); sqlite3_bind_int64(q, 6, claim->uid); sqlite3_bind_int64(q, 7, claim->gid);
             sqlite3_bind_int(q, 8, (int)connection.side);
-            struct md_pid_number_value numbers[MD_PID_LEVELS];
-            unsigned count=md_pid_identity_export(process,numbers);
-            sqlite3_bind_blob(q,9,numbers,(int)(count*sizeof(*numbers)),SQLITE_TRANSIENT);
+            sqlite3_bind_blob(q,9,claim->numbers,(int)(claim->count*sizeof(*claim->numbers)),SQLITE_TRANSIENT);
             r = sql(sqlite3_step(q));
         }
         if (!r) out->fd = fd; else close(fd);
@@ -750,9 +771,18 @@ static int message_record(struct md_ipc_credentials *s, const struct md_identity
 static int message_identity(struct md_ipc_credentials *s,const struct md_identity *id,const struct md_pid_identity *process,
         const struct md_fs_request *req,struct md_ipc_connection connection,struct md_fs_result *out) {
     if (req->flags!=MD_IPC_MESSAGE_READ) {
-        int sender=(int)syscall(SYS_pidfd_open,req->peer,0);
+        struct md_ipc_claim claim={.native=req->peer,.uid=id->uid.effective,.gid=id->gid.effective};
+        if (req->flags==MD_IPC_MESSAGE_CREATE) {
+            struct ucred requested={(pid_t)req->offset,req->attributes.uid,req->attributes.gid};
+            int error=md_ipc_credentials_claim(id,process,req->peer,&requested,&claim);
+            if (error) return error;
+        } else {
+            claim.count=md_pid_identity_export(process,claim.numbers);
+            claim.pidfd=(int)syscall(SYS_pidfd_open,claim.native,0);
+        }
+        int sender=claim.pidfd;
         if (sender<0) return -errno;
-        int error=message_record(s,id,process,req,connection,sender,out);
+        int error=message_record(s,id,process,req,connection,sender,&claim,out);
         if (!error) {
             int token=out->fd, bundle=-1;
             int rights[]={token,sender,s->scope->lease,s->scope->root};
@@ -765,7 +795,7 @@ static int message_identity(struct md_ipc_credentials *s,const struct md_identit
     int error=md_fd_bundle_peek(req->directory[1],4,rights);
     if (error) return error==-ENOMEM || error==-EMFILE || error==-ENFILE ? error : -ENODATA;
     struct md_fs_request q=*req; q.directory[1]=rights[0];
-    error=message_record(s,id,process,&q,connection,rights[1],out);
+    error=message_record(s,id,process,&q,connection,rights[1],NULL,out);
     if (!error) { out->fd=rights[1]; rights[1]=-1; }
     for (unsigned i=0;i<4;++i) if (rights[i]>=0) close(rights[i]);
     return error;

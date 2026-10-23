@@ -9,8 +9,17 @@
 struct md_ipc_credentials;
 struct ucred;
 struct sockaddr_un;
+struct md_ipc_claim {
+    pid_t native;
+    int pidfd;
+    uint32_t uid, gid;
+    unsigned count;
+    struct md_pid_number_value numbers[MD_PID_LEVELS];
+};
+/* Success pins the claimed process; caller closes pidfd. The sender's captured
+ * identity authorizes the claim, independently of the subject's credentials. */
 int md_ipc_credentials_claim(const struct md_identity *, const struct md_pid_identity *,
-    pid_t peer, const struct ucred *, uint32_t *uid, uint32_t *gid);
+    pid_t peer, const struct ucred *, struct md_ipc_claim *);
 /* Immutable application ancillary format, selected at socketpair/connect from
  * runtime-owner declarations, never from application bytes or a received FD.
  * NATIVE is also the explicit agreement when either endpoint offers none. */
