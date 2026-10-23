@@ -282,9 +282,18 @@ lookup and enumeration both omit `pressure`. Other errors fail preparation;
 no zero-valued statistics are fabricated. A readable interface retains native
 host-wide samples, not invented guest-cgroup accounting. Bind, detached mount
 and namespace copies retain the capability snapshot without syscall-path probes.
-The initial unmounted host-proc passthrough retains native access behavior.
+The initial unmounted host-proc passthrough retains native PSI access behavior.
 `test_fs_context.c` covers complete/partial/denied/error admission, and
 `test_proc_policy.py` checks both mount APIs, listing, lookup, bind and copy.
+
+Immutable guest proc text shares one read-only provider: `devices` describes
+the guest driver families, and `cmdline` contains only a newline because a
+userspace guest does not boot its own kernel. Android boot arguments must not
+drive guest init policy. Both the initial proc view and explicit proc mounts
+use this provider, with the same inode identity in enumeration/stat,
+descriptor-relative opens, seek/pread and namespace ownership.
+`subset=pid` hides these non-task entries. This does
+not change `/proc/PID/cmdline`, which reports that process's arguments.
 
 Status/stat use typed per-open snapshots with guest IDs, credentials and debugger
 relationships; seeking to zero refreshes the snapshot. A zombie remains visible

@@ -59,7 +59,7 @@ struct md_proc_metadata_request { int32_t process, descriptor; uint32_t kind, ac
 struct md_proc_metadata_result { struct md_fs_info value; uint32_t kind; unsigned long filesystem; };
 static inline int md_proc_control_kind(enum md_proc_kind kind) {
     return (kind>=MD_PROC_UID_MAP && kind<=MD_PROC_NS_UNSUPPORTED) || md_proc_network_control(kind)
-        || kind==MD_PROC_MAX_USER_NAMESPACES || kind==MD_PROC_DEVICES;
+        || kind==MD_PROC_MAX_USER_NAMESPACES || md_proc_static(kind);
 }
 long md_proc_control_open(const struct md_proc_path *, int flags, uint64_t view);
 long md_proc_control_known(int fd);

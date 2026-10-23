@@ -44,7 +44,7 @@ set(origins ${src}/fs_anchor.c ${src}/fs_origin_transfer.c ${src}/inode_lifetime
 list(APPEND origins ${src}/native_mounts.c ${src}/devpts_view.c ${src}/cgroup.c ${src}/cgroup_program.c ${src}/bpf_map.c ${src}/bpf_handle.c ${src}/sysfs_view.c ${src}/network_namespace.c ${src}/socket_filter.c ${src}/network_model.c ${src}/network_route.c ${src}/network_message.c ${src}/network_generic.c ${src}/network_endpoint.c ${src}/network_sysctl.c ${src}/network_proc.c
     ${src}/ipc_namespace.c ${src}/mqueue_view.c ${src}/landlock_policy.c ${src}/landlock_file.c
     ${src}/mount_stream.c ${src}/mount_pin.c ${src}/mount_propagation.c ${src}/temporary_directory.c ${src}/private_tree.c
-    ${src}/provider_tree.c ${src}/host_fs_view.c ${src}/device_events.c ${src}/identity_snapshot.c ${src}/proc_sysctl.c ${src}/user_sysctl.c ${src}/proc_devices.c ${src}/uts_namespace.c ${src}/control_event.c)
+    ${src}/provider_tree.c ${src}/host_fs_view.c ${src}/device_events.c ${src}/identity_snapshot.c ${src}/proc_sysctl.c ${src}/user_sysctl.c ${src}/proc_static.c ${src}/uts_namespace.c ${src}/control_event.c)
 list(APPEND origins ${fifo_descriptions} ${src}/fd_native_pin.c ${src}/network_ethernet.c)
 list(APPEND origins ${src}/proc_file.c ${src}/proc_namespace.c)
 list(APPEND origins ${src}/device_tree.c ${src}/fuse_device.c ${src}/fuse_transport.c ${src}/fuse_session.c)

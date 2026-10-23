@@ -27,6 +27,11 @@ int main(int argc, char **argv) {
     assert(!md_host_path("//dev/./shm/file") && md_host_path("/proc/self"));
     assert(!md_host_path("/process") && !md_host_path("relative"));
     assert(md_proc_path("/proc/self/fd/0").kind == MD_PROC_FD);
+    assert(md_proc_path("/proc/cmdline").kind == MD_PROC_KERNEL_CMDLINE);
+    assert(md_proc_path("//proc/./cmdline").kind == MD_PROC_KERNEL_CMDLINE);
+    assert(md_proc_path("/proc/self/cmdline").kind == MD_PROC_CMDLINE);
+    assert(md_proc_path("/proc/cmdline-other").kind == MD_PROC_NONE);
+    assert(md_proc_regular(MD_PROC_KERNEL_CMDLINE));
     assert(md_proc_path("/proc/mounts").ordinary_link);
     assert(md_proc_path("/proc/net").ordinary_link);
     assert(!md_proc_path("/proc/self/mounts").ordinary_link);

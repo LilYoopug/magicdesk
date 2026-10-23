@@ -15,6 +15,48 @@ import tempfile
 import traceback
 
 
+def kernel_arguments(root, expected=True):
+    if not expected:
+        try:
+            os.stat('cmdline', dir_fd=root)
+        except FileNotFoundError:
+            return
+        raise AssertionError('subset=pid exposed kernel command line')
+    with ExitStack() as cleanup:
+        fd = os.open('cmdline', os.O_RDONLY, dir_fd=root)
+        cleanup.callback(os.close, fd)
+        info = os.fstat(fd)
+        assert stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o444
+        assert os.read(fd, 4096) == b'\n' and os.read(fd, 1) == b''
+        assert os.pread(fd, 4096, 0) == b'\n'
+        assert os.lseek(fd, 0, os.SEEK_SET) == 0 and os.read(fd, 4096) == b'\n'
+        pin = os.open('cmdline', os.O_PATH | os.O_NOFOLLOW, dir_fd=root)
+        cleanup.callback(os.close, pin)
+        assert os.fstat(pin).st_ino == info.st_ino
+        assert os.stat('cmdline', dir_fd=root).st_ino == info.st_ino
+        directory = os.open('.', os.O_RDONLY | os.O_DIRECTORY, dir_fd=root)
+        try:
+            with os.scandir(directory) as entries:
+                nodes = {e.name: e.inode() for e in entries if e.name in ('cmdline', 'devices')}
+            assert nodes['cmdline'] == info.st_ino
+            assert nodes['devices'] == os.stat('devices', dir_fd=root).st_ino
+        finally:
+            os.close(directory)
+        try:
+            os.open('cmdline/invalid', os.O_RDONLY, dir_fd=root)
+        except OSError as error:
+            assert error.errno == errno.ENOTDIR, error
+        else:
+            raise AssertionError('kernel command line became a directory')
+        try:
+            writable = os.open('cmdline', os.O_WRONLY | os.O_TRUNC, dir_fd=root)
+        except OSError as error:
+            assert error.errno == errno.EACCES, error
+        else:
+            os.close(writable)
+            raise AssertionError('kernel command line is writable')
+
+
 def pressure(root, expected):
     directory = os.open('.', os.O_RDONLY | os.O_DIRECTORY, dir_fd=root)
     try:
@@ -94,6 +136,7 @@ def detached_proc():
         call(431, context, 6, 0, 0, 0)
         root = call(432, context, 1, 0)
         cleanup.callback(os.close, root)
+        kernel_arguments(root)
         pressure(root, os.environ.get('MD_TEST_PSI') == '1')
         pinned_links(root)
         assert os.readlink('/proc/self/fd/' + str(root)) == '/'
@@ -205,6 +248,7 @@ def detached_proc():
 def guest():
     root = os.open('/proc', os.O_PATH | os.O_DIRECTORY)
     try:
+        kernel_arguments(root)
         pinned_links(root)
         libc = ctypes.CDLL(None, use_errno=True)
         how = struct.pack('=QQQ', os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NOCTTY, 0, 0xb)
@@ -251,6 +295,16 @@ def guest():
         os.setgroups([])
         os.setgid(1000)
         os.setuid(1000)
+
+    def user_arguments():
+        user()
+        fd = os.open('/proc', os.O_PATH | os.O_DIRECTORY)
+        try:
+            kernel_arguments(fd)
+        finally:
+            os.close(fd)
+
+    child(user_arguments)
 
     def devices(root):
         path = Path(root) / 'devices'
@@ -320,6 +374,7 @@ def guest():
             mounts[key] = path
             fd = os.open(path, os.O_PATH | os.O_DIRECTORY)
             try:
+                kernel_arguments(fd, key != 'subset')
                 pressure(fd, key != 'subset' and os.environ.get('MD_TEST_PSI') == '1')
             finally:
                 os.close(fd)
@@ -332,7 +387,7 @@ def guest():
         source = root / 'replacement'
         source.write_bytes(b'private-proc-cover\n')
         cleanup.callback(source.unlink)
-        for suffix in ('sys/kernel/random/boot_id', 'sys/kernel/hostname'):
+        for suffix in ('sys/kernel/random/boot_id', 'sys/kernel/hostname', 'cmdline'):
             target = mounts['off'] / suffix
             original = target.read_bytes()
             other = (mounts['two'] / suffix).read_bytes()
@@ -531,13 +586,14 @@ def guest():
             call(97, 0x20000)
             fd = os.open(alias, os.O_PATH | os.O_DIRECTORY)
             try:
+                kernel_arguments(fd)
                 pressure(fd, os.environ.get('MD_TEST_PSI') == '1')
             finally:
                 os.close(fd)
             user()
             denied(lambda: os.stat(alias / parent), errno.ENOENT)
         child(copied)
-    print('PASS proc: O_NOATIME ownership/reopen/fcntl, hidepid modes/gid, retained FD, credentials/dumpability, subset, fsconfig, bind and namespace copy', flush=True)
+    print('PASS proc: kernel arguments, O_NOATIME ownership/reopen/fcntl, hidepid modes/gid, retained FD, credentials/dumpability, subset, fsconfig, bind and namespace copy', flush=True)
 
 
 def namespace_guest():

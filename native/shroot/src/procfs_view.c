@@ -5,6 +5,7 @@
 #include "inode_internal.h"
 #include "proc_paths.h"
 #include "proc_sysctl.h"
+#include "proc_static.h"
 #include "network_namespace.h"
 #include <dirent.h>
 #include <errno.h>
@@ -128,7 +129,7 @@ struct md_provider_tree *md_procfs_new(int parent,const char *text,const struct 
         if (fd<0) error=errno; else close(fd);
     }
     if (!error && mkdirat(root,"sys/user",0755)) error=errno;
-    const char *files[]={"sys/user/max_user_namespaces","devices"};
+    const char *files[]={"sys/user/max_user_namespaces","devices","cmdline"};
     for (size_t i=0;!error && i<sizeof(files)/sizeof(*files);++i) {
         int fd=openat(root,files[i],O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600);
         if (fd<0) error=errno; else close(fd);
@@ -298,7 +299,7 @@ static int control(const char *path,const char *name) {
         return n>0 && (size_t)n<sizeof(child)
             && md_proc_path_for(child,0,0).kind!=MD_PROC_NONE;
     }
-    return !strcmp(path,"/proc") && (!strcmp(name,"cgroups") || !strcmp(name,"devices"));
+    return !strcmp(path,"/proc") && (!strcmp(name,"cgroups") || md_proc_static_inode(name));
 }
 static int kernel_global(const char *name) {
     /* A mounted guest proc has no host reboot, raw kernel memory, kernel log,
@@ -480,7 +481,7 @@ int md_procfs_step(struct md_filesystem *fs,struct md_mount_namespace *view,stru
             int copy=fcntl(captured,F_DUPFD_CLOEXEC,3);
             return copy<0 ? -errno : copy;
         }
-        if (!link_inode && !sysctl && kind!=MD_PROC_MAX_USER_NAMESPACES && kind!=MD_PROC_DEVICES
+        if (!link_inode && !sysctl && kind!=MD_PROC_MAX_USER_NAMESPACES && !md_proc_static(kind)
                 && (!fs->actor || !md_network_namespace_managed(fs->actor->network)
                 || !md_proc_network_sysctl(kind))) return -EREMOTE;
     }
@@ -603,8 +604,9 @@ ssize_t md_procfs_getdents(struct md_filesystem *fs,const struct md_view_mount *
             int allowed=net ? network_entry(fs,path,name) : native && number ? permitted(fs,p,native,2) : 1;
             if (allowed<0) return allowed;
             if (allowed && (!native || number) && !(group==-1 && omitted(mount,p,name))) {
+                ino_t inode=group==-1 && !native ? md_proc_static_inode(name) : 0;
                 size_t record=md_directory_record_write((char *)data+written,capacity-written,
-                    name,strlen(name),entry.inode,entry.next,entry.type);
+                    name,strlen(name),inode ? (uint64_t)inode : entry.inode,entry.next,entry.type);
                 if (!record) {
                     if (lseek(fd,cursor,SEEK_SET)<0) return -errno;
                     return written ? (ssize_t)written : -EINVAL;

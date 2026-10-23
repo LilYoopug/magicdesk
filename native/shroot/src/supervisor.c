@@ -58,7 +58,7 @@
 #include <linux/nsfs.h>
 #include "proc_sysctl.h"
 #include "user_sysctl.h"
-#include "proc_devices.h"
+#include "proc_static.h"
 #include "network_proc.h"
 #include "socket_calls.h"
 #include "proc_control.h"
@@ -1594,14 +1594,14 @@ static struct md_control_file proc_control_view(struct thread *t,enum md_proc_ki
         return md_network_proc_new(target->resources.network,(enum md_network_table)(kind-MD_PROC_NET_TCP));
     }
     if (kind==MD_PROC_MAX_USER_NAMESPACES) return md_user_sysctl_new(t->identity.user_namespace,NULL);
-    if (kind==MD_PROC_DEVICES) return md_proc_devices_new(t->identity.user_namespace,NULL);
+    if (md_proc_static(kind)) return md_proc_static_new(kind,t->identity.user_namespace,NULL);
     return md_network_sysctl_new(t->resources.network,
         (enum md_network_parameter)(kind-MD_PROC_NET_UNPRIVILEGED_PORT),interface,NULL);
 }
 static int proc_node_metadata(struct thread *t, const struct md_proc_metadata_request *q, struct md_proc_metadata_result *out) {
     *out=(struct md_proc_metadata_result){0};
     struct stat st={0}, *value=&st;
-    if (md_proc_network_control(q->kind) || q->kind==MD_PROC_MAX_USER_NAMESPACES || q->kind==MD_PROC_DEVICES) {
+    if (md_proc_network_control(q->kind) || q->kind==MD_PROC_MAX_USER_NAMESPACES || md_proc_static(q->kind)) {
         if (!memchr(q->interface,0,sizeof(q->interface))) return -EINVAL;
         struct md_control_file view=proc_control_view(t,q->kind,q->process,q->interface);
         if (!view.ops) return -errno;
@@ -1855,7 +1855,7 @@ static void proc_file_request(struct thread *t, const struct seccomp_notif *q) {
         }
         else reply.error=-ENOTTY;
     } else if (operation==MD_PROC_FILE_OPEN && (md_proc_network_control(q->data.args[3])
-            || q->data.args[3]==MD_PROC_MAX_USER_NAMESPACES || q->data.args[3]==MD_PROC_DEVICES)) {
+            || q->data.args[3]==MD_PROC_MAX_USER_NAMESPACES || md_proc_static(q->data.args[3]))) {
         int flags=(int)q->data.args[4];
         char interface[16]={0};
         if (md_proc_network_interface(q->data.args[3])) {

@@ -56,13 +56,13 @@ not just a completed Mesa build or successful device enumeration.
 | ubuntu | H/N | H/N | H/N | H/N | I/N |
 | alpine | P/N | I/N | I/N | I/N | I/N |
 | fedora | P/N | P/N | P/N | P/N | P/N |
-| arch | P/N | F/N | P/N | P/N | I/N |
+| arch | P/N | P/N | P/N | P/N | I/N |
 | opensuse | P/N | I/N | P/N | P/N | N/N |
-| openkylin | P/N | N/N | P/N | H/N | N/N |
+| openkylin | P/N | P/N | P/N | H/N | N/N |
 | deepin | P/N | N/N | F/N | H/N | N/N |
 | manjaro | P/N | N/N | H/N | H/N | N/N |
 | void | P/N | N/N | P/N | P/N | I/N |
-| armtix | P/N | P/N | F/N | H/N | N/N |
+| armtix | P/N | P/N | F/N | P/N | N/N |
 | steamos | H/N | H/N | H/N | H/N | H/N |
 
 Package lifecycle means install, update/reinstall, verification and removal,
@@ -90,7 +90,7 @@ neither a TCG pass nor guest `/dev/kvm` absence establishes host KVM availabilit
 | ubuntu | P/N | P/N | N/N | N/N |
 | alpine | P/N | P/N | N/N | N/N |
 | fedora | P/N | P/N | P/N | P/N |
-| arch | P/N | P/N | P/N | N/N |
+| arch | P/N | P/N | P/N | P/N |
 | opensuse | P/N | P/N | P/N | P/N |
 | openkylin | P/N | P/N | P/N | P/N |
 | deepin | P/N | P/N | P/N | P/N |
@@ -168,7 +168,7 @@ OS owning machined and the stock nspawn unit; record the nested OS separately.
 | fedora | N/N | P/N | P/N | P/N | I/N |
 | arch | I/N | P/N | P/N | P/N | N/N |
 | opensuse | N/N | P/N | P/N | P/N | I/N |
-| openkylin | N/N | F/N | P/N | N/N | I/N |
+| openkylin | N/N | P/P | P/N | P/N | P/P |
 | deepin | N/N | P/N | P/N | P/N | P/N |
 | manjaro | N/N | P/N | P/N | P/N | P/N |
 | void | N/N | N/N | P/N | P/N | P/N |
@@ -257,6 +257,7 @@ tests. Local report paths identify evidence, not durable public downloads.
 | openSUSE BuildKit | `build/installed-opensuse-turnip/oci-services-274c55493b534bf188cdbab1076e4f18.json`; official BuildKit 0.34.1 with distribution CNI 1.6.2, OCI sandbox and overlayfs. Multistage/cache/secret/export/run/cancel/cleanup pass; rootless/containerd workers and external networking untested |
 | openSUSE LTP core | `build/installed-opensuse-turnip/oci-services-ba129bf7dcf0488c99bc7363fe7b7cca.json`; reviewed LTP 20250930 built with the distribution compiler/libc, guest UID 1000. Six binaries pass fully; `epoll_create01` retains two libc passes and ARM64 legacy-ABI TCONF, with no failed/broken checks |
 | openKylin recipe/default boot | `build/installer-openkylin-turnip.json`; official openKylin 3.0 image, Weston, Turnip build, ordinary user and repeated recipe preserve settings/data. `build/openkylin-turnip-boot-rebind/oci-services-d2318cf7d61d469ca752cbf7fa907950.json` covers the stock default target with device-bound LXC DHCP |
+| openKylin package lifecycle | `build/openkylin-package-lifecycle.log` and `build/openkylin-package-lifecycle-runtime.json`; repository hello 2.12.1-ok2 install, execution, reinstall, dpkg verification, independent file checksums and removal pass. `dpkg --audit` remains empty |
 | Deepin recipe | `build/installer-deepin-turnip.log`, `build/installer-deepin-turnip.json`; official `linuxdeepin/deepin:crimson-arm64`, Weston, Mesa 26.2.3 Turnip build, locale, timezone, ordinary user and repeated recipe preserving settings/data. GUI/rendering acceptance remains open |
 | Deepin default boot | `build/deepin-turnip-boot-admission/oci-services-fc95765b510c4d34a187f5826ab2b67a.json`; default target completes degraded: stock lxc-net requires IPv6, which the managed fabric does not yet implement |
 | Deepin Docker | `build/installed-deepin-turnip/oci-services-b93c57b350bb452aba9a1c479e6d2e26.json`; stock Docker 26.1.5 service and separately packaged docker-cli. Overlay2, private cgroups, bridge, published TCP/UDP, peer DNS/IP, outbound internet, conflicts and released ports pass |
@@ -288,7 +289,7 @@ tests. Local report paths identify evidence, not durable public downloads.
 | Void portal | `build/installed-void-turnip/void-portal-lifecycle.json`; ordinary-user document export, live sandbox read/write, revocation denial and export cleanup pass. Two SIGTERM/D-Bus-reactivation rounds remove the document FUSE mount; GUI chooser/readback is covered by both browser reports |
 | Void VS Code | `build/installed-void-turnip/void-vscode-sandbox-fixed/gui-report.json`; VS Code 1.140.0, cpptools 1.34.4 and distribution GDB 18.1: editor/save, external file events, integrated terminal, reload, breakpoint, step, normal close and hardware composition pass. The live renderer has UID 1000, NoNewPrivs=1 and Seccomp=2. The exact fixture then stops its launch, graphics and display without changing HOME; full recipe desktop discovery remains separate |
 | Armtix package lifecycle | `build/installed-armtix-turnip/d36117e964b34fc49e9a1611bacd35a8.log` records successful mkinitcpio reinstall and all four stock initramfs hooks; its subsequent unavailable `hello` query is not acceptance. `0552cfd0fb3c493fabb64c8892bfd5bf.log` covers the available repository package `tree`: install, execution, reinstall, package-file verification and removal. No workload source build is added to the recipe |
-| Armtix default boot | `build/installed-armtix-turnip/boot.log`; stock runit reaches stage 2, but startup still reports unsupported persistent-root read-only reconfiguration, `/proc/cmdline` access and missing binfmt_misc. Overall boot remains F; reaching the desktop does not certify a healthy default boot |
+| Armtix default boot | `build/armtix-boot-final/oci-services-de2bda2b57944655b082fcf9f843e420.json`; stock runit reaches stage 2 and service start/restart/stop pass, but startup still reports unsupported persistent-root read-only reconfiguration and missing binfmt_misc. Overall boot remains F; reaching the desktop does not certify a healthy default boot |
 | Armtix Docker | `build/installed-armtix-turnip/oci-services-421f9571fce94263acf95d0231e6d441.json`; stock runit Docker 29.9.1, containerd 2.4.2 and runc 1.5.2, named legacy cgroup membership, default overlayfs snapshotter and package-selected nft frontend. Bridge TCP/UDP publication, peer DNS/IP, binds/exec, external DNS/internet, conflicts and port cleanup pass |
 | Armtix Podman | `build/installed-armtix-turnip/oci-services-e379d8ce233d490db3006d4754301aaa.json`; stock sandbox/cgroups, bridge, TCP/UDP publication, peer DNS/IP, external internet and cleanup pass |
 | Armtix Libvirt/QEMU | `build/installed-armtix-turnip/oci-services-bffac31b93ae4d60baf272173671f6ec.json`; packaged runit libvirtd/virtlogd/virtlockd, managed TCG kernel/initrd boot, serial output, pause/resume, poweroff and undefine pass. `build/armtix-qemu-current.log` records direct TCG boot. VM networking and KVM remain untested |
@@ -302,8 +303,9 @@ tests. Local report paths identify evidence, not durable public downloads.
 | openKylin Docker | `build/installed-openkylin-turnip/oci-services-97097511bae241668089a38eefb47f06.json`; official Docker service with vendor `/opt/system` command path. Overlay, bridge, TCP/UDP publication, peer DNS/IP, external internet, conflicts and released ports pass |
 | openKylin Libvirt/QEMU | `build/installed-openkylin-turnip/oci-services-7294486ccd24434085e40df5ddc75622.json`; libvirt 12.0/QEMU 10.2.1, managed ARM64 TCG boot, pause/resume, serial, poweroff and undefine pass. `oci-services-8ec6d36797154166a9eb8c40c0882459.json` covers direct QEMU boot. VM networking remains untested |
 | openKylin BuildKit | `build/installed-openkylin-turnip/oci-services-7e09f6f7835642b991ca30a1f6b69952.json`; official BuildKit 0.34.1, OCI/overlayfs/CNI worker, multistage build, cache, secrets, export, Podman execution, cancellation and cleanup pass |
-| openKylin machinectl | `build/installed-openkylin-turnip/oci-services-a2218f0362844729b4ea7b2b4e43e361.json`; nested Debian boot, private users, shell/services, TCP/UDP and two lifecycle rounds pass. Third boot reaches graphical.target but `systemctl -M ... is-system-running --wait` times out; acceptance remains F |
-| openKylin LTP core | `build/installed-openkylin-turnip/oci-services-e224d10fc29e42b1868a2c65d2fdb97c.json`; reviewed 20250930 sources built with this distribution's toolchain, UID 1000. Six complete binaries pass; epoll_create01 has two passes and the absent ARM64 legacy syscall TCONF. No FAIL/BROK; coverage remains I |
+| openKylin machinectl | `build/installed-openkylin-turnip/oci-services-2fd17eb1579d4d67a8bdd902436a8f6b.json` (Shroot) and `oci-services-12f6221ee8f64ac99967cf47b9eb7a0a.json` (Base); stock unit, nested Debian, private users/veth, shell/services, TCP/UDP and normal/forced-stop cleanup pass across three boots in each mode on the final staged runtime. Two preceding three-boot Shroot runs also passed; timeout bounds and unit policy are unchanged |
+| openKylin LTP core | `build/installed-openkylin-turnip/oci-services-15047b71876e45ecba1c15582415ce0c.json` (Shroot) and `oci-services-6bbf78520ce848ea8abef45a2766aa5a.json` (Base); seven pinned upstream binaries built with this distribution's compiler/libc pass as UID 1000 in both modes, including the ARM64 epoll_create1 ABI, with no FAIL/BROK/TCONF |
+| openKylin LXC | `build/installed-openkylin-turnip/oci-services-657d92e0fd5d4f67b9482a2a415f921d.json`; packaged LXC 6.0.6, nested Debian, stock common policy/seccomp, attach/services, mounts, bridge TCP/UDP and cleanup pass across three normal/forced-stop boots. Unprivileged LXC and external networking remain untested |
 | Fedora Flatpak Firefox | `build/installed-fedora-turnip/firefox-sdk-gui/gui-report.json`, `build/fedora-firefox-sdk-gui.log`; Firefox 158.0.1 with matching SDK-built Mesa, ordinary sandbox and normal vsync: window, keyboard/pointer, download, GUI file selection/readback, WebGL pixels and normal close pass. Normal relaunch and desktop teardown remain open |
 | Fedora default boot/services | `build/fedora-turnip-boot/oci-services-1dc2ebfb62a84574b3bb354baca3ae55.json`; systemd 259.10, private bridge, default target running with no failed units, journal sync/readback, D-Bus/logind and RTKit lifecycle. `build/fedora-hostnamed-fixed.log` additionally covers hostnamectl on a later staged runtime |
 | Booted Fedora Docker | `build/installed-fedora-turnip/oci-services-3623ddaba2db47959b1355be3c64c8fd.json`; stock Docker 29.8.2 service, containerd 2.3.5 overlayfs snapshotter, runc 1.5.2 and recipe-selected iptables-nft frontend. Cold image pull, IPv4 bridge, TCP/UDP publication, peer IP/names, binds/exec, conflicts/release and internet with 20 external DNS queries per container pass; native Docker nftables backend and IPv6 are not covered |
@@ -338,7 +340,8 @@ tests. Local report paths identify evidence, not durable public downloads.
 | Booted Arch Podman | `build/installed-arch-turnip/oci-services-77b349d3bd484dcea16079deba040c5e.json`; staged native hashes, overlay, bridge, stock seccomp, enabled cgroups, no `--ulimit` overrides; published TCP/UDP, peer names, local outbound, binds/exec, conflicts and port release; both containers also pass internet access and 20 external DNS requests each |
 | Debian direct QEMU TCG | `build/debian-qemu-tcg/oci-services-c5ddb332933a4cb79cb23fff41767722.json`; kernel/initrd serial boot, not KVM or VM networking |
 | Debian/Arch libvirt | `build/installed-debian-turnip/libvirt-report.json`, `build/installed-arch-turnip/libvirt-report.json` and adjacent `libvirt-serial.log`; stock daemon/device policy, explicit Cortex-A72 for the ARM64 kernel; VM networking and KVM untested |
-| Arch package lifecycle | `build/arch-libvirt-prepare/oci-services-c8f541d87e69484da6356634de0c3fec.json`; package hooks and subsequent mkinitcpio host-kernel errors still need a clean qualifying run |
+| Arch direct QEMU | `build/installed-arch-turnip/oci-services-06fb45af690c4e56b16e4a1a071ff80f.json`; packaged QEMU, ARM64 kernel/initramfs TCG boot, serial kernel-contract checks and normal poweroff pass. VM networking and KVM remain untested |
+| Arch package lifecycle | `build/arch-recipe-current/oci-services-4ba3363dd1b243988c709225b0366c19.json` covers current recipe setup, signed repository upgrade and tree installation. `build/arch-package-lifecycle-current.log` and `build/arch-package-lifecycle-runtime.json` cover booted stock pacman reinstall, all post-transaction hooks, mkinitcpio 42.2 image generation and independent repeat, file verification and removal. Hardware/firmware warnings remain visible; no failed hooks or generation errors |
 | Arch machinectl | `build/installed-arch-turnip/oci-services-b79fc7c63c4b479ba5588b75e50d5d74.json`; stock systemd 262.1 unit boots nested Debian 257.13 with private users/veth, shell, services, 20 TCP + 20 UDP exchanges per round, poweroff, killed-leader restart and cleanup across three boots |
 | Debian machinectl | `build/installed-debian-turnip/oci-services-8e78d11924a540428e278ebbcd479bd0.json`; stock systemd 257.13 unit, nested Debian 257.13, same three-boot shell/service/TCP/UDP/termination/cleanup contract as Arch |
 | Arch BuildKit | `build/installed-arch-turnip/oci-services-ca28a04bd3254bd0955b70cd530c8247.json`; 0.34.1 OCI/overlayfs worker, CNI 1.9.1 bridge, sandbox mode, multistage build/cache/secret/export/run/cancel/cleanup, no explicit container ulimits; rootless/containerd workers and external network untested |

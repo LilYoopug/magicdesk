@@ -5,7 +5,7 @@
 #include "network_namespace.h"
 #include "proc_paths.h"
 #include "proc_sysctl.h"
-#include "proc_devices.h"
+#include "proc_static.h"
 #include "user_sysctl.h"
 #include "procfs_view.h"
 #include "linux_abi.h"
@@ -85,7 +85,7 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
     enum md_proc_file_kind kind=(enum md_proc_file_kind)(ref.kind-MD_PROC_UID_MAP);
     int sysctl=md_proc_file_sysctl(kind);
     int user_control=ref.kind==MD_PROC_MAX_USER_NAMESPACES;
-    int catalogue=ref.kind==MD_PROC_DEVICES;
+    int catalogue=md_proc_static(ref.kind);
     if (q->operation==MD_FS_STATFS) {
         md_fs_statfs_result(fd,md_view_policy_flags(mount),NULL,out,output);
         if (!out->error) ((struct md_fs_statfs *)output->data)->type=PROC_SUPER_MAGIC;
@@ -182,7 +182,7 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
     struct md_control_file file={0};
     if (!r) {
         file=sysctl ? md_proc_sysctl_new(kind,origin,fs->actor->uts)
-            : catalogue ? md_proc_devices_new(fs->store->identity->user_namespace,origin)
+            : catalogue ? md_proc_static_new(ref.kind,fs->store->identity->user_namespace,origin)
             : user_control ? md_user_sysctl_new(fs->store->identity->user_namespace,origin)
             : md_network_sysctl_new(fs->actor->network,
             (enum md_network_parameter)(ref.kind-MD_PROC_NET_UNPRIVILEGED_PORT),ref.interface,origin);

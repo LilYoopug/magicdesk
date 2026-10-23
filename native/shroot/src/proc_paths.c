@@ -63,6 +63,10 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
             out.kind=MD_PROC_DEVICES; out.process=tid;
             out.tail=p; out.anchor_length=(size_t)(p-path); return out;
         }
+        if (word(&p,"cmdline")) {
+            out.kind=MD_PROC_KERNEL_CMDLINE; out.process=tid;
+            out.tail=p; out.anchor_length=(size_t)(p-path); return out;
+        }
         if (word(&p,"net")) {
             out.ordinary_link=!*p;
             out.kind=network_table(&p); out.process=tid;
