@@ -60,9 +60,9 @@ def main():
                     rules = 'add table ip bench\nadd chain ip bench output { type filter hook output priority 0; policy accept; }\n'
                     rules += 'add rule ip bench output ct state invalid drop\n'
                 if mode == 'nat':
-                    rules += 'add chain ip bench input { type nat hook prerouting priority -100; policy accept; }\n'
+                    rules += 'add chain ip bench translate { type nat hook output priority -100; policy accept; }\n'
                     for protocol in ('tcp', 'udp'):
-                        rules += f'add rule ip bench input {protocol} dport {front} dnat to 127.0.0.1:{port}\n'
+                        rules += f'add rule ip bench translate {protocol} dport {front} dnat to 127.0.0.1:{port}\n'
                 command = [suite.base + '/bench', str(port), str(front if mode == 'nat' else port)]
                 if mode != 'native':
                     command[0] = target + '/bench'

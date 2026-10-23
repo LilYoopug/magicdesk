@@ -17,12 +17,16 @@ def main():
     parser.add_argument('--store', required=True)
     parser.add_argument('--rounds', type=int, default=5)
     parser.add_argument('--iterations', type=int, default=10000)
+    parser.add_argument('--cpu-mask', type=lambda value: int(value, 16),
+                        help='Optional native taskset hexadecimal mask for controlled comparisons')
     parser.add_argument('--workload', action='append', choices=(
         'poll', 'epoll', 'idle', 'python-start', 'ls-start', 'file-stat', 'file-open', 'file-cycle'),
         help='Limit a focused repeat; defaults to the complete matrix')
     parser.add_argument('--output', type=Path, default=Path('build/readiness-performance'))
     args = parser.parse_args()
     assert 1 <= args.rounds <= 100 and 1 <= args.iterations <= 1000000
+    if args.cpu_mask is not None and args.cpu_mask <= 0:
+        parser.error('--cpu-mask must be a positive hexadecimal mask')
     suite = Suite(args.output, args.build)
     target = '/opt/md-readiness-' + suite.report['id']
     base = ['--store', args.store, '--user', '0:0', '--bind', suite.base, target,
@@ -37,8 +41,10 @@ def main():
         suite.command(['mkdir', reference])
         suite.report['referenceHashes'] = suite.stage_runtime(args.reference, reference)
         suite.report['scope'] = dict(store=args.store,
-            fixture='same guest binary and installed userspace; no diagnostics or affinity',
+            fixture='same guest binary and installed userspace; no timing diagnostics',
+            cpuMask=None if args.cpu_mask is None else format(args.cpu_mask, 'x'),
             timing='loop wall/caller CPU; time -p covers full launch and reaped descendants')
+        placement = [] if args.cpu_mask is None else ['/system/bin/taskset', format(args.cpu_mask, 'x')]
         modes = {}
         for name, runner in [('current', suite.runner), ('reference', reference + '/libmagicdesk_guest_run.so')]:
             modes[name + '-base'] = [runner, *base, '--env', 'SHROOT_MACHINE_ENTRY=0']
@@ -65,7 +71,7 @@ def main():
             for name in order[offset:] + order[:offset]:
                 for workload, command in workloads.items():
                     with observe_suite_cpu(suite) as cpu:
-                        output = suite.command(['/system/bin/time', '-p', *modes[name], '--', *command])
+                        output = suite.command(['/system/bin/time', '-p', *placement, *modes[name], '--', *command])
                     measurement = dict(re.findall(r'^(real|user|sys)\s+(\d+\.\d+)\s*$', output, re.M))
                     assert len(measurement) == 3, output
                     row = dict(mode=name, workload=workload, round=round_number, cpu=cpu,

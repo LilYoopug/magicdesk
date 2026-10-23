@@ -5,7 +5,7 @@ or a claim that all tests are automated. Keep every distribution printed by
 `sh scripts/install_linux.sh --list` in every table. Results do not transfer
 between distributions sharing a package manager, libc or init system.
 
-Last reconciled: 2026-10-23. Current device evidence uses NX809J, Android 16,
+Last reconciled: 2026-10-24. Current device evidence uses NX809J, Android 16,
 Linux 6.12.23, 4 KiB pages and Android shell UID 2000. This does not cover the
 minimum supported kernel 5.15, other firmware or Android root execution.
 
@@ -101,14 +101,16 @@ All runs use default lazy entry; Base remains untested in this batch.
 Fedora and openSUSE required their separately packaged networkd, installed in
 the lab from their own repositories before the passing rerun. This does not
 replace openSUSE's Wicked or add a test-only dependency to the user recipe.
-SteamOS's failed default target prevents its post-boot assertions from running:
-Avahi encounters UDP port sharing conflicts and firewalld submits unsupported
-nftables expressions. Armtix reaches runit but its stock root filesystem stage
+SteamOS firewalld still submits unsupported REJECT rules. Armtix reaches runit
+but its stock root filesystem stage
 fails at read-only superblock reconfiguration (`FSCONFIG_CMD_RECONFIGURE`,
 `EOPNOTSUPP`); service lifecycle alone is not boot acceptance.
-Ubuntu had one `snap.cups.cups-browsed` failure in `snap-update-ns`
-(`76eba5ca4a2a430ea8083fcb3b0465a0`), followed by a diagnostic pass and three
-ordinary passes. Its intermittent startup failure remains unresolved.
+Current focused service receipts under `build/boot-service-repair/`:
+`a90f1ba5666a4fe987381e65d4bb3f37` verifies SteamOS Avahi mDNS over IPv4/IPv6
+and three restart cycles. `0553d599fba34bf2ba48e0262789fb0d` verifies Ubuntu
+default-target startup, journal/D-Bus/logind IO and three CUPS IPP restart
+cycles within the unchanged five-second readiness bound. These receipts do
+not certify SteamOS firewalld or unrelated Ubuntu container-service shutdown.
 
 ### Candidate Distribution: NixOS
 
@@ -122,21 +124,25 @@ userspace, altered activation script or disabled service substitutes for NixOS.
 
 | Scenario | Shroot / Base | Evidence under `build/ipv6-binfmt-boot/` |
 | --- | --- | --- |
-| Store registration and forced sandboxed derivation rebuild | P/N | `oci-services-ba4904b02e9c43c8bf2dbcad30f66e25.json`; stock `nix-build --check --option sandbox true`, local inputs, substituters disabled, output readback |
+| Store registration and forced sandboxed derivation rebuild | P/N | `oci-services-147018b884ff4e4cbd42c69d7a488187.json`; stock `nix-build --check --option sandbox true`, local inputs, substituters disabled, output readback |
 | Stock activation | F/N | Same receipt; `mount -t ramfs` for `/run/keys` is unsupported |
 | Stock `/sbin/init`, default target and shutdown | F/N | `oci-services-1d85987e21154c23b3e26eb032e13902.json`; systemd 260.5 reaches multi-user, but reports degraded; clean guest shutdown |
 
 The boot uses routed networking with guest-owned DNS; resolvconf and
 network-local-commands complete. A launch-owned read-only DNS mount is not
-compatible with openresolv managing the same file. The only failed unit is
-firewall: focused command diagnostics identify unsupported nftables `pkttype`
-matching (`oci-services-5080f11f05c34de9b7e2b4ff4f21c3fa.json`). DHCP startup
-also encounters unsupported netlink/socket operations and times out internally,
-despite the unit becoming active. This is not network acceptance.
-The boot observer reports journald,
-D-Bus and logind active, but does not run its service-IO acceptance assertions
-after a degraded boot. Desktop, graphics, containers and package lifecycle
-remain untested. Disk-backed logical tmpfs is not a replacement for ramfs's
+compatible with openresolv managing the same file. Focused stock firewall,
+network-local-commands and resolvconf commands pass in
+`oci-services-147018b884ff4e4cbd42c69d7a488187.json`.
+Packaged dhcpcd lease/renewal, DNS options, route installation and bidirectional
+UDP pass with Base and lazy entry: IPv4 receipt
+`build/shroot-image-tests/oci-services-a8157781c0a2495d959beb57cd08fade.json`,
+IPv6 receipt `build/shroot-image-tests/oci-services-37e026b65ce3490c87c1707d85cf5428.json`.
+The DHCP fixture uses separate guest namespaces and does not certify an Android
+uplink or stock boot after activation. Its hook verifies the received DNS
+options; stock resolvconf is covered separately, not by that fixture hook.
+Complete activation/default-target,
+desktop, graphics, containers and package lifecycle remain unverified.
+Disk-backed logical tmpfs is not a replacement for ramfs's
 memory-only, non-swappable contents, especially for `/run/keys`.
 
 ## Containers And Virtual Machines
@@ -167,6 +173,25 @@ neither a TCG pass nor guest `/dev/kvm` absence establishes host KVM availabilit
 | void | P/N | P/N | P/N | P/N |
 | armtix | P/N | P/N | P/N | P/N |
 | steamos | P/N | P/N | N/N | P/N |
+
+### Local IPv6 Container Acceptance
+
+The 2026-10-24 Arch reruns use stock container packages, their normal seccomp
+policy and cgroups, with default Shroot entry. Both cover bridge networking,
+TCP/UDP publication, peer IP/name exchange, local outbound traffic, conflicting
+ports and port release. They do not request public-internet access.
+
+| Engine | Profile and native observer | Receipt |
+| --- | --- | --- |
+| Docker 29.9.2 | nftables, no userland proxy, cgroup v2, published `::1` | `build/shroot-image-tests/oci-services-da9ad945e8ff4b0a83719c1f0650a960.json` |
+| Podman 6.1.4 / Netavark 2.1.0 | overlay, stock seccomp/cgroups, wildcard IPv6 publication observed through Android's existing local global address | `build/podman-results/oci-services-ca516b0fb73343f68ac530d1031c7391.json` |
+
+The observer runs as native Termux UID 10601, outside Shroot. These runs change
+neither Android addresses nor its routes. Podman's tested address is not `::1`;
+see the [fixture contract](README.md) for the separate observer/publication
+options. Docker still logs missing `memory.events`: the unimplemented memory
+controller is not advertised, and the test does not certify memory limits/OOM
+notifications.
 
 ### IPv6 Uplink Coverage
 
@@ -438,7 +463,7 @@ tests. Local report paths identify evidence, not durable public downloads.
 | Ubuntu VS Code | `build/installed-ubuntu-fuse/ubuntu-vscode-current/gui-report.json`; Code 1.142.0, Electron 43.7.7: editor/save, external-file watch, integrated PTY, GDB breakpoint/step/locals, window reload and normal close. Hardware composition/WebGL and renderer seccomp/NNP are enabled |
 | Ubuntu default boot | `build/ubuntu-default-complete-current/oci-services-a2c2bbdb31da4e0ea6f9980a3dff0529.json`; stock systemd 255.4 reaches running with zero failed units on a private bridge; D-Bus/logind, journal readback/restart and RTKit lifecycle pass. CUPS initially restarts, LXC shutdown reports an error, and libvirt's default bridge control remains unsupported; VM-network acceptance is separate |
 | Ubuntu services | `build/ubuntu-cups-restart-current.log`: stock CUPS Snap answers lpstat before and after service restart, then stops normally. `build/ubuntu-rtkit-current.log`: RTKit D-Bus query/restart/stop; `build/ubuntu-logger-claim-current.log`: journal write/sync/readback with the requested parent PID. These focused control-target runs do not certify the default OS target |
-| SteamOS recipe/default boot | `build/steamos-recipe-hardware-current/oci-services-c668b2e77f3a4d77958f4f40811784f0.json`; official recovery image, current helper refresh and full pacman synchronization. `build/steamos-default-hardware-current/oci-services-93c38c0172f14d92aa9c0d4c45dde124.json` remains degraded: Avahi cannot share its UDP port; firewalld rejects unsupported rules. Tmpfiles completes. Hardware boot and the package removal/verification lifecycle are not certified |
+| SteamOS recipe/default boot | `build/steamos-recipe-hardware-current/oci-services-c668b2e77f3a4d77958f4f40811784f0.json`; official recovery image, helper refresh and full pacman synchronization. Avahi protocol/restart acceptance is recorded above. Firewalld REJECT, hardware boot and the package removal/verification lifecycle are not certified |
 | SteamOS Docker | `build/installed-steamos/oci-services-8fb322d2f22048b2a44664b671732ee7.json`; official upstream Docker 29.1.3 binaries installed only for the lab, nftables/no userland proxy, overlay2 and stock container seccomp/cgroups. Headless systemd passes bridge TCP/UDP, peer names, local outbound, binds/exec, conflicts, port release and 20 DNS requests plus HTTP per container. Under concurrent Plasma/browser/BuildKit load, `oci-services-d37d40beacb3444f9c3d546fbcb25aad.json` timed out during internet access and task cleanup; concurrent-load acceptance remains open |
 | SteamOS machinectl | `build/installed-steamos/oci-services-fb35961b3aa643c798479f264b5e2bd5.json`; stock systemd-nspawn template, nested Debian, shell/services, private UID map, veth TCP/UDP, normal poweroff, forced leader death, restart and process/veth cleanup pass headlessly. `build/steamos-nspawn-current.log` records a systemctl timeout under graphical load; that scenario remains open |
 | SteamOS BuildKit | `build/installed-steamos/oci-services-30f589a9207c412ca7fcf8485cc2105b.json`; upstream 0.34.1 and CNI 1.8.0 binaries installed only for testing because enabled distro repositories lack packages. Multistage build, cache reuse/invalidation, secret/cache mounts, OCI export and execution, cancellation and cleanup pass |

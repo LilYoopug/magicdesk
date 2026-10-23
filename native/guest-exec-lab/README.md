@@ -135,8 +135,13 @@ Android limits still apply.
 `--exercise-ports --ipv6` selects a dual-stack container bridge and checks IPv6
 TCP/UDP publication and named peers. `--ipv6-host ADDRESS` selects an address
 assigned to both the outer Shroot namespace and Android for publication and
-native observation; the default is `::1`. Test a non-loopback address separately: Netavark's IPv6
-localhost forwarding is not equivalent to its ordinary host-address path.
+native observation; the default is `::1`. Podman's `--ipv6-publish-host ::`
+separates a guest wildcard binding from the Android observer address, which
+need not be assigned to a guest interface. Both choices are retained in the
+receipt. Test a non-loopback address separately: Netavark's IPv6 localhost
+forwarding is not equivalent to its ordinary host-address path. Its nft backend
+does not provide IPv6 loopback SNAT; a loopback source cannot enter a non-loopback
+IPv6 interface. Do not relax Shroot ingress checks to make that scenario pass.
 The fixtures neither add Android addresses nor modify Android routing.
 
 `--internet-ipv6` additionally requires UDP DNS, TCP DNS and certificate-verified
@@ -151,13 +156,33 @@ recipe prerequisite or a production VPN bypass.
 assertions natively and in guest `routed`/`bridge` modes, in addition to its local
 address/route, ICMPv6, dual-stack socket, nftables and port-publication checks.
 Omit `--internet` for deterministic local coverage.
+`test_network_multicast.py BUILD STORE` checks IPv4/IPv6 membership, reuse,
+namespace fanout, leave, loopback, hops, filtering and unicast responses with
+both entry modes. `test_network_dhcp.py BUILD STORE [--ipv6]` runs packaged
+dhcpcd against a fixture server in another guest namespace. It requires a lease,
+renewal, DNS hook options, routes and bidirectional traffic using the leased
+address. `--python PATH --path PATH` selects packaged tools in non-FHS guests
+such as NixOS; it does not substitute the client or change Android networking.
 `test_routed_network.py` adds libc interface lookup, IPv4 packet information
 with absent/truncated receive buffers, a datagram queued before sender close,
 and receiver-close/rebind without reusing stale reply mappings.
 `benchmark_network.py BUILD STORE --sysroot GLIBC_SYSROOT` compares one static
 binary under shell/native, host, routed, filtered and NAT modes with rotated
 rounds. It reports application CPU separately from whole-invocation CPU;
-the latter includes startup, rule preparation and cleanup.
+the latter includes startup, rule preparation and cleanup. Local DNAT uses the
+OUTPUT hook. Reports retain CPU-frequency observations with each sample.
+`benchmark_readiness.py --build BUILD --reference BASELINE --store STORE`
+interleaves filesystem/readiness workloads across both runtimes and Base/lazy
+entry. It does not pin CPUs by default. `--cpu-mask HEX` applies the same native
+taskset mask to both runtime process trees for a controlled follow-up; reports
+retain that mask and CPU-frequency observations. This changes neither governor
+nor host frequency limits, and pinned results do not certify unpinned performance.
+
+`test_os_boot.py --service-io avahi|cups|firewalld` supplements the stock boot
+observer with protocol IO and three stop/start cycles. Avahi must answer mDNS
+over both families; CUPS must answer an IPP request within the fixture's normal
+readiness bound; firewalld must enforce a live rule. Unsupported service rules
+remain a failure, not a reason to mask the service or enlarge its timeout.
 
 `test_thread_identity_runtime.py BUILD STORE FIXTURE --debuggers` checks libc
 thread identities and multi-threaded setuid/setgid/setgroups, including strace

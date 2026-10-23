@@ -79,6 +79,7 @@ CHECK
     fi
 fi
 printf '%s\n' "$code" > "$1/result"
+journalctl -b --since="@$(cat "$1/started")" -p warning --no-pager > "$1/journal.log"
 systemctl exit "$code"
 EOF
 exec /usr/lib/systemd/systemd --system --show-status=yes --crash-shell=no --crash-reboot=no
@@ -221,6 +222,10 @@ def main():
     parser.add_argument('--diagnostic-console', action='store_true')
     parser.add_argument('--trace', action='store_true', help='Trace filesystem, sandbox and readiness setup; requires strace')
     parser.add_argument('--rtkit', action='store_true', help='Verify packaged RTKit unit, D-Bus and restart; requires RTKit')
+    parser.add_argument('--restart-service', action='append', default=[],
+                        help='Require a stock systemd unit and three successful restart cycles')
+    parser.add_argument('--service-io', action='append', choices=('avahi', 'cups', 'firewalld'), default=[],
+                        help='Verify a packaged service protocol and clean stop/start across three cycles')
     parser.add_argument('--init', choices=('systemd', 'openrc', 'runit'), default='systemd')
     parser.add_argument('--network', choices=('host', 'none', 'bridge', 'routed'), default='routed')
     parser.add_argument('--dns', action='append', default=[], help='Per-launch resolver IPv4 or IPv6 address')
@@ -236,6 +241,10 @@ def main():
         parser.error('--trace is currently a systemd diagnostic')
     if args.rtkit and args.init != 'systemd':
         parser.error('--rtkit requires systemd')
+    if (args.restart_service or args.service_io) and args.init != 'systemd':
+        parser.error('--restart-service requires systemd')
+    if any(not re.fullmatch(r'[A-Za-z0-9_.@:-]+', unit) for unit in args.restart_service):
+        parser.error('invalid service unit name')
     if args.binfmt and args.init != 'systemd':
         parser.error('--binfmt requires systemd')
     if args.networkd_ipv6 and args.init != 'systemd':
@@ -244,7 +253,7 @@ def main():
     suite.report['store'] = args.store
     suite.report['bootPolicy'] = {'init': args.init, 'dropCapabilities': args.drop_capability,
                                 'rtkit': args.rtkit, 'network': args.network, 'dns': args.dns,
-                                'entryMode': args.entry}
+                                'entryMode': args.entry, 'restartServices': args.restart_service, 'serviceIO': args.service_io}
     target = '/md-boot-' + suite.report['id']
     prefix = [suite.runner, '--store', args.store, '--user', '0:0', '--network', args.network,
               '--env', 'SHROOT_MACHINE_ENTRY=' + ('0' if args.entry == 'base' else '1')]
@@ -260,6 +269,35 @@ def main():
             suite.transport.upload(suite.client, Path(__file__).with_name('init_fixture.py'),
                                    suite.base + '/init_fixture.py')
         program = {'systemd': SYSTEMD, 'openrc': OPENRC, 'runit': RUNIT}[args.init]
+        if args.service_io:
+            suite.transport.upload(suite.client, Path(__file__).with_name('boot_service_io.py'),
+                                   suite.base + '/boot_service_io.py')
+        probes = {'avahi-daemon.service': 'avahi', 'snap.cups.cupsd.service': 'cups', 'firewalld.service': 'firewalld'}
+        for unit, probe in probes.items():
+            if probe in args.service_io and unit not in args.restart_service:
+                args.restart_service.append(unit)
+        for unit in args.restart_service:
+            probe = probes.get(unit)
+            check_io = f'python3 "$1/boot_service_io.py" {probe}' if probe in args.service_io else ':'
+            checks = f'''
+        for cycle in 1 2 3; do
+            if ! {check_io} || ! systemctl is-active '{unit}' || ! systemctl stop '{unit}' \
+                    || test "$(systemctl show -p Result --value '{unit}')" != success \
+                    || ! systemctl start '{unit}' || ! systemctl is-active '{unit}'; then
+                systemctl status '{unit}' --no-pager || :
+                journalctl -b --since="@$(cat "$1/started")" -u '{unit}' --no-pager || :
+                exit 1
+            fi
+        done
+        if ! {check_io}; then
+            systemctl status '{unit}' --no-pager || :
+            journalctl -b --since="@$(cat "$1/started")" -u '{unit}' --no-pager || :
+            exit 1
+        fi
+        echo 'PASS repeated service restart: {unit}'
+'''
+            program = program.replace('        systemctl restart systemd-logind.service',
+                                      checks + '        systemctl restart systemd-logind.service')
         if args.networkd_ipv6:
             suite.transport.upload(suite.client, Path(__file__).with_name('networkd_ipv6_fixture.py'),
                                    suite.base + '/networkd_ipv6_fixture.py')
