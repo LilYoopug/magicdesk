@@ -37,6 +37,7 @@ def main():
     parser.add_argument('--browser', choices=('firefox', 'chromium'), default='firefox')
     parser.add_argument('--package', choices=('snap', 'flatpak', 'native'), default='snap')
     parser.add_argument('--common', type=Path)
+    parser.add_argument('--reuse-work', type=Path, help='Relaunch the existing fixture profile without rewriting preferences')
     parser.add_argument('--port', type=int, default=18080)
     parser.add_argument('--require-webgl', action='store_true')
     args = parser.parse_args()
@@ -47,20 +48,28 @@ def main():
                        else Path.home() / '.cache/shroot-browser' / args.browser)
     args.output.mkdir(parents=True, exist_ok=True)
     args.common.mkdir(parents=True, exist_ok=True)
-    work = Path(tempfile.mkdtemp(prefix='shroot-gui-', dir=args.common))
+    work = args.reuse_work or Path(tempfile.mkdtemp(prefix='shroot-gui-', dir=args.common))
     profile = work / 'profile'
-    profile.mkdir()
+    if args.reuse_work:
+        assert profile.is_dir(), profile
+        downloaded = work / 'shroot-snap.txt'
+        assert downloaded.read_bytes() == DATA, 'Only reuse a completed fixture directory'
+        downloaded.unlink()
+    else:
+        profile.mkdir()
     if args.browser == 'firefox':
-        (profile / 'user.js').write_text(
-            'user_pref("browser.shell.checkDefaultBrowser", false);\n'
-            'user_pref("browser.startup.homepage_override.mstone", "ignore");\n'
-            'user_pref("browser.download.folderList", 2);\n'
-            'user_pref("browser.download.dir", ' + json.dumps(str(work)) + ');\n')
+        if not args.reuse_work:
+            (profile / 'user.js').write_text(
+                'user_pref("browser.shell.checkDefaultBrowser", false);\n'
+                'user_pref("browser.startup.homepage_override.mstone", "ignore");\n'
+                'user_pref("browser.download.folderList", 2);\n'
+                'user_pref("browser.download.dir", ' + json.dumps(str(work)) + ');\n')
         options = ['--no-remote', '--profile', str(profile)]
     else:
-        (profile / 'Default').mkdir()
-        (profile / 'Default/Preferences').write_text(json.dumps({
-            'download': {'default_directory': str(work), 'prompt_for_download': False}}))
+        if not args.reuse_work:
+            (profile / 'Default').mkdir()
+            (profile / 'Default/Preferences').write_text(json.dumps({
+                'download': {'default_directory': str(work), 'prompt_for_download': False}}))
         options = ['--user-data-dir=' + str(profile), '--no-first-run', '--no-default-browser-check',
                    '--ozone-platform=wayland']
     launcher = (['snap', 'run', args.browser] if args.package == 'snap'
@@ -125,7 +134,7 @@ def main():
     if args.require_webgl:
         checks['webgl'] = any(v and v.get('pixel') == [0, 255, 0, 255] for v in gpu)
     report = dict(passed=all(checks.values()), browser=args.browser, package=args.package,
-                  command=command, checks=checks, gpu=gpu, work=str(work),
+                  command=command, checks=checks, gpu=gpu, work=str(work), reusedProfile=bool(args.reuse_work),
                   sha256=hashlib.sha256(DATA).hexdigest())
     (args.output / 'gui-report.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report), flush=True)

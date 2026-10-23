@@ -8,6 +8,7 @@ import urllib.request
 import uuid
 
 from docker_network_fixture import Observer
+from init_fixture import start_service
 from test_oci_services import Suite
 
 
@@ -17,6 +18,7 @@ def main():
     parser.add_argument('--engine', choices=('docker', 'podman'), required=True)
     parser.add_argument('--docker-profile', choices=('service', 'routed', 'iptables', 'nftables'), default='service')
     parser.add_argument('--internet', action='store_true')
+    parser.add_argument('--path-prefix', default='', help='Installed vendor command directory; no runtime option changes')
     args = parser.parse_args()
     state = json.loads(args.session.read_text())
     assert not state.get('closed')
@@ -24,7 +26,8 @@ def main():
     observer = Observer()
     tag = uuid.uuid4().hex
     suite.report.update(engine=args.engine, session=state['id'], environment=state['environment'],
-                        nativeHashes=state.get('nativeHashes'))
+                        nativeHashes=state.get('nativeHashes'), entryMode=state.get('entryMode', 'lazy'),
+                        pathPrefix=args.path_prefix)
     try:
         for name in ('probe_docker_runtime.py', 'probe_podman_runtime.py', 'docker_network_fixture.py'):
             remote = state['directory'] + '/' + name
@@ -41,7 +44,7 @@ def main():
                     'from probe_docker_runtime import guest; guest("service", "python:3.14-alpine", '
                     'observer=' + repr(observer.address) + ', internet=' + repr(args.internet) + ', '
                     'endpoint="unix:///var/run/docker.sock")']
-                command = 'systemctl start docker.service && cd ' + shlex.quote(state['target']) + ' && ' + shlex.join(argv)
+                command = '(' + start_service(state['init'], 'docker') + ') && cd ' + shlex.quote(state['target']) + ' && ' + shlex.join(argv)
             else:
                 command = shlex.join(argv)
         else:
@@ -51,6 +54,10 @@ def main():
                 trace=False, hostLimits=False, unlimitedPids=False, execRepeats=3, observer=observer.address)
             argv = ['python3', state['target'] + '/probe_podman_runtime.py', '--guest', json.dumps(options)]
             command = shlex.join(argv)
+        if args.path_prefix:
+            assert args.path_prefix.startswith('/') and ':' not in args.path_prefix
+            path = args.path_prefix + ':/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+            command = shlex.join(['env', 'PATH=' + path, '/bin/sh', '-c', command])
         request = urllib.request.Request('http://127.0.0.1:' + str(state['rootPort']),
             data=json.dumps(dict(id=tag, command=command, wait=True)).encode(),
             headers={'Authorization': 'Bearer ' + state['token']})

@@ -35,9 +35,13 @@ def main():
 case "$ID" in
     debian|ubuntu)
         apt-get update
-        apt-get install -y --no-install-recommends libnss3 libasound2t64 libgbm1 libgl1 libegl1 libxss1 libgtk-3-0t64 libx11-xcb1 libsecret-1-0 libxkbfile1 dbus-x11 ca-certificates ;;
-    arch|archarm|steamos)
-        pacman -S --needed --noconfirm nss alsa-lib libglvnd libxss gtk3 libsecret libxkbfile dbus ca-certificates ;;
+        apt-get install -y --no-install-recommends gcc gdb libnss3 libasound2t64 libgbm1 libgl1 libegl1 libxss1 libgtk-3-0t64 libx11-xcb1 libsecret-1-0 libxkbfile1 dbus-x11 ca-certificates ;;
+    arch|archarm|steamos|manjaro-arm|armtix|artix)
+        pacman -S --needed --noconfirm gcc gdb nss alsa-lib libglvnd libxss gtk3 libsecret libxkbfile dbus ca-certificates ;;
+    fedora)
+        dnf install -y gcc gdb nss alsa-lib mesa-libgbm libglvnd libXScrnSaver gtk3 libsecret libxkbfile dbus-x11 ca-certificates ;;
+    void)
+        xbps-install -y gcc gdb nss alsa-lib libglvnd libXScrnSaver gtk+3 libsecret libxkbfile dbus ca-certificates ;;
     *) echo "Unsupported VS Code fixture package family: $ID" >&2; exit 1 ;;
 esac
 id "$1" >/dev/null 2>&1 || useradd -m -s /bin/bash "$1"

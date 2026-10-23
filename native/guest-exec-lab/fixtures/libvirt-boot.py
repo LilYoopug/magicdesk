@@ -1,33 +1,48 @@
 #!/usr/bin/env python3
 """Boot the kernel-contract initramfs through stock system libvirt and TCG."""
+import argparse
 import json
 import os
 from pathlib import Path
 import socket
+import shutil
 import subprocess
-import sys
+import tempfile
 import time
 import uuid
 import xml.etree.ElementTree as ET
 
 
 def main():
-    work = Path(sys.argv[1]).resolve()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('kernel', type=Path)
+    parser.add_argument('initrd', type=Path)
+    parser.add_argument('report', type=Path)
+    args = parser.parse_args()
+    temporary = tempfile.TemporaryDirectory(prefix='md-libvirt-', dir='/var/lib/libvirt/images')
+    work = Path(temporary.name)
+    work.chmod(0o755)
     name = 'md-libvirt-' + uuid.uuid4().hex
     report = {'name': name, 'passed': False, 'commands': []}
     prefix = ['virsh', '-c', 'qemu:///system']
     defined = False
 
     def run(*args, required=True):
+        print('RUN', args, flush=True)
         result = subprocess.run([*prefix, *args], capture_output=True, text=True, timeout=90,
                                 env={**os.environ, 'LC_ALL': 'C'})
         report['commands'].append(dict(args=args, code=result.returncode,
                                        stdout=result.stdout, stderr=result.stderr))
+        print(result.stdout + result.stderr, end='', flush=True)
         if required:
             assert result.returncode == 0, report['commands'][-1]
         return result
 
     try:
+        for source, filename in ((args.kernel, 'kernel'), (args.initrd, 'initrd')):
+            shutil.copyfile(source, work / filename)
+            (work / filename).chmod(0o644)
+        report['versions'] = dict(libvirt=run('version').stdout)
         domain = ET.Element('domain', type='qemu')
         ET.SubElement(domain, 'name').text = name
         ET.SubElement(domain, 'memory', unit='MiB').text = '512'
@@ -45,17 +60,23 @@ def main():
         ET.SubElement(devices, 'emulator').text = '/usr/bin/qemu-system-aarch64'
         serial = ET.SubElement(devices, 'serial', type='unix')
         console = str(work / 'serial.sock')
-        ET.SubElement(serial, 'source', mode='bind', path=console)
+        ET.SubElement(serial, 'source', mode='connect', path=console)
         target = ET.SubElement(serial, 'target', type='system-serial', port='0')
         ET.SubElement(target, 'model', name='pl011')
         xml = work / 'domain.xml'
         ET.ElementTree(domain).write(xml, encoding='unicode')
         run('define', str(xml)); defined = True
-        run('start', name, '--paused')
-        assert run('domstate', name).stdout.strip() == 'paused'
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(console)
+            os.chmod(console, 0o666)
+            listener.listen(1)
+            listener.settimeout(90)
+            run('start', name, '--paused')
+            assert run('domstate', name).stdout.strip() == 'paused'
+            # EVENT_WAIT: exact QEMU serial connection; failure bound is 90 s.
+            stream, _ = listener.accept()
+        with stream:
             stream.settimeout(180)
-            stream.connect(console)
             run('resume', name)
             deadline = time.monotonic() + 180
             chunks = []
@@ -67,16 +88,19 @@ def main():
                     break
                 chunks.append(data)
             output = b''.join(chunks).decode(errors='replace')
-            (work / 'serial.log').write_text(output)
+            args.report.with_suffix('.serial.log').write_text(output)
             assert 'PASS kernel contract in VM status=0' in output, output[-4000:]
         assert run('domstate', name).stdout.strip() == 'shut off'
         report['passed'] = True
         print('PASS libvirt: define, paused start, serial, resume, kernel boot and poweroff', flush=True)
     finally:
-        if defined:
-            run('destroy', name, required=False)
-            run('undefine', name)
-        (work / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+        try:
+            if defined:
+                run('destroy', name, required=False)
+                run('undefine', name)
+        finally:
+            temporary.cleanup()
+            args.report.write_text(json.dumps(report, indent=2) + '\n')
 
 
 if __name__ == '__main__':

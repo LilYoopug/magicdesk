@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 
-from init_fixture import OPENRC_PREPARE
+from init_fixture import OPENRC_PREPARE, RUNIT_PREPARE
 
 SYSTEMD = r'''
 mkdir -p /run/systemd/system/default.target.wants
@@ -82,11 +82,9 @@ chmod 755 /etc/local.d/observer.start
 exec /sbin/openrc-init
 '''
 
-RUNIT = r'''
+RUNIT = RUNIT_PREPARE + r'''
 # Keep the distribution's stages and default services. Only the observer and
 # disposable service definitions live in private configuration mounts.
-cp -a /etc/runit /run/md-runit
-mount --bind /run/md-runit /etc/runit
 mkdir -p /run/md-runit-services/observer /run/md-runit-services/lifecycle
 cat > /run/md-runit-services/lifecycle/run <<'EOF'
 #!/bin/sh
@@ -199,6 +197,11 @@ def observe_openrc(target):
         os._exit(0)
 
 
+def check_runit_boot(log):
+    plain = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', log)
+    assert not re.search(r'\[\s*fail\s*\]', plain), plain
+
+
 def main():
     from test_oci_services import Server, Suite
     from init_fixture import PREPARE, TRACE_SYSCALLS
@@ -206,6 +209,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--store', required=True)
     parser.add_argument('--build', type=Path)
+    parser.add_argument('--entry', choices=('lazy', 'base'), default='lazy')
     parser.add_argument('--diagnostic-console', action='store_true')
     parser.add_argument('--trace', action='store_true', help='Trace filesystem, sandbox and readiness setup; requires strace')
     parser.add_argument('--rtkit', action='store_true', help='Verify packaged RTKit unit, D-Bus and restart; requires RTKit')
@@ -225,9 +229,11 @@ def main():
     suite = Suite(args.output, args.build)
     suite.report['store'] = args.store
     suite.report['bootPolicy'] = {'init': args.init, 'dropCapabilities': args.drop_capability,
-                                'rtkit': args.rtkit, 'network': args.network, 'dns': args.dns}
+                                'rtkit': args.rtkit, 'network': args.network, 'dns': args.dns,
+                                'entryMode': args.entry}
     target = '/md-boot-' + suite.report['id']
-    prefix = [suite.runner, '--store', args.store, '--user', '0:0', '--network', args.network]
+    prefix = [suite.runner, '--store', args.store, '--user', '0:0', '--network', args.network,
+              '--env', 'SHROOT_MACHINE_ENTRY=' + ('0' if args.entry == 'base' else '1')]
     for address in args.dns:
         prefix += ['--dns', address]
     label = 'os-boot-' + suite.report['id']
@@ -298,6 +304,10 @@ def main():
                     assert not any(item['label'] == label for item in remaining), remaining
                 finally:
                     server.close()
+            boot_log = ''.join(server.log)
+            suite.report['bootLog'] = boot_log
+            if args.init == 'runit':
+                check_runit_boot(boot_log)
         result = suite.command(['cat', suite.base + '/result'])
         assert result.strip() == '0', result
         suite.report['passed'] = True

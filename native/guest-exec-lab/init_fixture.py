@@ -22,6 +22,57 @@ mount -t tmpfs tmpfs /etc/local.d
 mkdir -p /run/openrc
 '''
 
+RUNIT_PREPARE = r'''
+# Scope only enablement links; package-owned service definitions must persist.
+mkdir -p /run/md-runit
+cp -a /etc/runit/runsvdir /run/md-runit/runsvdir
+mount --bind /run/md-runit/runsvdir /etc/runit/runsvdir
+mkdir -p /run/md-runit-services
+'''
+
+RUNIT_START = '''import errno, os, sys, threading, time
+service = sys.argv[1]
+deadline = time.monotonic() + 30
+while True:
+    try:
+        fd = os.open(service + '/supervise/ok', os.O_WRONLY | os.O_NONBLOCK)
+        os.close(fd)
+        break
+    except OSError as error:
+        if error.errno not in (errno.ENOENT, errno.ENXIO):
+            raise
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError('runsv did not acquire ' + service)
+    # PROTOCOL_BACKOFF: wait for runsv's FIFO reader, not a presumed scan delay.
+    threading.Event().wait(min(0.1, remaining))
+os.execvp('sv', ['sv', '-w', '30', 'start', service])
+'''
+
+
+def enable_runit_service(service):
+    name = shlex.quote(service)
+    target = '/etc/runit/runsvdir/default/' + name
+    return (f'if [ ! -L {target} ]; then\n'
+            f'    for source in /etc/sv/{name} /etc/runit/sv/{name}; do\n'
+            f'        if [ -f "$source/run" ]; then ln -s "$source" {target}; break; fi\n'
+            '    done\n'
+            'fi\n'
+            f'test -f {target}/run')
+
+
+def start_service(init, service):
+    name = shlex.quote(service)
+    if init == 'systemd':
+        return 'systemctl start ' + name + '.service'
+    if init == 'openrc':
+        return 'rc-service ' + name + ' start'
+    if init == 'runit':
+        return (enable_runit_service(service) +
+                ' && python3 -c ' + shlex.quote(RUNIT_START) +
+                ' /etc/runit/runsvdir/default/' + name)
+    raise ValueError('Unsupported init: ' + init)
+
 PREPARE = r'''set -eux
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export container=shroot SYSTEMD_LOG_TARGET=console SYSTEMD_LOG_LEVEL=info
@@ -45,7 +96,8 @@ mount -t sysfs -o ro sysfs /sys
 mount -t cgroup2 none /sys/fs/cgroup
 console=$(tty)
 mkdir -p /run/md-host-dev
-mount --bind /dev /run/md-host-dev
+# Retain mounted endpoints and their metadata, not just covered provider dentries.
+mount --rbind /dev /run/md-host-dev
 mount -t tmpfs -o mode=755 tmpfs /dev
 mkdir -p /dev/pts /dev/shm
 mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /dev/shm
@@ -66,7 +118,8 @@ touch /dev/console
 mount --bind "/run/md-host-dev/${console#/dev/}" /dev/console
 mount -t devpts -o newinstance,ptmxmode=0666,mode=0620 devpts /dev/pts
 ln -s pts/ptmx /dev/ptmx
-umount /run/md-host-dev
+umount -l /run/md-host-dev
+rmdir /run/md-host-dev
 '''
 
 
@@ -110,7 +163,7 @@ EOF
             driver = f'''#!/bin/bash
 set -eux
 uid=$(id -u {user})
-systemctl start dbus.socket systemd-logind.service systemd-user-sessions.service
+systemctl start dbus.service systemd-logind.service systemd-user-sessions.service
 systemctl start user@$uid.service
 exec systemd-run --unit=md-installed-desktop-session --wait --collect --uid={user} --property=PAMName=login /bin/bash {target}/session.sh
 '''
@@ -135,14 +188,29 @@ chmod 755 /etc/init.d/md-installed-{name}
 rc-update add md-installed-{name} default
 '''
         boot += 'exec /sbin/openrc-init\n'
-        if user is not None:
-            driver = f'''#!/bin/bash
+    elif init == 'runit':
+        boot += RUNIT_PREPARE
+        boot += enable_runit_service('dbus') + '\n'
+        for name, command, arguments in services:
+            boot += f'''mkdir /run/md-runit-services/md-installed-{name}
+cat > /run/md-runit-services/md-installed-{name}/run <<'EOF'
+#!/bin/sh
+exec >>{target}/{name}.log 2>&1
+exec {command} {arguments}
+EOF
+chmod 755 /run/md-runit-services/md-installed-{name}/run
+ln -s /run/md-runit-services/md-installed-{name} /etc/runit/runsvdir/default/md-installed-{name}
+'''
+        boot += 'exec runit\n'
+    else:
+        raise ValueError('Unsupported init: ' + init)
+    if user is not None and init != 'systemd':
+        driver = f'''#!/bin/bash
 set -eux
+{start_service(init, 'dbus')}
 uid=$(id -u {user})
 gid=$(id -g {user})
 install -d -m 700 -o "$uid" -g "$gid" /run/user/$uid
 exec setpriv --reuid="$uid" --regid="$gid" --init-groups /bin/bash {target}/session.sh
 '''
-    else:
-        raise ValueError('Unsupported init: ' + init)
     return boot, driver

@@ -15,7 +15,8 @@ def run_fixture(session, kind, arguments, uploads=()):
     suite = Suite(session.parent)
     tag = uuid.uuid4().hex
     suite.report.update(session=state['id'], environment=state['environment'],
-                        nativeHashes=state.get('nativeHashes'), workload=kind, inputs={})
+                        nativeHashes=state.get('nativeHashes'), entryMode=state.get('entryMode', 'lazy'),
+                        workload=kind, inputs={})
     try:
         fixtures = Path(__file__).with_name('fixtures')
         files = [fixtures / name for name in (kind + '-boot.py', 'systemd_ready.py', 'network_exchange.py')]
@@ -41,6 +42,6 @@ def run_fixture(session, kind, arguments, uploads=()):
         suite.report.update(log=str(log), probe=json.loads(result.read_text()))
         assert response['exitCode'] == 0 and suite.report['probe']['passed'], log.read_text()[-6000:]
         suite.report['passed'] = True
-        print('PASS ' + kind + ' boot/service/network/stop in ' + state['name'], flush=True)
+        print('PASS ' + kind + ' fixture in ' + state['name'], flush=True)
     finally:
         suite.finish()

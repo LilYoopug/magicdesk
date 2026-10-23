@@ -12,18 +12,24 @@ import urllib.request
 import uuid
 
 from test_oci_services import Suite
+from boot_fixture import run_fixture
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--session', type=Path, required=True)
+    parser.add_argument('--prepare', action='store_true', help='Prepare a dedicated worker with the packaged BuildKit')
+    parser.add_argument('--archive', type=Path, help='Prepare with an official BuildKit archive when the OS omits it')
     args = parser.parse_args()
     state = json.loads(args.session.read_text())
     assert not state.get('closed')
+    if args.prepare or args.archive:
+        run_fixture(args.session, 'buildkit-service', [state['init'], args.archive or '-'],
+                    [args.archive] if args.archive else [])
     suite = Suite(args.session.parent)
     tag = uuid.uuid4().hex
     suite.report.update(session=state['id'], environment=state['environment'],
-                        nativeHashes=state.get('nativeHashes'))
+                        nativeHashes=state.get('nativeHashes'), entryMode=state.get('entryMode', 'lazy'))
     try:
         fixture = Path(__file__).with_name('fixtures') / 'buildkit-build.py'
         suite.transport.upload(suite.client, fixture, state['directory'] + '/buildkit-build.py', overwrite=True)

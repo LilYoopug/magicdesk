@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
+import signal
 import shutil
 import socket
 import subprocess
@@ -20,6 +22,7 @@ def main():
     parser.add_argument('--timeout', type=int, default=300)
     parser.add_argument('--reload', action='store_true',
                         help='Reload the real window once before checking the extension host')
+    parser.add_argument('--require-gpu', action='store_true')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix='shroot-vscode-', dir=Path.home() / '.cache'))
@@ -44,6 +47,8 @@ def main():
     report = {'passed': False, 'work': str(work), 'stages': []}
     child = None
     try:
+        if not os.access('/usr/bin/gdb', os.X_OK):
+            raise RuntimeError('The VS Code debugger fixture requires /usr/bin/gdb')
         subprocess.run(['gcc', '-g', '-O0', str(project / 'main.c'), '-o', str(project / 'main')], check=True)
         with socket.socket() as listener, (args.output / 'code.log').open('w') as log:
             listener.bind(('127.0.0.1', 0))
@@ -59,7 +64,8 @@ def main():
                        '--disable-workspace-trust', '--user-data-dir=' + str(work / 'data'),
                        '--extensionDevelopmentPath=' + str(extension), str(project)]
             report['command'] = command
-            child = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
+            child = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT,
+                                     start_new_session=True)
             deadline = time.monotonic() + args.timeout
             # EVENT_WAIT: extension socket and debugger records; EOF/deadline fails.
             connection, _ = listener.accept()
@@ -72,6 +78,31 @@ def main():
                     (args.output / 'progress.json').write_text(json.dumps(report, indent=2))
                     if record['stage'] == 'failed':
                         raise AssertionError(record['error'])
+                    if record['stage'] == 'workspace':
+                        status = subprocess.check_output([args.code, '--status',
+                            '--user-data-dir=' + str(work / 'data')], env=env, text=True,
+                            stderr=subprocess.STDOUT, timeout=max(1, deadline - time.monotonic()))
+                        (args.output / 'status.txt').write_text(status)
+                        features = dict(re.findall(r'^\s*(\w+):\s*(\w+)\s*$', status, re.MULTILINE))
+                        report['gpuFeatures'] = features
+                        if args.require_gpu:
+                            assert features.get('gpu_compositing') == 'enabled', status
+                        renderers = re.findall(r'^\s*\d+\s+\d+\s+(\d+)\s+window \[', status, re.MULTILINE)
+                        assert renderers, 'No live editor renderer in code --status'
+                        report['rendererSandboxes'] = []
+                        for pid in renderers:
+                            proc = Path('/proc') / pid
+                            arguments = (proc / 'cmdline').read_bytes().split(b'\0')
+                            fields = dict(line.split(':', 1) for line in (proc / 'status').read_text().splitlines()
+                                          if ':' in line)
+                            state = {key: fields[key].strip() for key in ('Uid', 'NoNewPrivs', 'Seccomp')}
+                            report['rendererSandboxes'].append(dict(pid=int(pid),
+                                commandLine=b' '.join(arguments).decode(errors='replace'), **state))
+                            # Chromium's setproctitle replaces the argv vector
+                            # representation with a single space-separated title.
+                            assert b'--type=renderer' in b' '.join(arguments), arguments
+                            assert state['NoNewPrivs'] == '1' and state['Seccomp'] == '2', state
+                            assert int(state['Uid'].split()[0]) == os.getuid() != 0, state
                     if record['stage'] == 'breakpoint':
                         connection.sendall(b'continue\n')
                     if record['stage'] == 'passed':
@@ -89,7 +120,9 @@ def main():
         raise
     finally:
         if child and child.poll() is None:
-            child.terminate()
+            # The CLI owns an Electron child; terminate this fixture's process
+            # group on failure rather than leaving its editor window running.
+            os.killpg(child.pid, signal.SIGTERM)
             child.wait(timeout=10)
         (args.output / 'gui-report.json').write_text(json.dumps(report, indent=2))
 

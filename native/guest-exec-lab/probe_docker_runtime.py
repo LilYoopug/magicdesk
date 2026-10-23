@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import traceback
 
 
@@ -26,10 +27,32 @@ NETWORK_PROFILES = ('routed', 'iptables', 'nftables')
 PROFILES = ('default', 'no-network', *NETWORK_PROFILES, *ROOTLESS_PROFILES)
 
 
+def wait_daemon_api(endpoint, report, timeout=45):
+    deadline = time.monotonic() + timeout
+    attempts = report.setdefault('startupAttempts', [])
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise queue.Empty
+        try:
+            result = subprocess.run(['docker', '--host', endpoint, 'version', '--format', '{{json .Server}}'],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=min(2, remaining))
+            attempts.append(dict(exitCode=result.returncode, output=result.stdout[-2000:]))
+            if result.returncode == 0:
+                return 'ready'
+        except subprocess.TimeoutExpired:
+            attempts.append(dict(timeout=True))
+        # Bounded API polling: service-manager process readiness does not mean
+        # the Docker socket serves requests. Expiry is a startup failure.
+        threading.Event().wait(min(0.1, max(0, deadline - time.monotonic())))
+
+
 def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_runtime=False,
           no_new_keyring=False, trace_filesystem=False, create_count=0, trace_network=False, observer='',
           storage_driver='vfs', data_root='', userland_proxy=True, internet=False, endpoint=''):
-    os.environ['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+    defaults = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+    os.environ['PATH'] = os.pathsep.join(dict.fromkeys(
+        path for path in (os.environ.get('PATH', '') + os.pathsep + defaults).split(os.pathsep) if path))
     preparation = []
     def mount(*args):
         command = ['mount', *args]
@@ -212,7 +235,7 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
 
     try:
         # EVENT_WAIT: daemon API log or output EOF; timeout is not readiness.
-        event = 'ready' if external else records.get(timeout=45)
+        event = wait_daemon_api(endpoint, report) if external else records.get(timeout=45)
         if event == 'ready':
             report['apiReady'] = client('version', '--format', '{{json .Server}}')
             client('info', '--format', 'driver={{.Driver}} cgroup={{.CgroupDriver}} '

@@ -26,17 +26,18 @@ from init_fixture import installed_boot
 from test_oci_services import Suite, port
 
 
-def wait_controller(state, timeout=90):
+def wait_controller(state, timeout=90, *, user=False):
     deadline = time.monotonic() + timeout
-    request = urllib.request.Request('http://127.0.0.1:' + str(state['rootPort']),
+    port_key, uid = ('userPort', state['userUid']) if user else ('rootPort', 0)
+    request = urllib.request.Request('http://127.0.0.1:' + str(state[port_key]),
                                      headers={'Authorization': 'Bearer ' + state['token']})
     while True:
         remaining = deadline - time.monotonic()
-        assert remaining > 0, 'Root controller did not become ready'
+        assert remaining > 0, port_key + ' controller did not become ready'
         try:
             with urllib.request.urlopen(request, timeout=min(remaining, 5)) as response:
                 result = json.load(response)
-            assert result['uid'] == 0, result
+            assert result['uid'] == uid, result
             return
         except urllib.error.URLError as error:
             if not isinstance(error.reason, OSError) or error.reason.errno != errno.ECONNREFUSED:
@@ -46,15 +47,37 @@ def wait_controller(state, timeout=90):
         threading.Event().wait(min(0.1, remaining))
 
 
+def attach_window(client, state, statefile):
+    def wait(condition, **kwargs):
+        # EVENT_WAIT: exact graphics state; timeout retains the failed fixture
+        # for diagnosis and does not claim that its window became ready.
+        value = client.call('wait_for_state', dict(condition=condition, timeoutMillis=60000,
+                                                 sessionId=state['sessionId'], **kwargs))
+        assert value['matched'], value
+        return value
+
+    ready = wait('graphics_window_present')
+    window = next(w['windowId'] for w in ready['session']['windows'] if w['mapped'] and not w['parentWindowId'])
+    display = state['display']
+    client.call('graphics.open_window', dict(sessionId=state['sessionId'], windowId=window,
+                placement='display', displayId=display['id'], uniqueId=display['uniqueId']))
+    wait('graphics_host_attached', windowId=window)
+    state['windowId'] = window
+    statefile.write_text(json.dumps(state, indent=2))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('start', 'run', 'shell', 'capture', 'status', 'stop', 'upload', 'download'))
+    parser.add_argument('action', choices=('start', 'attach', 'run', 'shell', 'capture', 'status', 'stop', 'upload', 'download'))
     parser.add_argument('--name', required=True)
     parser.add_argument('--user', default='mdtester')
     parser.add_argument('--root', action='store_true')
-    parser.add_argument('--init', choices=('systemd', 'openrc'), default='systemd')
+    parser.add_argument('--wait', action='store_true', help='Wait for run completion and retain its log')
+    parser.add_argument('--timeout', type=int, default=300, help='Shell command failure bound in seconds')
+    parser.add_argument('--init', choices=('systemd', 'openrc', 'runit'), default='systemd')
     parser.add_argument('--headless', action='store_true', help='Boot control/init only, without user session, display or GPU')
     parser.add_argument('--build', type=Path, help='Stage a native build; otherwise use the installed APK')
+    parser.add_argument('--entry', choices=('lazy', 'base'), default='lazy')
     parser.add_argument('value', nargs='?')
     args = parser.parse_args()
     if not re.fullmatch(r'[a-zA-Z0-9_-]+', args.name) or not re.fullmatch(r'[a-z_][a-z0-9_-]*', args.user):
@@ -74,14 +97,20 @@ def main():
             suite.finish()
             parser.error('Stop the active graphics fixture before starting an isolated desktop fixture')
         state = suite.report
-        state.update(name=args.name, user=args.user, init=args.init, headless=args.headless, token=uuid.uuid4().hex,
+        state.update(name=args.name, user=args.user, init=args.init, headless=args.headless, entryMode=args.entry, token=uuid.uuid4().hex,
                      rootPort=port(), userPort=port(), target=target)
         state['homeLeaseBefore'] = before['homeLease']
-        info = json.loads(suite.command(['shroot', 'inspect', args.name], quiet=True))
-        assert not info['launches'], 'Environment must be idle before boot'
+        try:
+            info = suite.installed_environment(args.name)
+            assert not info['launches'], 'Environment must be idle before boot'
+        except Exception as error:
+            suite.report['preparationFailure'] = repr(error)
+            suite.finish()
+            raise
         state['environment'] = info
         store = info['store']
-        prefix = [suite.runner, '--store', store, '--user', '0:0']
+        entry = 'SHROOT_MACHINE_ENTRY=' + ('0' if args.entry == 'base' else '1')
+        prefix = [suite.runner, '--store', store, '--user', '0:0', '--env', entry]
         state['runner'] = suite.runner
         state['prefix'] = prefix
         suite.command(prefix + ['--', '/bin/mkdir', '-p', target])
@@ -110,21 +139,24 @@ def main():
             statefile.write_text(json.dumps(state, indent=2))
             print(statefile)
             return
-        home = suite.command(prefix + ['--', '/bin/sh', '-ec',
-                             'getent passwd "$1" | cut -d: -f6', 'fixture', args.user], quiet=True).strip()
+        account = suite.command(prefix + ['--', '/usr/bin/getent', 'passwd', args.user], quiet=True).strip().split(':')
+        assert len(account) == 7 and account[0] == args.user, 'Expected the selected guest account'
+        state['userUid'] = int(account[2])
+        assert state['userUid'] > 0, 'Desktop fixtures require an ordinary guest account'
+        home = account[5]
         assert home.startswith('/home/')
         state['home'] = home
         user = shlex.quote(args.user)
         control = '/usr/bin/python3 ' + target + '/session-controller.py ' + target
-        bus_options = '--systemd ' if args.init == 'systemd' else ''
         autostart = ('#!/bin/sh\nset -eu\nenv > ' + target + '/desktop.env\n'
-                     'dbus-update-activation-environment ' + bus_options + 'DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP\n'
+                     'magicdesk-desktop-session --ready\n'
                      'exec ' + control + ' ')
         autostart += str(state['userPort']) + ' ' + state['token'] + '\n'
         bus = ('export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus\n'
                if args.init == 'systemd' else 'unset DBUS_SESSION_BUS_ADDRESS\n')
         session = f'''#!/bin/bash
 set -eux
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export HOME={shlex.quote(home)} USER={user} LOGNAME={user}
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 {bus.rstrip()}
@@ -152,7 +184,7 @@ exec magicdesk-desktop-session weston --socket=wayland-1 --config={target}/westo
         recipe = subprocess.check_output(['java', '-cp', str(classes),
             'io.github.mekhontsev.magicdesk.GraphicalRecipe', 'routed', 'wayland', store, '/root', command, '0:0'], text=True)
         wrapper = out / 'shroot'
-        wrapper.write_text('#!/system/bin/sh\nexec ' + shlex.join([suite.runner, '--network', 'routed',
+        wrapper.write_text('#!/system/bin/sh\nexec ' + shlex.join([suite.runner, '--network', 'routed', '--env', entry,
             '--env', 'MAGICDESK_GUEST_LABEL=' + state['id'], '--bind', suite.base, target]) + ' "$@"\n')
         suite.transport.upload(client, wrapper, suite.base + '/shroot')
         suite.command(['chmod', '755', suite.base + '/shroot'])
@@ -183,13 +215,10 @@ exec magicdesk-desktop-session weston --socket=wayland-1 --config={target}/westo
         statefile.write_text(json.dumps(state, indent=2))
         client.call('graphics.execute', dict(sessionId=state['sessionId'],
                     command=shlex.join(['/system/bin/sh', suite.base + '/launch.sh'])))
-        ready = wait('graphics_window_present', sessionId=state['sessionId'])
-        window = next(w['windowId'] for w in ready['session']['windows'] if w['mapped'] and not w['parentWindowId'])
-        display = state['display']
-        client.call('graphics.open_window', dict(sessionId=state['sessionId'], windowId=window,
-                    placement='display', displayId=display['id'], uniqueId=display['uniqueId']))
-        wait('graphics_host_attached', sessionId=state['sessionId'], windowId=window)
-        state['windowId'] = window
+        attach_window(client, state, statefile)
+        wait_controller(state)
+        wait_controller(state, user=True)
+        state['ready'] = True
         statefile.write_text(json.dumps(state, indent=2))
         print(statefile)
         return
@@ -200,20 +229,31 @@ exec magicdesk-desktop-session weston --socket=wayland-1 --config={target}/westo
     spec.loader.exec_module(transport)
     config = tomllib.loads((Path.home() / '.codex/config.toml').read_text())['mcp_servers']['magicdesk']
     client = transport.Client(config['url'], config['http_headers']['Authorization'].removeprefix('Bearer '),
-                              timeout=300, request_timeout=270)
+                              timeout=args.timeout+30, request_timeout=args.timeout)
 
     def shell(command):
         result = client.call('console.execute', dict(sessionId=state['consoleId'], command=command))
         assert result['exitCode'] == 0, result
         return result['output']
 
-    if args.action == 'run':
+    if args.action == 'attach':
+        assert not state.get('closed') and not state.get('headless'), 'No retained graphical fixture'
+        attach_window(client, state, statefile)
+    elif args.action == 'run':
         assert args.root or not state.get('headless'), 'Headless fixture exposes only --root commands'
         ident = uuid.uuid4().hex
         request = urllib.request.Request('http://127.0.0.1:' + str(state['rootPort' if args.root else 'userPort']),
-            data=json.dumps(dict(id=ident, command=args.value)).encode(),
+            data=json.dumps(dict(id=ident, command=args.value, wait=args.wait)).encode(),
             headers={'Authorization': 'Bearer ' + state['token']})
-        print(urllib.request.urlopen(request, timeout=10).read().decode())
+        print('Command log: ' + state['directory'] + '/' + ident + '.log', flush=True)
+        # EVENT_WAIT: this command's completion; a transport timeout never replays it.
+        response=json.loads(urllib.request.urlopen(request, timeout=1900 if args.wait else 10).read())
+        print(json.dumps(response))
+        if args.wait:
+            log=out / (ident + '.log')
+            transport.download(client,state['directory'] + '/' + ident + '.log',log)
+            print(log.read_text())
+            raise SystemExit(response['exitCode'])
     elif args.action == 'shell':
         print(shell(args.value.replace('@BASE@', state['directory'])))
     elif args.action in ('upload', 'download'):
