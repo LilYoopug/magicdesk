@@ -5992,13 +5992,16 @@ static pid_t native_pid(struct thread *t,pid_t visible) {
     pid_t number=md_pid_identity_native(id);
     md_pid_identity_release(id); return number;
 }
+static int signal_identity_allowed(const struct thread *from,const struct md_identity *identity,pid_t group,int signal) {
+    return from->identity.uid.real==identity->uid.real
+        || from->identity.uid.real==identity->uid.saved
+        || from->identity.uid.effective==identity->uid.real
+        || from->identity.uid.effective==identity->uid.saved
+        || md_identity_capable_in(&from->identity,identity->user_namespace,CAP_KILL)
+        || (signal==SIGCONT && getsid(from->tgid)==getsid(group));
+}
 static int signal_allowed(const struct thread *from,const struct thread *to,int signal) {
-    return from->identity.uid.real==to->identity.uid.real
-        || from->identity.uid.real==to->identity.uid.saved
-        || from->identity.uid.effective==to->identity.uid.real
-        || from->identity.uid.effective==to->identity.uid.saved
-        || md_identity_capable_in(&from->identity,to->identity.user_namespace,CAP_KILL)
-        || (signal==SIGCONT && getsid(from->tgid)==getsid(to->tgid));
+    return signal_identity_allowed(from,&to->identity,to->tgid,signal);
 }
 static int namespace_init(const struct thread *t) {
     return md_pid_identity_number(t->resources.pid_group,md_pid_identity_namespace(t->resources.pid))==1;
@@ -6114,24 +6117,38 @@ static void pidfd_begin(struct thread *t,const struct user_pt_regs *r) {
     md_fd_object_release(object);
     pidfd_capture_step(t,MD_BUFFER_PIDFD_READY,0);
 }
+struct signal_selection {
+    struct thread *from;
+    pid_t selector,group,after,next;
+    int signal,found,suppressed;
+};
+static int signal_candidate(struct signal_selection *s,pid_t pid,const struct md_identity *identity) {
+    if (pid<=s->after || (s->next && pid>=s->next)) return 0;
+    pid_t visible=visible_pid(s->from,pid);
+    if (!visible || (s->selector==-1 && (visible==1 || pid==s->from->tgid))
+            || (s->selector!=-1 && getpgid(pid)!=s->group)) return 0;
+    s->found=1;
+    if (!signal_identity_allowed(s->from,identity,pid,s->signal)) return 0;
+    s->next=pid; return 1;
+}
+static void signal_retired_candidate(void *context,pid_t pid,struct md_task_retired_view view) {
+    struct signal_selection *s=context;
+    if (signal_candidate(s,pid,view.identity)) s->suppressed=0;
+}
 static long signal_process_next(struct thread *from,pid_t selector,int signal,pid_t after) {
     if (signal<0 || signal>=NSIG) return -EINVAL;
     pid_t group=selector==0 ? getpgid(from->tgid)
         : selector < -1 && selector!=INT32_MIN ? native_pid(from,-selector) : 0;
     if (selector!=-1 && group<=0) return -ESRCH;
-    int found=0;
-    struct thread *next=NULL;
+    struct signal_selection selection={.from=from,.selector=selector,.group=group,.after=after,.signal=signal};
     for (struct thread *to=threads;to;to=to->next) {
-        if (!to->pid || to->pid!=to->tgid || !to->born || to->pid<=after) continue;
-        pid_t visible=visible_pid(from,to->pid);
-        if (!visible || (selector==-1 && (visible==1 || to->tgid==from->tgid))
-                || (selector!=-1 && getpgid(to->tgid)!=group)) continue;
-        found=1;
-        if (!signal_allowed(from,to,signal)) continue;
-        if (!next || to->pid<next->pid) next=to;
+        if (!to->pid || to->pid!=to->tgid || !to->born) continue;
+        if (signal_candidate(&selection,to->pid,&to->identity))
+            selection.suppressed=init_signal_suppressed(from,to,signal);
     }
-    return next ? ((long)next->pid<<1)|init_signal_suppressed(from,next,signal)
-        : found ? -EPERM : after ? 0 : -ESRCH;
+    md_task_registry_retired_processes(tasks,signal_retired_candidate,&selection);
+    return selection.next ? ((long)selection.next<<1)|selection.suppressed
+        : selection.found ? -EPERM : after ? 0 : -ESRCH;
 }
 static int process_call(struct thread *t,struct user_pt_regs *r,unsigned long *cookie) {
     /* A later FD selector can replace the PID selector's cookie, including
@@ -6236,6 +6253,12 @@ static int process_call(struct thread *t,struct user_pt_regs *r,unsigned long *c
                 int signal=(int)r->regs[index+1];
                 if (signal<0 || signal>=NSIG) { return_value(t,r,-EINVAL); return 1; }
                 if (to && !signal_allowed(t,to,signal)) { return_value(t,r,-EPERM); return 1; }
+                if (!to) {
+                    struct md_task_retired_view retired=md_task_registry_retired(tasks,mapped);
+                    if (retired.identity && !signal_identity_allowed(t,retired.identity,mapped,signal)) {
+                        return_value(t,r,-EPERM); return 1;
+                    }
+                }
                 if (to && init_signal_suppressed(t,to,signal)) { return_value(t,r,0); return 1; }
             }
         } else if (nr==SYS_wait4 && target<-1) {

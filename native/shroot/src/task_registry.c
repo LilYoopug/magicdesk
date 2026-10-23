@@ -195,6 +195,12 @@ struct md_task_retired_view md_task_registry_retired(const struct md_task_regist
         : (struct md_task_retired_view){0};
 }
 int md_task_registry_has_retired(const struct md_task_registry *r) { return r && r->retired!=NULL; }
+void md_task_registry_retired_processes(const struct md_task_registry *r,
+        void (*visit)(void *,pid_t,struct md_task_retired_view),void *context) {
+    if (!r) return;
+    for (const struct entry *e=r->retired;e;e=e->retired_next) if (e->tid==e->tgid)
+        visit(context,e->tid,(struct md_task_retired_view){&e->value,e->pid,e->cgroup,e->process});
+}
 void md_task_registry_reap(struct md_task_registry *r,pid_t tid) {
     if (!r || tid<=0) return;
     pthread_mutex_lock(&r->lock);

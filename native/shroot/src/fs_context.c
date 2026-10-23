@@ -108,6 +108,7 @@ static int open_context(struct md_filesystem *fs,const struct md_fs_request *q,
     return r;
 }
 static unsigned mounted_type(const struct md_view_mount *mount) {
+    if (mount && mount->devpts) return MD_FS_MOUNT_DEVPTS;
     if (md_view_inode(mount)) return mount && mount->storage
         && mount->storage->filesystem_kind==MD_FILESYSTEM_TMPFS ? MD_FS_MOUNT_TMPFS : MOUNTED_INODE;
     unsigned long magic=mount && mount->provider ? md_provider_tree_filesystem(mount->provider) : 0;
@@ -132,6 +133,7 @@ static int pick_context(struct md_filesystem *fs,const struct md_fs_request *q,
         c->source=(struct md_mount_source){.fd=location.fd,.backing=location.mount->backing,
             .storage=md_inode_lifetime_retain(location.mount->storage ? location.mount->storage
                 : md_view_inode(location.mount) ? md_inode_store_lifetime(fs->store) : NULL),
+            .devpts=md_devpts_retain(location.mount->devpts),
             .provider=md_provider_tree_retain(location.mount->provider)};
         location.fd=-1;
         r=publish_context(c,q,result,out);
@@ -139,19 +141,33 @@ static int pick_context(struct md_filesystem *fs,const struct md_fs_request *q,
     }
     md_view_location_close(&location); return r;
 }
-int md_fs_super_reconfigure(struct md_filesystem *fs,const struct md_view_mount *mount,int readonly) {
+int md_fs_super_reconfigure(struct md_filesystem *fs,const struct md_view_mount *mount,int readonly,const char *options) {
     if (md_view_inode(mount)) {
         struct md_inode_lifetime *storage=mount && mount->storage
             ? mount->storage : md_inode_store_lifetime(fs->store);
         if (!md_identity_capable_in(fs->store->identity,storage->owner,CAP_SYS_ADMIN)) return -EPERM;
+        if (options && *options) {
+            if (storage->filesystem_kind!=MD_FILESYSTEM_TMPFS) return -EOPNOTSUPP;
+            int r=md_fs_temporary_reconfigure(options,fs->store->identity);
+            if (r) return r;
+        }
+        if (readonly<0) return 0;
         struct md_inode_store *store;
         int r=md_fs_storage_get(fs,mount,&store);
         return r ? r : md_inode_store_reconfigure(store,readonly);
     }
     if (mounted_type(mount)) {
+        struct md_user_namespace *owner=mount->devpts ? md_devpts_owner(mount->devpts)
+            : md_provider_tree_owner(mount->provider);
         if (!md_identity_capable_in(fs->store->identity,
-                md_provider_tree_owner(mount->provider),CAP_SYS_ADMIN)) return -EPERM;
-        return md_mount_policy_set(md_provider_tree_super_policy(mount->provider),readonly ? MD_MOUNT_READONLY : 0);
+                owner,CAP_SYS_ADMIN)) return -EPERM;
+        struct md_mount_policy *policy=mount->devpts ? md_devpts_super_policy(mount->devpts)
+            : md_provider_tree_super_policy(mount->provider);
+        unsigned flags=readonly ? MD_MOUNT_READONLY : 0;
+        int r=readonly<0 ? 0 : md_mount_policy_check(policy,flags);
+        if (!r && mount->devpts) r=md_devpts_reconfigure(mount->devpts,options,fs->store->identity);
+        else if (!r && options && *options) r=-EOPNOTSUPP;
+        return r || readonly<0 ? r : md_mount_policy_set(policy,flags);
     }
     return -EOPNOTSUPP;
 }
@@ -211,15 +227,11 @@ static int configure(struct md_filesystem *fs,struct filesystem_context *c,const
     if (c->phase==MOUNTED) {
         if (q->mode==FSCONFIG_CMD_CREATE) return -EBUSY;
         if (q->mode!=FSCONFIG_CMD_RECONFIGURE) return parameter(c,q);
-        if (c->size) return -EOPNOTSUPP;
         struct md_view_mount source={.backing=c->source.backing,.storage=c->source.storage,
-            .provider=c->source.provider};
+            .provider=c->source.provider,.devpts=c->source.devpts};
         if (!mounted_type(&source)) return -EOPNOTSUPP;
-        int r=0;
-        if (c->flags_mask) r=md_fs_super_reconfigure(fs,&source,!!(c->flags&MS_RDONLY));
-        else if (!md_identity_capable_in(fs->store->identity,c->source.storage
-                ? c->source.storage->owner : md_provider_tree_owner(c->source.provider),CAP_SYS_ADMIN)) r=-EPERM;
-        if (!r) { c->flags=0; c->flags_mask=0; }
+        int r=md_fs_super_reconfigure(fs,&source,c->flags_mask ? !!(c->flags&MS_RDONLY) : -1,c->options);
+        if (!r) { c->flags=0; c->flags_mask=0; c->size=0; c->options[0]=0; }
         return r;
     }
     if (q->mode==FSCONFIG_CMD_RECONFIGURE) return -EBUSY;

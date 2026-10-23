@@ -91,7 +91,34 @@ static void proc_cases(void) {
     closedir(dir);
     puts("PASS mounted proc namespace: self, thread-self, enumeration and relative namespace handles");
 }
+static void zombie_signal_case(int credentials) {
+    pid_t child=fork(); assert(child>=0);
+    if (!child) { assert(setsid()==getpid()); _exit(23); }
+    siginfo_t info={0};
+    /* EVENT_WAIT: WNOWAIT proves exit while retaining kernel PID/group identity. */
+    assert(!waitid(P_PID,child,&info,WEXITED|WNOWAIT));
+    assert(info.si_pid==child && info.si_status==23);
+    assert(getpgid(child)==child);
+    assert(!kill(child,0));
+    assert(!kill(-child,0));
+    assert(!kill(-child,SIGKILL));
+    if (credentials) {
+        pid_t sender=fork(); assert(sender>=0);
+        if (!sender) {
+            assert(!setresgid(1001,1001,1001) && !setresuid(1001,1001,1001));
+            errno=0; assert(kill(child,0)==-1 && errno==EPERM);
+            errno=0; assert(kill(-child,0)==-1 && errno==EPERM);
+            _exit(0);
+        }
+        reap(sender);
+    }
+    int status; assert(waitpid(child,&status,0)==child && WIFEXITED(status) && WEXITSTATUS(status)==23);
+    errno=0; assert(kill(child,0)==-1 && errno==ESRCH);
+    errno=0; assert(kill(-child,0)==-1 && errno==ESRCH);
+    puts("PASS unreaped process/group signals retain identity and permission checks until wait");
+}
 static void wait_cases(void) {
+    zombie_signal_case(1);
     pid_t child=fork(); assert(child>0 || !child);
     if (!child) _exit(17);
     siginfo_t info={0};
@@ -391,8 +418,38 @@ static int threaded_init(void *unused) {
     pthread_t thread; assert(!pthread_create(&thread,NULL,exec_worker,NULL));
     pthread_exit(NULL);
 }
+static int sibling_init(void *unused) {
+    (void)unused;
+    assert(getpid()==1 && getppid()==0);
+    errno=0;
+    assert(syscall(SYS_clone,CLONE_PARENT|SIGCHLD,0,NULL,NULL,0)==-1 && errno==EINVAL);
+    return 23;
+}
+static void parent_namespace_case(void *stack) {
+    int pair[2]; assert(!pipe(pair));
+    pid_t helper=fork(); assert(helper>=0);
+    if (!helper) {
+        close(pair[0]);
+        int flags=CLONE_PARENT|CLONE_NEWPID|CLONE_NEWUSER|CLONE_NEWNS
+            |CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWNET|SIGCHLD;
+        pid_t child=clone(sibling_init,(char *)stack+1024*1024,flags,NULL);
+        assert(child>0);
+        assert(write(pair[1],&child,sizeof(child))==sizeof(child));
+        errno=0; assert(waitpid(child,NULL,0)==-1 && errno==ECHILD);
+        _exit(0);
+    }
+    close(pair[1]);
+    pid_t child; assert(read(pair[0],&child,sizeof(child))==sizeof(child)); close(pair[0]);
+    reap(helper);
+    int status; assert(waitpid(child,&status,0)==child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status)==23);
+    puts("PASS CLONE_PARENT with new PID/user namespaces preserves parent wait and init restrictions");
+}
 int test_pid_namespace_guest(int argc,char **argv) {
     setbuf(stdout,NULL); alarm(30);
+    if (argc==3 && !strcmp(argv[2],"zombie-signal-native")) {
+        zombie_signal_case(0); return 0;
+    }
     if (argc==3 && !strcmp(argv[2],"debug-exec")) {
         assert(getpid()>1 && syscall(SYS_gettid)==getpid());
         return 0;
@@ -406,6 +463,7 @@ int test_pid_namespace_guest(int argc,char **argv) {
         return 0;
     }
     void *stack=malloc(1024*1024); assert(stack);
+    parent_namespace_case(stack);
     pid_t original=getpid();
     int pair[2]; assert(!socketpair(AF_UNIX,SOCK_SEQPACKET,0,pair));
     pid_t child=clone(init,(char *)stack+1024*1024,CLONE_NEWPID|SIGCHLD,&pair[0]);

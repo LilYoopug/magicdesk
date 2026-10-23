@@ -32,7 +32,7 @@ static unsigned entries(const char *path) {
 static void limits(void) {
     const char *path="/tmp/pts-limit";
     assert(!mkdir(path,0700));
-    const char *invalid[]={"max=0","max=-1","max=1048577","max=4294967296","max=1x"};
+    const char *invalid[]={"max=-1","max=1048577","max=4294967296","max=1x"};
     for (unsigned i=0;i<sizeof(invalid)/sizeof(*invalid);++i)
         assert(mount("devpts",path,"devpts",0,invalid[i])==-1 && errno==EINVAL);
     for (int modern=0;modern<2;++modern) {
@@ -61,6 +61,48 @@ static void limits(void) {
         assert(!umount2(path,0));
     }
     assert(!rmdir(path));
+}
+static void reconfigure(void) {
+    const char *path="/tmp/pts-remount",*alias="/tmp/pts-remount-alias";
+    assert(!mkdir(path,0700) && !mkdir(alias,0700));
+    assert(!mount("devpts",path,"devpts",0,"ptmxmode=666,mode=600"));
+    assert(!mount(path,alias,NULL,MS_BIND,NULL));
+    int master=open("/tmp/pts-remount/ptmx",O_RDWR|O_NOCTTY|O_CLOEXEC); assert(master>=0);
+    int unlock=0; assert(!ioctl(master,TIOCSPTLCK,&unlock));
+    int slave=ioctl(master,TIOCGPTPEER,O_RDWR|O_NOCTTY|O_CLOEXEC); assert(slave>=0);
+    int context=(int)syscall(SYS_fspick,AT_FDCWD,alias,FSPICK_CLOEXEC); assert(context>=0);
+    const char *keys[]={"mode","ptmxmode","gid"},*values[]={"620","600","3"};
+    for (unsigned i=0;i<3;++i)
+        assert(!syscall(SYS_fsconfig,context,FSCONFIG_SET_STRING,keys[i],values[i],0));
+    assert(!syscall(SYS_fsconfig,context,FSCONFIG_CMD_RECONFIGURE,NULL,NULL,0));
+    struct stat st;
+    assert(!stat("/tmp/pts-remount/ptmx",&st) && (st.st_mode&0777)==0600 && !st.st_gid);
+    assert(!fstat(slave,&st) && (st.st_mode&0777)==0600 && !st.st_gid);
+    int next=open("/tmp/pts-remount-alias/ptmx",O_RDWR|O_NOCTTY|O_CLOEXEC); assert(next>=0);
+    assert(!ioctl(next,TIOCSPTLCK,&unlock));
+    int peer=ioctl(next,TIOCGPTPEER,O_RDWR|O_NOCTTY|O_CLOEXEC); assert(peer>=0);
+    assert(!fstat(peer,&st) && (st.st_mode&0777)==0620 && st.st_gid==3);
+    close(peer); close(next);
+    assert(!syscall(SYS_fsconfig,context,FSCONFIG_SET_STRING,"mode","888",0));
+    assert(syscall(SYS_fsconfig,context,FSCONFIG_CMD_RECONFIGURE,NULL,NULL,0)==-1 && errno==EINVAL);
+    assert(!stat("/tmp/pts-remount/ptmx",&st) && (st.st_mode&0777)==0600);
+    close(context);
+    assert(!mount("devpts",alias,"devpts",MS_REMOUNT,"ptmxmode=666,max=0"));
+    assert(open("/tmp/pts-remount/ptmx",O_RDWR|O_NOCTTY)==-1 && errno==ENOSPC);
+    assert(!fstat(slave,&st) && (st.st_mode&0777)==0600 && !st.st_gid);
+    context=(int)syscall(SYS_fspick,AT_FDCWD,path,FSPICK_CLOEXEC); assert(context>=0);
+    assert(!syscall(SYS_fsconfig,context,FSCONFIG_SET_FLAG,"ro",NULL,0));
+    assert(!syscall(SYS_fsconfig,context,FSCONFIG_CMD_RECONFIGURE,NULL,NULL,0));
+    assert(chmod("/tmp/pts-remount-alias/ptmx",0666)==-1 && errno==EROFS);
+    assert(!syscall(SYS_fsconfig,context,FSCONFIG_SET_FLAG,"rw",NULL,0));
+    assert(!syscall(SYS_fsconfig,context,FSCONFIG_CMD_RECONFIGURE,NULL,NULL,0));
+    assert(!stat("/tmp/pts-remount/ptmx",&st) && !(st.st_mode&0777));
+    assert(!chmod("/tmp/pts-remount-alias/ptmx",0666));
+    next=open("/tmp/pts-remount/ptmx",O_RDWR|O_NOCTTY|O_CLOEXEC); assert(next>=0);
+    close(next); close(context); close(slave); close(master);
+    assert(!umount2(alias,0) && !umount2(path,0));
+    assert(!rmdir(alias) && !rmdir(path));
+    puts("PASS devpts remount: both APIs, shared superblock, retained slaves, defaults and invalid options");
 }
 static void ownership(void) {
     struct stat st;
@@ -137,6 +179,7 @@ int test_devpts_guest(int pid_namespace) {
     assert(!mount("devpts","/tmp/pts-b","devpts",MS_NOSUID|MS_NOEXEC,"newinstance,ptmxmode=0666,mode=600"));
     assert(!entries("/tmp/pts-a") && !entries("/tmp/pts-b"));
     limits();
+    reconfigure();
     ownership();
     int master=open("/tmp/pts-a/ptmx",O_RDWR|O_NOCTTY|O_CLOEXEC); assert(master>=0);
     unsigned index; assert(!ioctl(master,TIOCGPTN,&index));

@@ -19,54 +19,76 @@
  * job-control semantics. No master/slave data FD is retained by this view. */
 struct attributes { uid_t uid; gid_t gid; mode_t mode; };
 struct entry { struct entry *next; dev_t device; ino_t inode; unsigned number; struct attributes attributes; };
-struct md_devpts {
-    atomic_uint references;
-    struct entry *entries;
-    mode_t mode;
-    struct attributes directory,ptmx;
+struct options {
+    mode_t mode,ptmxmode;
     uid_t uid; gid_t gid;
     int fixed_uid,fixed_gid;
     unsigned maximum;
+};
+struct md_devpts {
+    atomic_uint references;
+    struct entry *entries;
+    struct options options;
+    struct attributes directory,ptmx;
+    struct md_user_namespace *owner;
+    struct md_mount_policy super_policy;
     int storage,root;
 };
-struct md_devpts *md_devpts_new(int parent,const char *options,const struct md_identity *id) {
-    if (!id) { errno=EPERM; return NULL; }
-    struct md_devpts *p=calloc(1,sizeof(*p)); if (!p) return NULL;
-    atomic_init(&p->references,1); p->mode=0600; p->uid=id->uid.fs; p->gid=id->gid.fs;
-    p->maximum=1U<<20;
-    p->directory=(struct attributes){id->uid.fs,id->gid.fs,0755};
-    p->ptmx=(struct attributes){id->uid.fs,id->gid.fs,0};
-    p->storage=p->root=-1;
+static int parse(const char *options,const struct md_identity *id,struct options *p) {
+    *p=(struct options){.mode=0600,.maximum=1U<<20};
     for (const char *at=options;at && *at;) {
         const char *end=strchr(at,','); if (!end) end=at+strlen(at);
         size_t n=(size_t)(end-at);
+        if (!n) { at=*end ? end+1 : end; continue; }
         if (n==11 && !memcmp(at,"newinstance",11)) { at=*end ? end+1 : end; continue; }
         const char *equal=memchr(at,'=',n);
-        if (!equal || equal+1==end) { errno=EINVAL; goto failed; }
+        if (!equal || equal+1==end) return -EINVAL;
         unsigned key=(unsigned)(equal-at),base=10,value=0;
         int mode=key==4 && !memcmp(at,"mode",4),ptmx=key==8 && !memcmp(at,"ptmxmode",8);
         int uid=key==3 && !memcmp(at,"uid",3),gid=key==3 && !memcmp(at,"gid",3);
         int maximum=key==3 && !memcmp(at,"max",3);
-        if (!mode && !ptmx && !uid && !gid && !maximum) { errno=EOPNOTSUPP; goto failed; }
+        if (!mode && !ptmx && !uid && !gid && !maximum) return -EINVAL;
         if (mode || ptmx) base=8;
         for (const char *digit=equal+1;digit<end;++digit) {
             unsigned d=(unsigned char)*digit-'0';
-            if (d>=base || value>(UINT32_MAX-d)/base) { errno=EINVAL; goto failed; }
+            if (d>=base || value>(UINT32_MAX-d)/base) return -EINVAL;
             value=value*base+d;
         }
         if (mode || ptmx) {
-            if (value&~0777U) { errno=EINVAL; goto failed; }
-            if (mode) p->mode=value; else p->ptmx.mode=value;
+            if (value&~0777U) return -EINVAL;
+            if (mode) p->mode=value; else p->ptmxmode=value;
         } else if (maximum) {
-            if (!value || value>(1U<<20)) { errno=EINVAL; goto failed; }
+            if (value>(1U<<20)) return -EINVAL;
             p->maximum=value;
         } else {
             value=md_user_namespace_into(id->user_namespace,gid,value);
-            if (value==UINT32_MAX) { errno=EINVAL; goto failed; }
+            if (value==UINT32_MAX) return -EINVAL;
             if (uid) { p->uid=value; p->fixed_uid=1; } else { p->gid=value; p->fixed_gid=1; }
         }
         at=*end ? end+1 : end;
     }
+    return 0;
+}
+int md_devpts_reconfigure(struct md_devpts *p,const char *options,const struct md_identity *id) {
+    if (!id || !md_identity_capable_in(id,p->owner,CAP_SYS_ADMIN)) return -EPERM;
+    struct options next;
+    int r=parse(options,id,&next);
+    if (r) return r;
+    /* Remount changes future slaves and the existing ptmx mode, not the
+     * attributes of already allocated slave terminals. */
+    p->options=next; p->ptmx.mode=next.ptmxmode; return 0;
+}
+struct md_user_namespace *md_devpts_owner(struct md_devpts *p) { return p->owner; }
+struct md_mount_policy *md_devpts_super_policy(struct md_devpts *p) { return &p->super_policy; }
+struct md_devpts *md_devpts_new(int parent,const char *options,const struct md_identity *id) {
+    if (!id) { errno=EPERM; return NULL; }
+    struct md_devpts *p=calloc(1,sizeof(*p)); if (!p) return NULL;
+    atomic_init(&p->references,1);
+    p->storage=p->root=-1;
+    int r=parse(options,id,&p->options);
+    if (r) { errno=-r; goto failed; }
+    p->directory=(struct attributes){id->uid.fs,id->gid.fs,0755};
+    p->ptmx=(struct attributes){id->uid.fs,id->gid.fs,p->options.ptmxmode};
     p->storage=md_temporary_directory_new(parent);
     if (p->storage<0) { errno=-p->storage; goto failed; }
     if (mkdirat(p->storage,"pts",0700)) goto failed;
@@ -74,7 +96,7 @@ struct md_devpts *md_devpts_new(int parent,const char *options,const struct md_i
     if (p->root<0) goto failed;
     int node=openat(p->root,"ptmx",O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600);
     if (node<0) goto failed;
-    close(node); return p;
+    close(node); p->owner=md_user_namespace_retain(id->user_namespace); return p;
 failed:
     { int error=errno;
       if (p->root>=0) close(p->root);
@@ -88,6 +110,7 @@ struct md_devpts *md_devpts_retain(struct md_devpts *p) {
 void md_devpts_release(struct md_devpts *p) {
     if (!p || atomic_fetch_sub_explicit(&p->references,1,memory_order_acq_rel)!=1) return;
     while (p->entries) { struct entry *e=p->entries; p->entries=e->next; free(e); }
+    md_user_namespace_release(p->owner); md_mount_policy_close(&p->super_policy);
     close(p->root); md_temporary_directory_release(p->storage); free(p);
 }
 static int ptmx(const struct stat *st) { return S_ISCHR(st->st_mode) && major(st->st_rdev)==5 && minor(st->st_rdev)==2; }
@@ -152,7 +175,7 @@ int md_devpts_open(struct md_devpts *p,int fd,int flags,const struct md_identity
         if (ioctl(opened,TIOCGPTN,&number)) { r=-errno; goto failed; }
         /* devpts max bounds the allocated index. Native numbering deliberately
          * remains shared with the host; never publish an out-of-range PTY. */
-        if (number>=p->maximum) { r=-ENOSPC; goto failed; }
+        if (number>=p->options.maximum) { r=-ENOSPC; goto failed; }
         snprintf(path,sizeof(path),"/dev/pts/%u",number);
         struct stat slave;
         if (stat(path,&slave)) { r=-errno; goto failed; }
@@ -163,8 +186,8 @@ int md_devpts_open(struct md_devpts *p,int fd,int flags,const struct md_identity
             e->next=p->entries; p->entries=e;
         }
         e->number=number; e->device=slave.st_dev; e->inode=slave.st_ino;
-        e->attributes=(struct attributes){p->fixed_uid ? p->uid : id->uid.fs,
-            p->fixed_gid ? p->gid : id->gid.fs,p->mode};
+        e->attributes=(struct attributes){p->options.fixed_uid ? p->options.uid : id->uid.fs,
+            p->options.fixed_gid ? p->options.gid : id->gid.fs,p->options.mode};
         char name[32]; snprintf(name,sizeof(name),"%u",number);
         int node=openat(p->root,name,O_CREAT|O_WRONLY|O_NOFOLLOW|O_CLOEXEC,0600);
         if (node<0) { r=-errno; goto failed; }

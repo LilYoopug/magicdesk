@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "task_resources.h"
 #include "task_registry.h"
+#include "task_status.h"
 #include "mqueue_view.h"
 #include <assert.h>
 #include <dirent.h>
@@ -14,6 +15,7 @@
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 void test_fd_origins(void);
@@ -179,7 +181,7 @@ static void pid_resource_transaction(void) {
     assert(!md_resources_init(&owner,NULL));
     assert(md_resources_clone_supported(CLONE_NEWPID));
     assert(!md_resources_clone_supported(CLONE_NEWPID|CLONE_THREAD));
-    assert(!md_resources_clone_supported(CLONE_NEWPID|CLONE_PARENT));
+    assert(md_resources_clone_supported(CLONE_NEWPID|CLONE_PARENT));
     assert(!md_resources_unshare_prepare(&owner,CLONE_NEWPID,&identity,&change));
     assert(change.next.pid_children && !owner.pid_children && !owner.pid);
     assert(!md_resources_unshare_finish(&owner,NULL,&change,-EINVAL));
@@ -264,6 +266,13 @@ static void *read_mask(void *argument) {
 }
 static void live_umask_snapshot(void) {
     int before=descriptors();
+    pid_t zombie=fork(); assert(zombie>=0);
+    if (!zombie) _exit(0);
+    siginfo_t death={0};
+    /* EVENT_WAIT: WNOWAIT retains a dead proc entry after exit_fs(). */
+    assert(!waitid(P_PID,zombie,&death,WEXITED|WNOWAIT));
+    assert(death.si_pid==zombie && md_task_umask(zombie)==-ESRCH);
+    assert(waitpid(zombie,NULL,0)==zombie);
     struct md_task_registry *registry=md_task_registry_create(); assert(registry);
     struct md_identity id=md_identity_new(0,0);
     struct root_thread state={.mutex=PTHREAD_MUTEX_INITIALIZER,.condition=PTHREAD_COND_INITIALIZER};
@@ -297,7 +306,9 @@ static void live_umask_snapshot(void) {
     assert(!pthread_mutex_unlock(&state.mutex));
     /* EVENT_WAIT: the proc descriptor must observe death, never a replacement TID. */
     assert(!pthread_join(owner,NULL));
-    assert(md_task_snapshot_umask(&second)==-ESRCH);
+    long exited_mask=md_task_snapshot_umask(&second);
+    if (exited_mask!=-ESRCH) fprintf(stderr,"exited task umask: %ld\n",exited_mask);
+    assert(exited_mask==-ESRCH);
     md_task_registry_retire(registry,state.tid,&id);
     md_task_registry_destroy(registry);
     assert(descriptors()==before+1);

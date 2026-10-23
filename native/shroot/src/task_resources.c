@@ -73,7 +73,7 @@ void md_resources_exit_files(struct md_task_resources *r,struct md_fd_closed *cl
 }
 int md_resources_clone_supported(unsigned long flags) {
     return (!(flags&CLONE_NEWUSER) || !(flags&(CLONE_FS|CLONE_THREAD)))
-        && (!(flags&CLONE_NEWPID) || !(flags&(CLONE_THREAD|CLONE_PARENT)))
+        && (!(flags&CLONE_NEWPID) || !(flags&CLONE_THREAD))
         && (flags & (CLONE_NEWNS | CLONE_FS)) != (CLONE_NEWNS | CLONE_FS)
         && (flags & (CLONE_NEWIPC | CLONE_SYSVSEM)) != (CLONE_NEWIPC | CLONE_SYSVSEM);
 }

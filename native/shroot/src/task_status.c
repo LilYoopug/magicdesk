@@ -96,7 +96,9 @@ long md_task_umask_fd(int fd) {
         }
         return !digits || *p!='\n' || mask>0777 ? -EIO : (long)mask;
     }
-    return -ENOTSUP;
+    /* Supported kernels always expose Umask while task->fs exists. exit_fs()
+     * can remove it before the pinned task itself disappears from procfs. */
+    return -ESRCH;
 }
 long md_task_umask(int tid) {
     long fd=md_task_status_open(tid);

@@ -91,6 +91,10 @@ int md_mount_source_create(struct md_filesystem *fs,const struct md_fs_request *
             fs->actor->cgroup_namespace,q->value_size ? q->value : NULL);
         int error=errno; close(parent); errno=error;
         if ((devpts && !s.devpts) || (cgroup && !s.cgroup)) return -errno;
+        if (devpts) {
+            int r=md_mount_policy_set(md_devpts_super_policy(s.devpts),q->flags&MS_RDONLY ? MD_MOUNT_READONLY : 0);
+            if (r) { md_mount_source_close(&s); return r; }
+        }
     } else {
         s.pid=md_pid_namespace_retain(pid);
         int parent=md_fs_private_mounts_parent(fs->store);

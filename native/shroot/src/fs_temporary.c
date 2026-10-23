@@ -81,6 +81,13 @@ static int parse(const char *text, const struct md_identity *id, struct options 
     }
     return 0;
 }
+int md_fs_temporary_reconfigure(const char *options,const struct md_identity *id) {
+    if (!id) return -EPERM;
+    /* Linux accepts mode/uid/gid on remount without changing the root inode.
+     * Capacity requests retain the same permissive policy as initial mount. */
+    struct options parsed;
+    return parse(options,id,&parsed);
+}
 int md_fs_private_mounts_parent(struct md_inode_store *s) {
     if (mkdirat(s->lifetime->root,"mounts",0700) && errno!=EEXIST) return -errno;
     int fd=openat(s->lifetime->root,"mounts",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);

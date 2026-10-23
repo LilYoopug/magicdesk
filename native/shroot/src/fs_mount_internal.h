@@ -75,6 +75,7 @@ static inline int md_view_file_cycle(struct md_control_file file,const struct md
     return target && view->base.id>=target->base.id;
 }
 int md_fs_mount_temporary(struct md_filesystem *, const struct md_fs_request *, struct md_mount_source *);
+int md_fs_temporary_reconfigure(const char *,const struct md_identity *);
 int md_fs_mount_overlay(struct md_filesystem *, const struct md_fs_request *, struct md_mount_source *);
 int md_fs_private_mounts_parent(struct md_inode_store *);
 int md_fs_provider_mount(struct md_filesystem *,struct md_provider_tree *,const char *);
@@ -90,7 +91,8 @@ static inline int md_view_inode(const struct md_view_mount *m) {
 }
 static inline unsigned md_view_policy_flags(const struct md_view_mount *m) {
     return m ? md_mount_policy_flags(&m->policy)
-        |(m->provider ? md_provider_tree_super_flags(m->provider) : 0) : 0;
+        |(m->provider ? md_provider_tree_super_flags(m->provider)
+            : m->devpts ? md_mount_policy_flags(md_devpts_super_policy(m->devpts)) : 0) : 0;
 }
 static inline int md_view_readonly(const struct md_view_mount *m) {
     return !!(md_view_policy_flags(m)&MD_MOUNT_READONLY);

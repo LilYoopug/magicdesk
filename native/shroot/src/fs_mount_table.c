@@ -172,6 +172,7 @@ static void entry(FILE *stream, unsigned info, unsigned id, unsigned parent, dev
     }
 }
 static int super_readonly(struct md_filesystem *fs,const struct md_view_mount *mount) {
+    if (mount && mount->devpts) return !!(md_mount_policy_flags(md_devpts_super_policy(mount->devpts))&MD_MOUNT_READONLY);
     if (mount && mount->provider) return !!(md_provider_tree_super_flags(mount->provider)&MD_MOUNT_READONLY);
     if (!md_view_inode(mount)) return 0;
     struct md_inode_store *store;

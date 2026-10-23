@@ -43,6 +43,10 @@ struct md_task_retired_view {
 };
 /* Borrowed on the writer thread, only until its next registry mutation. */
 struct md_task_retired_view md_task_registry_retired(const struct md_task_registry *,pid_t);
+/* Writer-only enumeration, without allocation or live-resource pins. Callback
+ * borrows each unreaped process and must not mutate the registry. */
+void md_task_registry_retired_processes(const struct md_task_registry *,
+    void (*visit)(void *,pid_t,struct md_task_retired_view),void *);
 int md_task_registry_has_retired(const struct md_task_registry *);
 void md_task_registry_reap(struct md_task_registry *,pid_t);
 void md_task_registry_collect(struct md_task_registry *,int (*gone)(pid_t));

@@ -740,15 +740,16 @@ static int mount_change(struct md_filesystem *fs, struct md_guest_domain *contex
         r=attributes(fs,q,&target,&attr); break;
     case MD_FS_MOUNT_REMOUNT:
         if (q->flags&~(MS_REMOUNT|MS_BIND|MD_FS_MOUNT_FLAGS)) r=-ENOTSUP;
-        else if (q->value_size && *(const char *)q->value) r=-EOPNOTSUPP;
         else {
             struct md_view_mount *mount=target.mount;
             r=md_view_require_root(fs,&target);
             if (!r) r=policy_check(fs,mount,md_fs_mount_flags(q->flags));
             unsigned long type=mount->provider ? md_provider_tree_filesystem(mount->provider) : 0;
             if (!r && !(q->flags&MS_BIND) && (type==SYSFS_MAGIC || type==PROC_SUPER_MAGIC
+                    || mount->devpts
                     || (mount->storage && mount->storage->filesystem_kind==MD_FILESYSTEM_TMPFS)))
-                r=md_fs_super_reconfigure(fs,mount,!!(q->flags&MS_RDONLY));
+                r=md_fs_super_reconfigure(fs,mount,!!(q->flags&MS_RDONLY),q->value_size ? q->value : NULL);
+            else if (!r && q->value_size && *(const char *)q->value) r=-EOPNOTSUPP;
             if (!r) r=md_mount_policy_set(&mount->policy,md_fs_mount_flags(q->flags));
         }
         break;

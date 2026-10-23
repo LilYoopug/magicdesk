@@ -30,6 +30,36 @@ static struct md_fs_result call(struct md_filesystem *fs,struct md_fs_request q,
     struct md_fs_result result;
     md_fs_execute(fs,&q,&result,out); return result;
 }
+static void temporary_remount(struct md_filesystem *fs,int context,struct md_control_file control,
+        int mounted,struct md_fs_anchor *anchor) {
+    const char *keys[]={"mode","uid","gid","size","nr_inodes"};
+    const char *values[]={"0700","123","456","25%","1024"};
+    struct md_fs_request q={.operation=MD_FS_FSCONFIG,.directory={context,-1},
+        .control=control,.mode=FSCONFIG_SET_STRING};
+    for (unsigned i=0;i<5;++i) {
+        q.path[0]=keys[i]; q.value=values[i]; q.value_size=(unsigned)strlen(values[i])+1;
+        assert(!call(fs,q,NULL).error);
+    }
+    q.mode=FSCONFIG_CMD_RECONFIGURE; q.path[0]=NULL; q.value=NULL; q.value_size=0;
+    assert(!call(fs,q,NULL).error);
+    assert(!call(fs,q,NULL).error);
+    const char *options="mode=0700,uid=123,gid=456,size=25%";
+    struct md_fs_request legacy={.operation=MD_FS_MOUNT,.directory={mounted,-1},
+        .origin={anchor,NULL},.path={"",NULL},.mode=MD_FS_MOUNT_REMOUNT,.flags=MS_REMOUNT,
+        .value=options,.value_size=(unsigned)strlen(options)+1};
+    assert(!call(fs,legacy,NULL).error);
+    legacy.value="mode=888"; legacy.value_size=9;
+    assert(call(fs,legacy,NULL).error==-EINVAL);
+    struct md_fs_result root=call(fs,(struct md_fs_request){.operation=MD_FS_FSTAT,
+        .directory={mounted,-1},.origin={anchor,NULL}},NULL);
+    assert(!root.error && (root.info.mode&07777)==01777
+        && root.info.uid==0 && root.info.gid==0);
+    q.mode=FSCONFIG_SET_STRING; q.path[0]="size"; q.value="nonsense"; q.value_size=9;
+    assert(!call(fs,q,NULL).error);
+    q.mode=FSCONFIG_CMD_RECONFIGURE; q.path[0]=NULL; q.value=NULL; q.value_size=0;
+    assert(call(fs,q,NULL).error==-EINVAL);
+    puts("PASS tmpfs reconfigure: shared validation, unchanged root metadata, cleared parameters and invalid capacity");
+}
 static void pressure_probe(const char *base) {
     int root=open(base,O_PATH|O_DIRECTORY|O_CLOEXEC); assert(root>=0);
     assert(md_procfs_pressure_probe(root)==0);
@@ -82,6 +112,7 @@ void test_fs_context(const char *base) {
                 struct md_fs_result mount=call(&fs,q,&(struct md_fs_output){.origin=&anchor});
                 assert(!mount.error && mount.fd>=0 && anchor);
                 mounted=mount.fd;
+                if (!cycle) temporary_remount(&fs,opened.fd,control,mounted,anchor);
                 struct md_mount_namespace *copy=NULL;
                 struct md_fs_location copied_root;
                 assert(!md_fs_mounts_copy(&fs,&(struct md_fs_location){0},&copy,&copied_root));

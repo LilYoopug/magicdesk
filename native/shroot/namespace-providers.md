@@ -201,6 +201,11 @@ for future children. Unshare/setns only changes the last of these; the caller
 does not move into its children's namespace. Entry is limited to the current
 namespace and descendants, with user-namespace authority checks.
 
+`CLONE_PARENT` may create a new PID namespace: the newborn is PID 1 there,
+but remains waitable by the caller's parent in the ancestor namespace. The
+calling namespace's PID 1 cannot create siblings. This restriction is checked
+against the caller, not imposed on every `CLONE_PARENT | CLONE_NEWPID` request.
+
 The kernel still owns process lifetime, process groups, sessions, signal queues
 and child wait events. ABI translation covers PID/TID/PPID, parent-TID output,
 wait4/waitid, signals, process groups, sessions, affinity/scheduling and selected
@@ -235,6 +240,12 @@ native fast paths must not substitute Android credentials or cgroups.
 Retirement and reaping allocate no objects. A separate intrusive retired list
 avoids scanning live tasks during collection. PID-number ownership itself does
 not retain credentials or filesystem resources.
+
+Signal group selection includes unreaped process leaders from that retired list,
+with the same guest credential checks as live processes. Kernel delivery still
+runs in the sender; an exited but unreaped process is not an absent PID. Positive
+PID signals also retain those credential checks until reaping. The focused
+namespace fixture compares the zombie/group lifecycle with a native control.
 
 Reaping removes lookup visibility independently of open pidfds.
 Automatically reaped children are collected only when no pending native wait
@@ -401,6 +412,12 @@ namespace copies, bind policy and retained detached descriptors. Backing files
 consume the store's disk space. `size`, `nr_blocks` and `nr_inodes` accept validated
 numeric requests, including binary suffixes and percentages for size, under a
 permissive allocation policy. They do not impose quotas or alter statfs capacity.
+Legacy remount and `FSCONFIG_CMD_RECONFIGURE` use the same parameter validation.
+As on Linux, remount accepts `mode`, `uid` and `gid` without changing the existing
+root inode; capacity parameters retain the allocation policy above. Invalid
+parameters fail before readonly policy changes, and successful contexts clear
+their parameter list before reuse. This disk-backed implementation does not
+provide `ramfs` or a no-swap secret-storage guarantee.
 Writes, truncation and shared mappings retain native IO and backing-space errors.
 Atime flags in legacy and descriptor mount APIs are compatibility hints: timestamps
 follow the backing filesystem, not a new per-mount IO observer. Memory accounting
@@ -524,6 +541,14 @@ policy. Only terminals allocated through that instance's ptmx are resolved or
 listed. Bind aliases and copied mount views retain the instance. Kernel slave
 identity, not just its number, guards against index reuse. Closed terminals
 disappear from directory results; the view retains no master/slave data FD.
+
+Legacy remount and `fspick`/`fsconfig` reconfigure that same retained instance
+under its creating user namespace's authority. Both APIs share option validation.
+As in Linux, omitted options reset to defaults; mode/uid/gid affect future slave
+allocation, while `ptmxmode` changes the existing ptmx node. Existing slaves keep
+their metadata and descriptors. The shared superblock read-only policy applies
+through bind aliases and namespace copies. Invalid options leave both parameters
+and policy unchanged. A zero `max` permits the mount but prevents new allocation.
 
 Data, termios, readiness, EOF and terminal sessions remain kernel operations.
 A slave open that may acquire a controlling terminal returns a deferred O_PATH
