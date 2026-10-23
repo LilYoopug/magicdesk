@@ -3,6 +3,7 @@ import configparser
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import types
 import unittest
@@ -127,11 +128,25 @@ class FlatpakGLTest(unittest.TestCase):
         self.verifier.stop()
         with patch.object(self.helper.subprocess, 'run') as run:
             run.return_value.returncode = 0
+            run.return_value.stdout = 'MD_MESA_PROBE_OK\n'
             self.helper.verify_runtime(runtime / 'metadata', self.prefix)
         command = run.call_args.args[0]
-        self.assertIn('/mdgl/lib/gbm/dri_gbm.so', command)
-        self.assertIn('/mdgl/lib/libgallium.so', command)
-        self.assertNotIn('/mdgl/lib/gbm/alias_gbm.so', command)
+        self.assertEqual(command[-3:], ['--preload', '/probe', '/usr/bin/true'])
+        libraries = run.call_args.kwargs['env']['MD_MESA_PROBE_LIBRARIES'].splitlines()
+        self.assertIn('/mdgl/lib/gbm/dri_gbm.so', libraries)
+        self.assertIn('/mdgl/lib/libgallium.so', libraries)
+        self.assertNotIn('/mdgl/lib/gbm/alias_gbm.so', libraries)
+
+    def test_loader_ignoring_the_probe_is_not_an_abi_pass(self):
+        runtime = self.runtime()
+        loader = runtime / 'files/lib/ld-linux-aarch64.so.1'
+        loader.parent.mkdir()
+        loader.touch()
+        self.verifier.stop()
+        with patch.object(self.helper.subprocess, 'run') as run:
+            run.return_value = subprocess.CompletedProcess([], 0, 'ERROR: preload ignored\n')
+            with self.assertRaisesRegex(ValueError, 'did not execute'):
+                self.helper.verify_runtime(runtime / 'metadata', self.prefix)
 
     def test_update_is_atomic_and_retains_running_sandbox_bundle(self):
         self.runtime()
@@ -180,6 +195,175 @@ class FlatpakGLTest(unittest.TestCase):
         self.runtime('org.kde.Platform')
         self.helper.prepare(self.base, self.prefix)
         self.assertEqual(self.verify.call_count, 2)
+
+    def test_driver_abi_failure_uses_sdk_and_rechecks_every_runtime(self):
+        self.runtime()
+        self.runtime('org.kde.Platform')
+        self.verify.side_effect = [self.helper.MesaABIError('GLIBC version'), None, None]
+        with patch.object(self.helper, 'sdk_build', return_value=self.prefix) as build:
+            self.helper.prepare(self.base, self.prefix, build_sdk=True)
+        build.assert_called_once()
+        self.assertEqual(self.verify.call_count, 3)
+        self.assertTrue((self.link / '.magicdesk-build').is_file())
+        self.helper.prepare(self.base, self.prefix)
+        self.assertEqual(self.verify.call_count, 3)
+
+    def test_default_abi_failure_never_starts_a_second_mesa_build(self):
+        self.runtime()
+        self.verify.side_effect = self.helper.MesaABIError('GLIBC version')
+        with patch.object(self.helper, 'sdk_build') as build:
+            with self.assertRaisesRegex(ValueError, 'No Mesa compilation was started') as error:
+                self.helper.prepare(self.base, self.prefix)
+        build.assert_not_called()
+        self.assertIn('magicdesk-flatpak-gl --build-sdk', str(error.exception))
+        self.assertFalse(self.link.exists())
+        self.assertEqual(list((self.base / '.magicdesk-gl').glob('.prepare-*')), [])
+
+    def test_sdk_build_requires_an_explicit_command_option(self):
+        self.helper.CONFIG = self.root / 'mesa-prefix'
+        self.helper.CONFIG.write_text(str(self.prefix))
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit), \
+                    patch.object(self.helper.sys, 'argv', ['magicdesk-flatpak-gl'] +
+                                 (['--build-sdk'] if explicit else []) + [str(self.base)]), \
+                    patch.object(self.helper, 'prepare') as prepare:
+                self.helper.main()
+                prepare.assert_called_once_with(self.base, self.prefix, build_sdk=explicit)
+
+    def test_sandbox_failure_never_requests_an_sdk_build(self):
+        self.runtime()
+        self.verify.side_effect = ValueError('bwrap: Permission denied')
+        with patch.object(self.helper, 'sdk_build') as build:
+            with self.assertRaisesRegex(ValueError, 'bwrap'):
+                self.helper.prepare(self.base, self.prefix)
+        build.assert_not_called()
+        self.assertFalse(self.link.exists())
+
+    def test_failed_sdk_admission_does_not_publish(self):
+        self.runtime()
+        self.verify.side_effect = self.helper.MesaABIError('still incompatible')
+        with patch.object(self.helper, 'sdk_build', return_value=self.prefix):
+            with self.assertRaisesRegex(ValueError, 'still incompatible'):
+                self.helper.prepare(self.base, self.prefix, build_sdk=True)
+        self.assertFalse(self.link.exists())
+        self.assertEqual(list((self.base / '.magicdesk-gl').glob('.prepare-*')), [])
+
+    def test_incomplete_sdk_metadata_retires_incompatible_old_selection(self):
+        self.runtime()
+        self.helper.prepare(self.base, self.prefix)
+        old = self.link.stat().st_ino
+        self.runtime(commit='needs-sdk')
+        self.verify.side_effect = self.helper.MesaABIError('GLIBC version')
+        with patch.object(self.helper, 'sdk_build', side_effect=configparser.NoOptionError('sdk', 'Runtime')):
+            with self.assertRaisesRegex(ValueError, 'sdk'):
+                self.helper.prepare(self.base, self.prefix, build_sdk=True)
+        self.assertFalse(self.link.exists())
+        self.assertEqual(len([p for p in (self.base / '.magicdesk-gl').glob('retired-*')
+                              if p.stat().st_ino == old]), 1)
+        self.assertEqual(list((self.base / '.magicdesk-gl').glob('.prepare-*')), [])
+
+    def sdk_config(self):
+        runtime = self.runtime()
+        metadata = runtime / 'metadata'
+        metadata.write_text(metadata.read_text().replace('[Runtime]\n',
+            '[Runtime]\nruntime=org.freedesktop.Platform/aarch64/25.08\n'
+            'sdk=org.freedesktop.Sdk/aarch64/25.08\n'))
+        source = self.root / 'source'
+        source.mkdir()
+        (source / '.patched').touch()
+        config = self.root / 'mesa-build.json'
+        config.write_text(json.dumps(dict(source=str(source), identity='recipe-one', jobs=2,
+                                         options=['-Dvulkan-drivers=freedreno'])))
+        self.helper.BUILD_CONFIG = config
+        return metadata
+
+    def test_missing_sdk_does_not_start_nested_install_transaction(self):
+        metadata = self.sdk_config()
+        with patch.dict(os.environ, XDG_DATA_HOME=str(self.root)), \
+                patch.object(self.helper.subprocess, 'run') as run:
+            run.side_effect = [subprocess.CompletedProcess([], 1, '', 'missing'),
+                               subprocess.CompletedProcess([], 0, 'flathub\n', '')]
+            with self.assertRaisesRegex(ValueError, 'flatpak --user install flathub org.freedesktop.Sdk'):
+                self.helper.sdk_build(self.base, self.prefix, metadata, self.root)
+        self.assertEqual(run.call_count, 2)
+        self.assertTrue(all('info' in call.args[0] for call in run.call_args_list))
+
+    def test_sdk_source_identity_is_checked_before_commands(self):
+        metadata = self.sdk_config()
+        (self.prefix / '.complete').write_text('other-recipe\n')
+        with patch.object(self.helper.subprocess, 'run') as run:
+            with self.assertRaisesRegex(ValueError, 'source selection'):
+                self.helper.sdk_build(self.base, self.prefix, metadata, self.root)
+        run.assert_not_called()
+
+    def sdk_runner(self, fail_build=False):
+        sdk = self.root / 'deployment'
+        sdk.mkdir()
+        (sdk / 'metadata').touch()
+        module = self.root / 'portable-module'
+        module.mkdir()
+        (module / '__init__.py').write_text('# portable module\n')
+        (module / 'host-extension.so').write_bytes(b'host binary')
+        outputs = []
+
+        def run(command, **kwargs):
+            if 'info' in command:
+                return subprocess.CompletedProcess(command, 0, str(sdk) + '\n', '')
+            if 'build-init' in command:
+                app = Path(command[3])
+                app.mkdir()
+                (app / 'metadata').touch()
+            elif 'setup' in command:
+                output = Path(next(v.split('=', 1)[1] for v in command if v.startswith('--prefix=')))
+                outputs.append(output)
+                build = output.parent / 'build'
+                build.mkdir(exist_ok=True)
+                (build / 'build.ninja').touch()
+                (build / 'retained.o').write_bytes(b'object')
+            elif 'ninja' in command and fail_build:
+                raise subprocess.CalledProcessError(1, command)
+            elif 'install' in command:
+                stage = Path(command[command.index('--destdir') + 1])
+                (stage / str(outputs[-1]).lstrip('/')).mkdir(parents=True)
+            return subprocess.CompletedProcess(command, 0, '', '')
+
+        return run, types.SimpleNamespace(__file__=str(module / '__init__.py'))
+
+    def test_sdk_build_uses_recipe_options_and_caches_independently_of_job_count(self):
+        metadata = self.sdk_config()
+        runner, module = self.sdk_runner()
+        with patch.dict(os.environ, XDG_DATA_HOME=str(self.root)), \
+                patch.object(self.helper.importlib, 'import_module', return_value=module), \
+                patch.object(self.helper.subprocess, 'run', side_effect=runner) as run:
+            output = self.helper.sdk_build(self.base, self.prefix, metadata, self.root)
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertIn('-Dvulkan-drivers=freedreno', next(c for c in commands if 'setup' in c))
+            self.assertEqual(next(c for c in commands if 'ninja' in c)[-2:], ['-j', '2'])
+            self.assertEqual(next(c for c in commands if 'build-init' in c)[-3:],
+                             ['org.freedesktop.Sdk', 'org.freedesktop.Platform', '25.08'])
+            self.assertTrue((output / '.complete').is_file())
+            modules = output.parent / 'python'
+            self.assertTrue((modules / 'yaml/__init__.py').is_file())
+            self.assertFalse(list(modules.rglob('*.so')))
+            config = json.loads(self.helper.BUILD_CONFIG.read_text())
+            config['jobs'] = 8
+            self.helper.BUILD_CONFIG.write_text(json.dumps(config))
+            run.reset_mock()
+            self.assertEqual(self.helper.sdk_build(self.base, self.prefix, metadata, self.root), output)
+            self.assertEqual(run.call_count, 1)
+            self.assertIn('info', run.call_args.args[0])
+
+    def test_failed_sdk_build_retains_objects_but_not_a_complete_prefix(self):
+        metadata = self.sdk_config()
+        runner, module = self.sdk_runner(fail_build=True)
+        with patch.dict(os.environ, XDG_DATA_HOME=str(self.root)), \
+                patch.object(self.helper.importlib, 'import_module', return_value=module), \
+                patch.object(self.helper.subprocess, 'run', side_effect=runner):
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.helper.sdk_build(self.base, self.prefix, metadata, self.root)
+        work, = self.root.glob('sdk-*')
+        self.assertEqual((work / 'build/retained.o').read_bytes(), b'object')
+        self.assertFalse((work / 'prefix').exists())
 
     def test_abi_failure_retires_old_selection_without_publishing_candidate(self):
         self.runtime()

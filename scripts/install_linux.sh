@@ -120,11 +120,64 @@ packages() {
         dnf) dnf -y --setopt=install_weak_deps=False install "$@" </dev/null ;;
         zypper) zypper --non-interactive install --no-recommends "$@" </dev/null ;;
         xbps) xbps-install -y "$@" </dev/null ;;
-        pacman|recovery) pacman -S --needed --noconfirm "$@" </dev/null ;;
+        pacman|recovery)
+            # Respect installed providers (e.g. ninja-is-samurai). Explicit -S
+            # otherwise replaces them even when the dependency is satisfied.
+            missing=$(pacman -T "$@") || { code=$?; [ "$code" = 127 ] || return "$code"; }
+            if [ -n "$missing" ]; then
+                set -f
+                set -- $missing
+                set +f
+                pacman -S --needed --noconfirm "$@" </dev/null
+            fi ;;
         *) echo 'Package setup is unavailable for this image.' >&2; exit 1 ;;
     esac
 }
+prepare_initramfs() {
+    mkdir -p /etc/magicdesk /usr/local/libexec /etc/pacman.d/hooks
+    cat > /etc/magicdesk/mkinitcpio.conf <<'INITRAMFS_CONFIG'
+# A container has no boot block device or matching physical module inventory.
+# Keep portable images and fsck tools instead of detecting Android's hardware.
+if [ -n "${container:-}" ] || [ "$(findmnt -n -o FSTYPE / 2>/dev/null)" = guestfs ]; then
+    read -r -a _md_hooks <<< "${HOOKS[*]}"
+    HOOKS=()
+    for _md_hook in "${_md_hooks[@]}"; do
+        [ "$_md_hook" = autodetect ] || HOOKS+=("$_md_hook")
+    done
+    unset _md_hooks _md_hook
+fi
+INITRAMFS_CONFIG
+    cat > /usr/local/libexec/magicdesk-initramfs-config <<'INITRAMFS_HELPER'
+#!/bin/sh
+set -eu
+config=/etc/mkinitcpio.conf
+[ -f "$config" ] || exit 0
+line='[ ! -r /etc/magicdesk/mkinitcpio.conf ] || . /etc/magicdesk/mkinitcpio.conf'
+grep -qxF "$line" "$config" && exit 0
+# Presets with ALL_config bypass mkinitcpio.conf.d, so use the main config.
+trap 'rm -f "$config.magicdesk-new"' 0
+cp -p "$config" "$config.magicdesk-new"
+printf '\n%s\n' "$line" >> "$config.magicdesk-new"
+bash -n "$config.magicdesk-new"
+mv "$config.magicdesk-new" "$config"
+INITRAMFS_HELPER
+    chmod 755 /usr/local/libexec/magicdesk-initramfs-config
+    /usr/local/libexec/magicdesk-initramfs-config
+    cat > /etc/pacman.d/hooks/80-magicdesk-initramfs-config.hook <<'INITRAMFS_HOOK'
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = etc/mkinitcpio.conf
+
+[Action]
+Description = Prepare portable container initramfs configuration
+When = PostTransaction
+Exec = /usr/local/libexec/magicdesk-initramfs-config
+INITRAMFS_HOOK
+}
 refresh_packages() {
+    case "$family" in pacman|recovery) prepare_initramfs ;; esac
     case "$family" in
         apt) apt-get update </dev/null ;;
         apk) apk update </dev/null ;;
@@ -1946,19 +1999,45 @@ mv "$candidate" /etc/magicdesk/plasma-kwin.sh
 KWIN_BODY
 }
 
+mesa_options() {
+    cat <<'MESA_OPTIONS'
+-Dauto_features=disabled
+-Dplatforms=x11,wayland
+-Dllvm=disabled
+-Dxmlconfig=disabled
+-Dbuild-tests=false
+-Dgallium-rusticl=false
+-Dvulkan-drivers=freedreno
+-Dfreedreno-kmds=msm,kgsl
+-Dgallium-drivers=zink,softpipe
+-Dopengl=true
+-Dgles1=enabled
+-Dgles2=enabled
+-Dglx=dri
+-Degl=enabled
+-Dgbm=enabled
+-Dglvnd=enabled
+-Dgallium-va=disabled
+MESA_OPTIONS
+}
+
 flatpak_gl_helper() {
     cat <<'FLATPAK_GL_PY'
 #!/usr/bin/env python3
 """Publish the selected Mesa build through Flatpak's local GL.host extension."""
+import argparse
 import configparser
 import ctypes
 import errno
 import fcntl
+import hashlib
+import importlib
 import io
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -1966,9 +2045,14 @@ import sys
 import tempfile
 
 CONFIG = Path('/etc/magicdesk/mesa-prefix')
+BUILD_CONFIG = Path('/etc/magicdesk/mesa-build.json')
 PROBE = Path('/usr/local/libexec/magicdesk-mesa-probe')
 EXTENSION = 'org.freedesktop.Platform.GL.host'
-FORMAT = '2'
+FORMAT = '4'
+
+
+class MesaABIError(ValueError):
+    pass
 
 
 def public_directory(path):
@@ -2075,14 +2159,103 @@ def verify_runtime(metadata, bundle):
                '--symlink', 'usr/bin', '/bin', '--dev', '/dev', '--proc', '/proc',
                '--ro-bind', str(bundle), '/mdgl', '--ro-bind', str(PROBE), '/probe',
                '--chdir', '/', '--', loader, '--library-path',
-               '/mdgl/lib:/usr/lib/aarch64-linux-gnu:/usr/lib', '/probe']
-    command += ['/mdgl/' + name for name in libraries]
+               '/mdgl/lib:/usr/lib/aarch64-linux-gnu:/usr/lib', '--preload', '/probe', '/usr/bin/true']
+    environment = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
+                   'MD_MESA_PROBE_LIBRARIES': '\n'.join('/mdgl/' + name for name in libraries)}
     # EVENT_WAIT: the runtime loader/dlopen probe exits; timeout rejects admission.
-    result = subprocess.run(command, env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'},
+    result = subprocess.run(command, env=environment,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, timeout=30)
     if result.returncode:
-        raise ValueError('Mesa cannot load in ' + str(metadata) + ':\n' + result.stdout)
+        # Only a completed dlopen probe can request an SDK rebuild. A broken
+        # sandbox/loader or timed-out process is not evidence of a driver ABI mismatch.
+        error = MesaABIError if result.returncode == 1 and result.stdout.startswith('/mdgl/') else ValueError
+        raise error('Mesa cannot load in ' + str(metadata) + ':\n' + result.stdout)
+    if not result.stdout.endswith('MD_MESA_PROBE_OK\n'):
+        raise ValueError('Runtime loader did not execute the Mesa ABI probe:\n' + result.stdout)
+
+
+def sdk_build(base, prefix, metadata, cache):
+    config = json.loads(BUILD_CONFIG.read_text())
+    if config['identity'] != (prefix / '.complete').read_text().strip():
+        raise ValueError('Mesa source selection does not match its build configuration')
+    source = Path(config['source'])
+    if not source.is_absolute() or not (source / '.patched').is_file():
+        raise ValueError('Mesa sources are missing; resume the Turnip recipe first')
+    data = configparser.ConfigParser(interpolation=None, strict=False)
+    data.read(metadata)
+    runtime = data.get('Runtime', 'runtime')
+    sdk = data.get('Runtime', 'sdk')
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/aarch64/[A-Za-z0-9_.-]+', sdk):
+        raise ValueError('Invalid Flatpak SDK reference: ' + sdk)
+    user_base = Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'flatpak'
+    if base == user_base.resolve():
+        installation = '--user'
+    elif base == Path('/var/lib/flatpak') and os.geteuid() == 0:
+        installation = '--system'
+    else:
+        raise ValueError('Run Mesa preparation as the owner of this Flatpak installation: ' + str(base))
+
+    def info(ref, field):
+        return subprocess.run(['flatpak', installation, 'info', field, ref], text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+
+    location = info(sdk, '--show-location')
+    if location.returncode:
+        origin = info(runtime, '--show-origin')
+        origin.check_returncode()
+        # This helper also runs as an installation trigger. Starting another
+        # Flatpak transaction here would recurse into the publisher/installer locks.
+        raise ValueError('Matching Mesa SDK is required. Run: flatpak ' + installation +
+                         ' install ' + origin.stdout.strip() + ' ' + sdk +
+                         '; then magicdesk-flatpak-gl --build-sdk ' + shlex.quote(str(base)))
+    sdk_path = Path(location.stdout.strip()).resolve()
+    if not (sdk_path / 'metadata').is_file():
+        raise ValueError('Missing SDK deployment: ' + str(sdk_path))
+    build_config = {key: value for key, value in config.items() if key != 'jobs'}
+    identity = hashlib.sha256(json.dumps([build_config, str(sdk_path)], sort_keys=True).encode()).hexdigest()
+    work = cache / ('sdk-' + identity)
+    work.mkdir(exist_ok=True)
+    output = work / 'prefix'
+    if (output / '.complete').is_file():
+        if (output / '.complete').read_text().strip() != identity:
+            raise ValueError('Mesa SDK build identity mismatch')
+        return output
+    app = work / 'app'
+    if not (app / 'metadata').is_file():
+        name, arch, branch = sdk.split('/')
+        subprocess.run(['flatpak', 'build-init', '--arch=' + arch, str(app),
+                        'io.github.mekhontsev.MesaBuild', name, runtime.split('/')[0], branch], check=True)
+    # The recipe already installs these build tools. Only their portable Python
+    # modules cross the SDK boundary, never host extension modules or libc.
+    modules = work / 'python'
+    modules.mkdir(exist_ok=True)
+    for name in ('yaml', 'mako', 'markupsafe', 'packaging', 'ply'):
+        module = importlib.import_module(name)
+        root = Path(module.__file__).parent
+        for path in root.rglob('*.py'):
+            target = modules / name / path.relative_to(root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, target)
+    command = ['flatpak', 'build', '--filesystem=' + str(source) + ':ro',
+               '--filesystem=' + str(work), '--env=PYTHONPATH=' + str(modules), str(app)]
+    build = work / 'build'
+    configure = ['meson', 'setup'] + (['--reconfigure'] if (build / 'build.ninja').is_file() else [])
+    configure += [str(build), str(source), '--prefix=' + str(output), '--libdir=lib',
+                  '--buildtype=release', '--wrap-mode=nodownload',
+                  '-Dc_link_args=-Wl,-rpath,$ORIGIN:$ORIGIN/..',
+                  '-Dcpp_link_args=-Wl,-rpath,$ORIGIN:$ORIGIN/..', '-Dgbm-backends-path=$ORIGIN/gbm']
+    print('Building Mesa for Flatpak SDK ' + sdk + '; cached objects are retained on failure', flush=True)
+    subprocess.run(command + configure + config['options'], check=True)
+    subprocess.run(command + ['ninja', '-C', str(build), '-j', str(config['jobs'])], check=True)
+    stage = work / 'stage'
+    shutil.rmtree(stage, ignore_errors=True)
+    subprocess.run(command + ['meson', 'install', '-C', str(build), '--no-rebuild',
+                              '--destdir', str(stage)], check=True)
+    built = stage / str(output).lstrip('/')
+    (built / '.complete').write_text(identity + '\n')
+    os.rename(built, output)
+    return output
 
 
 def owned(link):
@@ -2131,7 +2304,7 @@ def extension_directory(base):
     return destination
 
 
-def prepare(base, prefix):
+def prepare(base, prefix, build_sdk=False):
     base = base.resolve()
     if not (base / 'runtime').is_dir():
         return
@@ -2165,14 +2338,32 @@ def prepare(base, prefix):
                 if previous == receipt:
                     continue
                 if isinstance(previous, list) and previous[:4] == receipt[:4]:
-                    for metadata, _ in runtimes:
-                        verify_runtime(metadata, link)
-                    write_receipt(link, receipt)
-                    continue
+                    try:
+                        for metadata, _ in runtimes:
+                            verify_runtime(metadata, link)
+                    except MesaABIError:
+                        pass
+                    else:
+                        write_receipt(link, receipt)
+                        continue
                 temporary = Path(tempfile.mkdtemp(prefix='.prepare-', dir=bundles))
                 stage_bundle(prefix, temporary, layout)
-                for metadata, _ in runtimes:
-                    verify_runtime(metadata, temporary)
+                try:
+                    for metadata, _ in runtimes:
+                        verify_runtime(metadata, temporary)
+                except MesaABIError as error:
+                    if not build_sdk:
+                        raise MesaABIError(str(error) + '\nNo Mesa compilation was started. '
+                                           'To explicitly build a separate Flatpak driver, run: '
+                                           'magicdesk-flatpak-gl --build-sdk ' + shlex.quote(str(base))) from error
+                    built = sdk_build(base, prefix, runtimes[0][0], bundles)
+                    shutil.rmtree(temporary)
+                    temporary = Path(tempfile.mkdtemp(prefix='.prepare-', dir=bundles))
+                    stage_bundle(built, temporary, layout)
+                    for metadata, _ in runtimes:
+                        verify_runtime(metadata, temporary)
+                    (temporary / '.magicdesk-build').write_text(json.dumps({
+                        'prefix': str(built), 'identity': (built / '.complete').read_text().strip()}) + '\n')
                 write_receipt(temporary, receipt)
                 temporary.chmod(0o755)
                 extension_directory(base)
@@ -2182,7 +2373,7 @@ def prepare(base, prefix):
                         'retired-' + previous_bundle.name.removeprefix('.prepare-')))
                 temporary = None
                 print('Flatpak Mesa ready: ' + branch)
-            except (OSError, ValueError, subprocess.SubprocessError) as error:
+            except (OSError, ValueError, KeyError, configparser.Error, subprocess.SubprocessError) as error:
                 # An old build is not silently reused after ABI admission failed.
                 retire(link, bundles)
                 failed.append(str(error))
@@ -2201,23 +2392,28 @@ def prepare(base, prefix):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--build-sdk', action='store_true',
+                        help='allow a separate Mesa build if the host driver fails runtime ABI admission')
+    parser.add_argument('installations', type=Path, nargs='*', help='Flatpak installation directories')
+    args = parser.parse_args()
     prefix = Path(CONFIG.read_text().strip()) if CONFIG.is_file() else None
     if prefix and not prefix.is_absolute():
         raise ValueError('Mesa prefix must be absolute')
-    if len(sys.argv) > 1:
-        bases = [Path(arg) for arg in sys.argv[1:]]
+    if args.installations:
+        bases = args.installations
     else:
         bases = [Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'flatpak']
         if os.geteuid() == 0:
             bases.append(Path('/var/lib/flatpak'))
     for base in bases:
-        prepare(base, prefix)
+        prepare(base, prefix, build_sdk=args.build_sdk)
 
 
 if __name__ == '__main__':
     try:
         main()
-    except (OSError, ValueError, configparser.Error, subprocess.SubprocessError) as error:
+    except (OSError, ValueError, KeyError, configparser.Error, subprocess.SubprocessError) as error:
         print('Flatpak Mesa not activated: ' + str(error), file=sys.stderr)
         sys.exit(1)
 FLATPAK_GL_PY
@@ -2249,7 +2445,7 @@ PROBE = Path('/usr/local/libexec/magicdesk-mesa-probe')
 CACHE = Path('/var/cache/magicdesk/snap-gpu')
 SNAP_DATA = Path('/var/snap/mesa-2404')
 NAME = 'magicdesk-gpu-2404'
-FORMAT = '2'
+FORMAT = '3'
 MANGLER = '''# Sourced by the official gpu-2404 provider, not an app wrapper.
 md_gpu=$COMPONENT_PATH
 export LD_LIBRARY_PATH="$md_gpu/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -2383,9 +2579,12 @@ def verify_runtime(root, base, provider):
             '--ro-bind', str(PROBE), '/probe', '--chdir', '/', '--',
             '/lib/ld-linux-aarch64.so.1', '--library-path',
             '/mdgl/lib:/mdprovider/' + libraries + ':/usr/lib/aarch64-linux-gnu',
-            '/probe']
-    run(argv + ['/mdgl/' + name for name in targets],
-        env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
+            '--preload', '/probe', '/usr/bin/true']
+    result = run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
+             'MD_MESA_PROBE_LIBRARIES': '\n'.join('/mdgl/' + name for name in targets)})
+    if not result.stdout.endswith('MD_MESA_PROBE_OK\n'):
+        raise ValueError('Runtime loader did not execute the Mesa ABI probe:\n' + result.stdout)
 
 
 def prepare(prefix, base, provider, jobs):
@@ -2494,6 +2693,11 @@ GPU_HEAD
     cat <<'GPU_HEAD'
 SNAP_GPU_HELPER
 chmod 755 /usr/local/bin/magicdesk-snap-gpu
+cat > /etc/magicdesk/mesa-options <<'MESA_BUILD_OPTIONS'
+GPU_HEAD
+    mesa_options
+    cat <<'GPU_HEAD'
+MESA_BUILD_OPTIONS
 
 prepare_meson() {
     meson_tool=$(command -v meson || :)
@@ -2523,6 +2727,35 @@ sys.exit(0 if match and tuple(map(int, match.groups())) >= (1, 4, 0) else 1)
         [ "$("$meson_tool" --version)" = "$meson_version" ]
         touch "$meson_root/.complete"
     fi
+}
+
+prepare_wayland_protocols() {
+    pkg-config --atleast-version=1.41 wayland-protocols && return
+    # XML build inputs only: do not replace the distribution's Wayland runtime.
+    protocols_version=1.41
+    protocols_sha=2786b6b1b79965e313f2c289c12075b9ed700d41844810c51afda10ee329576b
+    protocols_prefix=$work/tools/wayland-protocols-$protocols_version
+    if [ ! -f "$protocols_prefix/.complete" ]; then
+        protocols_archive=/var/cache/magicdesk/mesa/downloads/wayland-protocols-$protocols_version.tar.xz
+        if ! printf '%s  %s\n' "$protocols_sha" "$protocols_archive" | sha256sum -c - >/dev/null 2>&1; then
+            # EVENT_WAIT: download progress; a stalled transport fails before extraction.
+            curl --fail --location --proto '=https' --proto-redir '=https' \
+                --connect-timeout 30 --speed-limit 1 --speed-time 60 --retry 3 \
+                --output "$protocols_archive.part" \
+                "https://gitlab.freedesktop.org/wayland/wayland-protocols/-/releases/$protocols_version/downloads/wayland-protocols-$protocols_version.tar.xz"
+            printf '%s  %s\n' "$protocols_sha" "$protocols_archive.part" | sha256sum -c -
+            mv "$protocols_archive.part" "$protocols_archive"
+        fi
+        rm -rf "$work/protocols-source" "$work/protocols-build" "$protocols_prefix"
+        mkdir -p "$work/protocols-source"
+        tar --no-same-owner -xJf "$protocols_archive" --strip-components=1 -C "$work/protocols-source"
+        "$meson_tool" setup "$work/protocols-build" "$work/protocols-source" \
+            --prefix="$protocols_prefix" --wrap-mode=nodownload -Dtests=false </dev/null
+        "$meson_tool" install -C "$work/protocols-build" </dev/null
+        touch "$protocols_prefix/.complete"
+    fi
+    export PKG_CONFIG_PATH="$protocols_prefix/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    pkg-config --atleast-version="$protocols_version" wayland-protocols
 }
 
 prepare_glvnd() {
@@ -2650,17 +2883,14 @@ MESA_PATCH
             rmdir "$work/unpack"
         fi
         prepare_meson
+        prepare_wayland_protocols
         prepare_glvnd
         # Both KMDs are needed: Vulkan WSI also uses the DRM image allocator.
         set -- --prefix="$prefix" --libdir=lib --buildtype=release --wrap-mode=nodownload \
             "-Dc_link_args=-Wl,-rpath,\$ORIGIN:\$ORIGIN/..:$prefix/lib" \
             "-Dcpp_link_args=-Wl,-rpath,\$ORIGIN:\$ORIGIN/..:$prefix/lib" \
-            '-Dgbm-backends-path=$ORIGIN/gbm' \
-            -Dauto_features=disabled -Dplatforms=x11,wayland -Dllvm=disabled \
-            -Dxmlconfig=disabled -Dbuild-tests=false -Dgallium-rusticl=false \
-            -Dvulkan-drivers=freedreno -Dfreedreno-kmds=msm,kgsl \
-            -Dgallium-drivers=zink,softpipe -Dopengl=true -Dgles1=enabled -Dgles2=enabled -Dglx=dri \
-            -Degl=enabled -Dgbm=enabled -Dglvnd=enabled -Dgallium-va=disabled
+            '-Dgbm-backends-path=$ORIGIN/gbm'
+        while IFS= read -r option; do set -- "$@" "$option"; done < /etc/magicdesk/mesa-options
         if [ -f "$work/build/build.ninja" ]; then
             "$meson_tool" setup --reconfigure "$work/build" "$source" "$@" </dev/null
         else
@@ -2691,19 +2921,43 @@ EGL_MANIFEST
         mv "$work/stage$prefix" "$prefix"
     fi
     [ "$(cat "$prefix/.complete")" = "$recipe" ] || { echo 'Mesa build identity mismatch.' >&2; exit 1; }
+    python3 - "$work/source" "$recipe" "$jobs" <<'MESA_BUILD_CONFIG'
+import json
+from pathlib import Path
+import sys
+path = Path('/etc/magicdesk/mesa-build.json')
+temporary = path.with_suffix('.new')
+temporary.write_text(json.dumps(dict(source=sys.argv[1], identity=sys.argv[2], jobs=int(sys.argv[3]),
+    options=Path('/etc/magicdesk/mesa-options').read_text().splitlines())) + '\n')
+temporary.replace(path)
+MESA_BUILD_CONFIG
     cat > "$work/flatpak-gl-probe.c" <<'PROBE'
+#define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stdio.h>
-int main(int argc, char **argv) {
-    for (int i = 1; i < argc; ++i) {
-        void *library = dlopen(argv[i], RTLD_NOW | RTLD_LOCAL);
-        if (!library) { fprintf(stderr, "%s: %s\n", argv[i], dlerror()); return 1; }
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+/* Resolve only stable C symbols from the target runtime. Linking the probe
+ * against the host libc would reject glibc runtimes when built on musl. */
+__attribute__((constructor)) static void probe(void) {
+    char *paths = getenv("MD_MESA_PROBE_LIBRARIES");
+    if (!paths || !*paths) _exit(2);
+    while (*paths) {
+        char *end = strchr(paths, '\n');
+        if (end) *end = 0;
+        void *library = dlopen(paths, RTLD_NOW | RTLD_LOCAL);
+        if (!library) { dprintf(2, "%s: %s\n", paths, dlerror()); _exit(1); }
         dlclose(library);
+        if (!end) break;
+        paths = end + 1;
     }
-    return 0;
+    static const char ok[] = "MD_MESA_PROBE_OK\n";
+    if (write(1, ok, sizeof(ok) - 1) != sizeof(ok) - 1) _exit(2);
+    _exit(0);
 }
 PROBE
-    cc -O2 "$work/flatpak-gl-probe.c" -ldl -o "$work/flatpak-gl-probe"
+    cc -O2 -shared -fPIC -nostdlib "$work/flatpak-gl-probe.c" -o "$work/flatpak-gl-probe"
     install -m 755 "$work/flatpak-gl-probe" /usr/local/libexec/magicdesk-mesa-probe
 fi
 
@@ -2865,6 +3119,20 @@ desktop_session() {
     cat <<'DESKTOP'
 #!/bin/sh
 set -eu
+session_manager() {
+    [ -n "${XDG_RUNTIME_DIR:-}" ] &&
+        [ "${DBUS_SESSION_BUS_ADDRESS:-}" = "unix:path=$XDG_RUNTIME_DIR/bus" ] &&
+        command -v systemd-run >/dev/null 2>&1
+}
+if [ "${1:-}" = --ready ]; then
+    # Called by the compositor after it publishes its child display endpoints.
+    set --
+    if session_manager; then set -- --systemd; fi
+    for variable in DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE PULSE_SERVER PIPEWIRE_REMOTE PIPEWIRE_RUNTIME_DIR; do
+        if printenv "$variable" >/dev/null 2>&1; then set -- "$@" "$variable"; fi
+    done
+    exec dbus-update-activation-environment "$@"
+fi
 desktop=${1:?Expected xfce, weston, gnome, plasma-x11 or plasma-wayland}
 shift
 [ ! -r /etc/profile.d/magicdesk-graphics.sh ] || . /etc/profile.d/magicdesk-graphics.sh
@@ -2883,7 +3151,8 @@ case "$desktop" in
         export XDG_SESSION_TYPE=x11 XDG_CURRENT_DESKTOP=XFCE XDG_SESSION_DESKTOP=xfce
         set -- xfce4-session "$@" ;;
     weston)
-        export XDG_SESSION_TYPE=wayland
+        export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=Weston XDG_SESSION_DESKTOP=weston
+        export XDG_CONFIG_DIRS="${XDG_CONFIG_DIRS:-/etc/xdg}:/etc/magicdesk/session"
         # Package upgrades can retire the compatibility build without rebuilding.
         case "$(/usr/bin/weston --version)" in
             'weston 13.0.'[0-3])
@@ -2938,6 +3207,13 @@ case "$desktop" in
     *) echo "Unknown desktop: $desktop" >&2; exit 2 ;;
 esac
 # Reuse the launcher's bus. Direct guest-console launches get the same contract.
+if session_manager; then
+    # The scope retains caller identity, environment and FDs. Its last process
+    # releases the graphical target; other sessions keep their own references.
+    exec systemd-run --user --scope --collect --quiet \
+        --property=BindsTo=graphical-session.target \
+        -- magicdesk-audio-session "$@"
+fi
 if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     exec magicdesk-audio-session "$@"
 fi
@@ -3174,6 +3450,16 @@ system_setup() {
     cat <<'MD_DESKTOP_INSTALL'
 MD_DESKTOP_SESSION
 chmod 755 /usr/local/bin/magicdesk-desktop-session
+mkdir -p /etc/magicdesk/session/weston /usr/local/libexec
+cat > /usr/local/libexec/magicdesk-desktop-ready <<'MD_DESKTOP_READY'
+#!/bin/sh
+exec magicdesk-desktop-session --ready
+MD_DESKTOP_READY
+chmod 755 /usr/local/libexec/magicdesk-desktop-ready
+cat > /etc/magicdesk/session/weston/weston.ini <<'MD_WESTON_SESSION'
+[autolaunch]
+path=/usr/local/libexec/magicdesk-desktop-ready
+MD_WESTON_SESSION
 # Normally created by tmpfiles at boot; direct non-root desktop launches need
 # the same root-owned shared socket directories without booting the OS.
 install -d -o root -g root -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
@@ -3197,7 +3483,9 @@ arch_mirror_fallback() {
     [ -f "$1" ] || return 0
     # The ARM rootfs ships only a geo-redirector. Retain it after the official
     # HTTPS mirror used for the rootfs; do not replace a user's mirror selection.
-    servers=$(sed -n 's/^[[:space:]]*Server[[:space:]]*=[[:space:]]*//p' "$1")
+    servers=$(awk '/^[[:space:]]*Server[[:space:]]*=/ {
+        sub(/^[[:space:]]*Server[[:space:]]*=[[:space:]]*/, ""); print
+    }' "$1")
     [ "$servers" = 'http://mirror.archlinuxarm.org/$arch/$repo' ] || return 0
     awk '{ if ($0 ~ /^[[:space:]]*Server[[:space:]]*=/) print "Server = https://de3.mirror.archlinuxarm.org/$arch/$repo"; print }' \
         "$1" > "$1.magicdesk-new"
@@ -3239,13 +3527,13 @@ case "$family" in
     apk)
         refresh_packages
         packages ca-certificates bash coreutils util-linux tzdata musl-locales musl-locales-lang lang shadow ;;
-    dnf) packages ca-certificates bash coreutils util-linux tzdata glibc-langpack-en shadow-utils ;;
+    dnf) packages ca-certificates bash coreutils util-linux tzdata glibc-langpack-en shadow-utils iptables-nft ;;
     zypper)
         refresh_packages
-        packages ca-certificates bash coreutils util-linux timezone glibc-locale glibc-i18ndata shadow ;;
+        packages ca-certificates bash coreutils util-linux timezone glibc-locale glibc-i18ndata shadow iptables-backend-nft ;;
     xbps)
         refresh_packages
-        packages ca-certificates bash coreutils util-linux tzdata glibc-locales shadow ;;
+        packages ca-certificates bash coreutils util-linux tzdata glibc-locales shadow iptables-nft ;;
     pacman)
         arch_mirror_fallback /etc/pacman.d/mirrorlist
         refresh_packages
@@ -3309,7 +3597,7 @@ if { [ "$gui" != none ] && [ "$gui" != keep ]; } || [ -x /usr/local/bin/magicdes
         apk) packages pipewire pipewire-pulse pipewire-tools wireplumber pipewire-alsa pulseaudio-utils \
             sdl2 eudev-libs libdecor ;;
         dnf) packages pipewire pipewire-pulseaudio pipewire-utils wireplumber pipewire-alsa pulseaudio-utils \
-            sdl2-compat systemd-libs libdecor ;;
+            sdl2-compat systemd-libs systemd-pam libdecor ;;
         pacman|recovery)
             udev_package=systemd-libs
             sdl_package=sdl2
@@ -3458,6 +3746,101 @@ if [ -n "$extras" ]; then
     set -f
     packages $extras
     set +f
+fi
+# Module loading belongs to the host, including when this rootfs is exported
+# to another container runtime. Keep the units usable for a native OS boot.
+if [ -d /usr/lib/systemd/system ] || [ -d /lib/systemd/system ]; then
+    for unit in systemd-modules-load.service modprobe@.service; do
+        mkdir -p "/etc/systemd/system/$unit.d"
+        printf '[Unit]\nConditionVirtualization=!container\n' > "/etc/systemd/system/$unit.d/50-magicdesk-container.conf"
+    done
+fi
+if [ -d /etc/runit ]; then
+    mkdir -p /usr/local/libexec
+    cat > /usr/local/libexec/magicdesk-container-services <<'CONTAINER_SERVICES'
+#!/bin/sh
+set -eu
+publish() {
+    IFS= read -r interpreter < "$1"
+    case "$interpreter" in *bash*) bash -n "$1.magicdesk-new" ;; *) sh -n "$1.magicdesk-new" ;; esac
+    if ! cmp -s "$1" "$1.magicdesk-new"; then
+        chmod --reference="$1" "$1.magicdesk-new"
+        chown --reference="$1" "$1.magicdesk-new"
+        mv "$1.magicdesk-new" "$1"
+    else
+        rm "$1.magicdesk-new"
+    fi
+}
+    for service in /etc/sv/*/run /etc/runit/sv/*/run; do
+        [ -f "$service" ] || continue
+        # Preserve the packaged daemon and its options. Only standalone host
+        # module preparation becomes conditional, as with systemd above.
+        # runit may clear its services' environment; PID 1 retains the contract.
+        awk '
+            function guard() {
+                print "if [ -z \"${container:-}\" ] && ! tr \"\\000\" \"\\n\" 2>/dev/null < /proc/1/environ | grep -q \"^container=.\"; then"
+            }
+            /^# MagicDesk container module policy$/ { print; getline; guard(); guarded=1; next }
+            guarded { print; guarded=0; next }
+            /^(env[ \t]+)?modprobe[ \t]+[-a-zA-Z0-9_ \t]+([ \t]*\|\|[ \t]*exit[ \t]+[0-9]+)?$/ {
+                print "# MagicDesk container module policy"
+                guard()
+                print; print "fi"; next
+            }
+            { print }
+        ' "$service" > "$service.magicdesk-new"
+        publish "$service"
+    done
+    # These stages manage the host RTC, kernel modules, virtual consoles or
+    # kernel log. Keep them on native boot, as systemd's container conditions do.
+    for name in hwclock console-setup modules kmod-static-nodes dmesg; do
+        service=/usr/lib/rc/sv.d/$name
+        [ -f "$service" ] || continue
+        awk '
+            NR==1 {
+                print
+                print "# MagicDesk host hardware policy"
+                print "if [ -n \"${container:-}\" ] || tr \"\\000\" \"\\n\" 2>/dev/null < /proc/1/environ | grep -q \"^container=.\"; then"
+                print "    exit 0"
+                print "fi"
+                next
+            }
+            /^# MagicDesk host hardware policy$/ { skip=3; next }
+            skip { --skip; next }
+            { print }
+        ' "$service" > "$service.magicdesk-new"
+        publish "$service"
+    done
+CONTAINER_SERVICES
+    chmod 755 /usr/local/libexec/magicdesk-container-services
+    /usr/local/libexec/magicdesk-container-services
+    if [ "$family" = pacman ]; then
+        mkdir -p /etc/pacman.d/hooks
+        cat > /etc/pacman.d/hooks/95-magicdesk-container-services.hook <<'CONTAINER_HOOK'
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = etc/sv/*/run
+Target = etc/runit/sv/*/run
+Target = usr/lib/rc/sv.d/*
+
+[Action]
+Description = Preserve container-aware hardware preparation in runit services
+When = PostTransaction
+Exec = /usr/local/libexec/magicdesk-container-services
+CONTAINER_HOOK
+    fi
+fi
+if [ "$family" = dnf ]; then
+    # Fedora's legacy alternative targets host xtables, not the guest nftables model.
+    alternatives --set iptables /usr/bin/iptables-nft
+elif [ "$family" = pacman ]; then
+    # The nft package provides iptables too. Accept only its package-conflict
+    # replacement question when resuming a rootfs with the legacy provider.
+    pacman -S --needed --noconfirm --ask=4 iptables-nft </dev/null
+elif [ "$family" = xbps ]; then
+    xbps-alternatives -s iptables-nft -g iptables
 fi
 if [ "$cache" = clean ]; then
     case "$family" in
@@ -3754,6 +4137,18 @@ prepare_import_helper() {
 
 prepare_rootfs() {
     prepare_downloads
+    if [ -n "$source_checksum" ]; then
+        stage="reading the official $distro rootfs checksum"
+        checksum_file="$downloads/${source##*/}.sha256"
+        magicdesk download "$source_checksum" "$checksum_file"
+        source_sha=$(awk -v name="${source##*/}" '
+            NF == 2 && ($2 == name || $2 == "*" name) {
+                if (length($1) != 64 || $1 ~ /[^0-9A-Fa-f]/) exit 1
+                digest = tolower($1); count++
+            }
+            END { if (count != 1) exit 1; print digest }
+        ' "$checksum_file") || fail "Invalid official checksum for ${source##*/}."
+    fi
     stage="downloading the official $distro rootfs"
     download_verified "$source" "$source_sha"
     image="$downloads/${source##*/}"
@@ -3847,6 +4242,7 @@ dns_description() {
 recipe_defaults() {
     source_kind=oci
     source_sha=
+    source_checksum=
     case "$distro" in
         debian)
             source=https://raw.githubusercontent.com/debuerreotype/docker-debian-artifacts/cf1f4a45447842b45e9952e0f018ae734a7341c7/trixie/slim/oci/blobs/rootfs.tar.gz
@@ -3867,8 +4263,10 @@ recipe_defaults() {
             source_sha=42a4eeaa038994ffd31fa173256ef2f0ef511358eeb41b9ea1f8626391b9b319
             source_kind=rootfs; version=rolling ;;
         opensuse)
-            source=https://download.opensuse.org/ports/aarch64/tumbleweed/appliances/opensuse-tumbleweed-image.aarch64-1.0.0-lxc-Snapshot20261011.tar.xz
-            source_sha=a7b97cc9dfc056d7383b74a549b34572e57bfcfff8067a41e48db79a07e2b179
+            # Rolling snapshots are removed upstream; verify the current alias
+            # against its HTTPS-published checksum before native import.
+            source=https://download.opensuse.org/ports/aarch64/tumbleweed/appliances/opensuse-tumbleweed-image.aarch64-lxc.tar.xz
+            source_checksum=$source.sha256
             source_kind=rootfs; version=Tumbleweed ;;
         openkylin) source=openkylin/openkylin:latest; version=3.0 ;;
         deepin) source=linuxdeepin/deepin:crimson-arm64; version=25 ;;
@@ -3911,7 +4309,7 @@ package_exec() (
     shift
     # These hints apply only to setup, never to later logins or systemd boots.
     [ "${FORCE_IPV4:-}" != 1 ] || set -- --env FORCE_IPV4=1 "$@"
-    admin_exec "$package_target" --env DEBIAN_FRONTEND=noninteractive --env SYSTEMD_IN_CHROOT=1 "$@"
+    admin_exec "$package_target" --env DEBIAN_FRONTEND=noninteractive --env SYSTEMD_IN_CHROOT=1 --env LC_ALL=C "$@"
 )
 if [ "$#" = 1 ] && [ "$1" = --print-mesa-patch ]; then mesa_patch; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-flatpak-gl-helper ]; then flatpak_gl_helper; exit 0; fi

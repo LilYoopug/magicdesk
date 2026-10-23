@@ -82,7 +82,11 @@ if Path(sys.argv[0]).name == "magicdesk":
     if os.environ.get("TEST_FAIL") == "download":
         print("test download/checksum failure", file=sys.stderr)
         sys.exit(23)
-    Path(args[2]).write_bytes(b"test download")
+    if args[1].endswith('.sha256'):
+        default = 'a' * 64 + '  ' + Path(args[1][:-7]).name + '\n'
+        Path(args[2]).write_text(os.environ.get('TEST_CHECKSUM', default))
+    else:
+        Path(args[2]).write_bytes(b"test download")
     sys.exit(0)
 if stage == "list":
     print(os.environ.get("TEST_ENVIRONMENTS", ""))
@@ -297,7 +301,7 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
         for name, recipe in recipes.items():
             with self.subTest(recipe=name):
                 commands = re.findall(r'^\s*(tar [^\n]+)$', recipe, re.M)
-                expected = 3 if name == 'mesa' else 1
+                expected = 4 if name == 'mesa' else 1
                 self.assertEqual(expected, len(commands), commands)
                 for command in commands:
                     self.assertIn('--no-same-owner', shlex.split(command))
@@ -461,7 +465,7 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
         self.assertEqual(['--rootfs', '--name', 'work', '--dns', 'system'], install[2:])
         self.assertIn(["dns", "work", "system", "--replace"], self.calls())
         self.assertEqual(["login", "work", "--user", "root", "--env", "DEBIAN_FRONTEND=noninteractive",
-                          "--env", "SYSTEMD_IN_CHROOT=1",
+                          "--env", "SYSTEMD_IN_CHROOT=1", "--env", "LC_ALL=C",
                           "--", "/bin/sh", "-s", "--", "apps", "both", "keep", "keep", "", "basic", "keep", ""], self.system_setup_call())
         self.assertIn("Linux is ready: work", result.stdout)
         payload = self.payload.read_text()
@@ -504,6 +508,10 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
         default = 'Server = http://mirror.archlinuxarm.org/$arch/$repo\n'
         fallback = 'Server = https://de3.mirror.archlinuxarm.org/$arch/$repo\n'
         mirrorlist = self.directory / 'mirrorlist'
+        minimal_bin = self.directory / 'mirror-tools'
+        minimal_bin.mkdir()
+        for program in ('awk', 'mv'):
+            (minimal_bin / program).symlink_to(shutil.which(program))
         for original, expected in (
                 ('# Official mirrors\n' + default, '# Official mirrors\n' + fallback + default),
                 ('Server=http://mirror.archlinuxarm.org/$arch/$repo\n',
@@ -515,9 +523,9 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
             with self.subTest(original=original):
                 mirrorlist.write_text(original)
                 # EVENT_WAIT: isolated recipe function exits or fails its deadline.
-                checked = subprocess.run(['sh', '-eu', '-c', function + '\narch_mirror_fallback "$1"',
+                checked = subprocess.run([shutil.which('sh'), '-eu', '-c', function + '\narch_mirror_fallback "$1"',
                                           'fixture', str(mirrorlist)], capture_output=True,
-                                         text=True, timeout=5)
+                                         text=True, timeout=5, env={**os.environ, 'PATH': str(minimal_bin)})
                 self.assertEqual(0, checked.returncode, checked.stderr)
                 self.assertEqual(expected, mirrorlist.read_text())
 
@@ -599,6 +607,203 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
         self.assertIn('packages pipewire pipewire-bin pipewire-pulse wireplumber pipewire-alsa', setup)
         self.assertIn('Exec=magicdesk-desktop-session %s', setup)
 
+    def test_fedora_prepares_guest_nftables_frontend_after_extra_packages(self):
+        result = self.run_script('--print-system-setup')
+        self.assertEqual(0, result.returncode, result.stderr)
+        setup = result.stdout
+        self.assertRegex(setup, r'dnf\) packages [^\n]* iptables-nft ;;')
+        selection = 'alternatives --set iptables /usr/bin/iptables-nft'
+        self.assertGreater(setup.index(selection), setup.index('packages $extras'))
+
+    def test_opensuse_uses_packaged_nftables_alternative(self):
+        setup = self.run_script('--print-system-setup').stdout
+        start = setup.index('    zypper)\n        refresh_packages')
+        end = setup.index(';;', start)
+        self.assertIn('iptables-backend-nft', setup[start:end])
+
+    def test_pacman_selects_nft_provider_after_container_packages(self):
+        setup = self.run_script('--print-system-setup').stdout
+        selection = 'pacman -S --needed --noconfirm --ask=4 iptables-nft </dev/null'
+        self.assertIn('elif [ "$family" = pacman ]; then', setup)
+        self.assertGreater(setup.index(selection), setup.index('packages $extras'))
+
+    def test_void_selects_packaged_nft_alternative_after_extra_packages(self):
+        setup = self.run_script('--print-system-setup').stdout
+        start = setup.index('    xbps)\n        refresh_packages')
+        end = setup.index(';;', start)
+        self.assertIn('iptables-nft', setup[start:end])
+        selection = 'xbps-alternatives -s iptables-nft -g iptables'
+        self.assertGreater(setup.index(selection), setup.index('packages $extras'))
+
+    def test_module_services_are_conditional_not_masked_in_containers(self):
+        setup = self.run_script('--print-system-setup').stdout
+        start = setup.index('# Module loading belongs to the host')
+        end = setup.index('if [ -d /etc/runit ]', start)
+        self.assertGreater(start, setup.index('packages $extras'))
+        root = self.directory / 'systemd-root'
+        root.mkdir()
+        fragment = re.sub(r'/(?:usr/lib|lib|etc)/systemd/system|/etc/(?:runit|sv)',
+                          lambda match: str(root) + match[0], setup[start:end])
+        # EVENT_WAIT: the isolated recipe fragment exits without host changes.
+        def prepare():
+            subprocess.run(['sh', '-eu', '-c', fragment], check=True, timeout=5)
+        prepare()
+        self.assertFalse((root / 'etc').exists())
+        (root / 'usr/lib/systemd/system').mkdir(parents=True)
+        prepare()
+        for unit in ('systemd-modules-load.service', 'modprobe@.service'):
+            path = root / 'etc/systemd/system' / (unit + '.d')
+            owned = path / '50-magicdesk-container.conf'
+            self.assertEqual('[Unit]\nConditionVirtualization=!container\n', owned.read_text())
+            (path / '90-user.conf').write_text('[Unit]\nDescription=Retained\n')
+        prepare()
+        self.assertEqual('[Unit]\nDescription=Retained\n', (path / '90-user.conf').read_text())
+        self.assertNotIn('/dev/null', fragment)
+
+    def test_pacman_keeps_installed_dependency_providers(self):
+        setup = self.run_script('--print-system-setup').stdout
+        fragment = setup[setup.index('packages() {'):setup.index('refresh_packages() {')]
+        for family in ('pacman', 'recovery'):
+            for code, missing, expected in ((0, '', ''), (127, 'meson\npkgconf', 'meson\npkgconf\n'),
+                                            (42, '', '')):
+                with self.subTest(family=family, code=code):
+                    script = fragment + f'''\nfamily={family}
+pacman() {{
+    case "$1" in
+        -T) printf %s {shlex.quote(missing)}; return {code} ;;
+        -S) shift 3; printf '%s\\n' "$@" ;;
+        *) return 99 ;;
+    esac
+}}
+packages ninja meson pkgconf
+'''
+                    result = subprocess.run(['sh', '-eu', '-c', script], capture_output=True,
+                                            text=True, timeout=5)
+                    self.assertEqual(code if code not in (0, 127) else 0, result.returncode, result.stderr)
+                    self.assertEqual(expected, result.stdout)
+
+    def test_portable_initramfs_preserves_hooks_and_native_boot(self):
+        setup = self.run_script('--print-system-setup').stdout
+        start = setup.index('prepare_initramfs() {')
+        fragment = setup[start:setup.index('refresh_packages() {', start)]
+        root = self.directory / 'initramfs-root'
+        root.mkdir()
+        fragment = re.sub(r'/etc/(?:magicdesk|pacman.d|mkinitcpio.conf)|/usr/local/libexec',
+                          lambda match: str(root) + match[0], fragment)
+        def prepare():
+            subprocess.run(['sh', '-eu', '-c', fragment + '\nprepare_initramfs'],
+                           check=True, timeout=5)
+        prepare()
+        config = root / 'etc/mkinitcpio.conf'
+        self.assertFalse(config.exists())
+        original = 'HOOKS=(base autodetect custom fsck)\nMODULES=(btrfs)\n'
+        config.write_text(original)
+        config.chmod(0o640)
+        prepare()
+        once = config.read_text()
+        self.assertTrue(once.startswith(original))
+        self.assertEqual(0o640, config.stat().st_mode & 0o777)
+        prepare()
+        self.assertEqual(once, config.read_text())
+        self.assertFalse(config.with_suffix('.conf.magicdesk-new').exists())
+        hook = root / 'etc/pacman.d/hooks/80-magicdesk-initramfs-config.hook'
+        self.assertIn('Target = etc/mkinitcpio.conf', hook.read_text())
+        self.assertIn('When = PostTransaction', hook.read_text())
+        helper = next(line.removeprefix('Exec = ') for line in hook.read_text().splitlines()
+                      if line.startswith('Exec = '))
+        config.write_text(original.replace('custom', 'updated'))
+        subprocess.run(['sh', '-eu', helper], check=True, timeout=5)
+        self.assertIn('updated', config.read_text())
+        self.assertEqual(1, config.read_text().count(' || . '))
+        for container, filesystem, expected in (
+                ('shroot', 'ext4', 'base updated fsck'),
+                ('', 'guestfs', 'base updated fsck'),
+                ('', 'ext4', 'base autodetect updated fsck')):
+            with self.subTest(container=container, filesystem=filesystem):
+                script = ('findmnt() { printf %s ' + shlex.quote(filesystem) + '; };\n'
+                          '. ' + shlex.quote(str(config)) + '\n'
+                          'printf "%s\\n" "${HOOKS[*]}" "${MODULES[*]}"\n')
+                result = subprocess.run(['bash', '-eu', '-c', script], capture_output=True,
+                                        text=True, timeout=5,
+                                        env={**os.environ, 'container': container})
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(expected + '\nbtrfs\n', result.stdout)
+        refresh = setup[setup.index('refresh_packages() {'):setup.index('package_cleanup() {')]
+        self.assertIn('pacman|recovery) prepare_initramfs', refresh)
+        self.assertLess(refresh.index('prepare_initramfs'), refresh.index('pacman -Syu'))
+
+    def test_runit_module_preparation_retains_native_boot_and_daemon(self):
+        setup = self.run_script('--print-system-setup').stdout
+        start = setup.index('if [ -d /etc/runit ]')
+        fragment = setup[start:setup.index('if [ "$family" = dnf ]; then', start)]
+        root = self.directory / 'runit-root'
+        (root / 'etc/runit').mkdir(parents=True)
+        service = root / 'etc/sv/example/run'
+        service.parent.mkdir(parents=True)
+        service.write_text('#!/bin/sh\nmodprobe -q loop || exit 1\nexec printf daemon-ok\n')
+        service.chmod(0o750)
+        alternate = root / 'etc/runit/sv/example/run'
+        alternate.parent.mkdir(parents=True)
+        alternate.write_text(service.read_text())
+        alternate.chmod(0o750)
+        hardware = root / 'usr/lib/rc/sv.d/hwclock'
+        hardware.parent.mkdir(parents=True)
+        hardware.write_text('#!/bin/bash\noptions=(--utc --noadjfile)\nprintf "hardware:%s" "${options[0]}"\n')
+        hardware.chmod(0o750)
+        application = hardware.with_name('sysctl')
+        application.write_text('#!/bin/sh\nprintf real-application\n')
+        fragment = re.sub(r'/etc/(?:runit|sv|pacman.d)|/usr/local/libexec|/usr/lib/rc/sv.d',
+                          lambda match: str(root) + match[0], fragment)
+        fragment = 'family=pacman\n' + fragment
+        init_environment = root / 'init-environment'
+        fragment = fragment.replace('/proc/1/environ', str(init_environment))
+        for _ in range(2):
+            subprocess.run(['sh', '-eu', '-c', fragment], check=True, timeout=5)
+        self.assertEqual(1, service.read_text().count('# MagicDesk container module policy'))
+        self.assertEqual(0o750, service.stat().st_mode & 0o777)
+        self.assertEqual(service.read_text(), alternate.read_text())
+        self.assertEqual(0o750, alternate.stat().st_mode & 0o777)
+        self.assertEqual(1, hardware.read_text().count('# MagicDesk host hardware policy'))
+        self.assertEqual(0o750, hardware.stat().st_mode & 0o777)
+        self.assertEqual('#!/bin/sh\nprintf real-application\n', application.read_text())
+        hook = (root / 'etc/pacman.d/hooks/95-magicdesk-container-services.hook').read_text()
+        self.assertIn('When = PostTransaction', hook)
+        self.assertIn('Operation = Install\nOperation = Upgrade', hook)
+        self.assertIn('Type = Path', hook)
+        for path in ('etc/sv/*/run', 'etc/runit/sv/*/run', 'usr/lib/rc/sv.d/*'):
+            self.assertIn('Target = ' + path, hook)
+        # A package replacement must receive the same policy without rerunning
+        # the installer or replacing the package's new daemon command.
+        alternate.write_text('#!/bin/sh\nmodprobe -q loop || exit 1\nexec printf updated-daemon\n')
+        helper = next(line.removeprefix('Exec = ') for line in hook.splitlines()
+                      if line.startswith('Exec = '))
+        subprocess.run(['sh', '-eu', helper], check=True, timeout=5)
+        self.assertIn('exec printf updated-daemon', alternate.read_text())
+        self.assertEqual(1, alternate.read_text().count('# MagicDesk container module policy'))
+        self.assertEqual(0o750, alternate.stat().st_mode & 0o777)
+        marker = root / 'module-called'
+        for container, init, in_container in (
+                ('shroot', b'PATH=/bin\0', True),
+                ('', b'PATH=/bin\0container=shroot\0TERM=linux\0', True),
+                ('', b'PATH=/bin\0not_container=shroot\0', False),
+                ('', b'container=\0', False),
+                ('', None, False)):
+            marker.unlink(missing_ok=True)
+            if init is None:
+                init_environment.unlink(missing_ok=True)
+            else:
+                init_environment.write_bytes(init)
+            script = 'modprobe() { touch ' + shlex.quote(str(marker)) + '; return 1; };\n' + service.read_text()
+            result = subprocess.run(['sh', '-c', script], env={**os.environ, 'container': container},
+                                    capture_output=True, text=True, timeout=5)
+            self.assertEqual(0 if in_container else 1, result.returncode, result.stderr)
+            self.assertEqual('daemon-ok' if in_container else '', result.stdout)
+            self.assertEqual(not in_container, marker.exists())
+            result = subprocess.run(['bash', str(hardware)], env={**os.environ, 'container': container},
+                                    capture_output=True, text=True, timeout=5)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual('' if in_container else 'hardware:--utc', result.stdout)
+
     def test_all_package_families_supply_audio_gamepads_and_wayland_decorations(self):
         self.assertEqual(0, self.run_script('--yes').returncode)
         setup = self.payload.read_text()
@@ -610,7 +815,7 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
             'apk': {'pipewire-tools', 'pipewire-pulse', 'wireplumber', 'pipewire-alsa',
                     'sdl2', 'eudev-libs', 'libdecor'},
             'dnf': {'pipewire-utils', 'pipewire-pulseaudio', 'wireplumber', 'pipewire-alsa',
-                    'sdl2-compat', 'systemd-libs', 'libdecor'},
+                    'sdl2-compat', 'systemd-libs', 'systemd-pam', 'libdecor'},
             'pacman': {'pipewire-pulse', 'wireplumber', 'pipewire-alsa', 'libpulse',
                        'sdl2', 'systemd-libs', 'libdecor'},
             'zypper': {'pipewire-pulseaudio', 'pipewire-tools', 'wireplumber', 'pipewire-alsa',
@@ -746,6 +951,57 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
                     self.assertEqual('/tmp/android-pulse', captured['env']['MAGICDESK_AUDIO_PULSE'])
                     self.assertEqual('unix:path=/existing-bus' if inherited else 'unix:path=/test-bus',
                                      captured['env']['DBUS_SESSION_BUS_ADDRESS'])
+
+    def test_desktop_scope_owns_only_the_matching_user_bus(self):
+        capture = self.directory / 'magicdesk-audio-session'
+        capture.write_text('#!' + sys.executable + '\nimport json, os, sys\n'
+                           'print(json.dumps({"argv": sys.argv[1:], "scope": os.environ.get("SCOPE")}))\n'
+                           'sys.exit(23)\n')
+        capture.chmod(0o755)
+        scope = self.directory / 'systemd-run'
+        scope.write_text('#!' + sys.executable + '\nimport json, os, sys\n'
+                         'i = sys.argv.index("--")\n'
+                         'os.environ["SCOPE"] = json.dumps(sys.argv[1:i])\n'
+                         'os.execvp(sys.argv[i+1], sys.argv[i+1:])\n')
+        scope.chmod(0o755)
+        launcher = self.run_script('--print-desktop-session').stdout
+        launcher = launcher.replace('/etc/profile.d/', str(self.directory / 'profiles') + '/')
+        for address in ('unix:path=/run/user/1000/bus', 'unix:path=/private-bus'):
+            environment = dict(self.environment, XDG_RUNTIME_DIR='/run/user/1000',
+                               DBUS_SESSION_BUS_ADDRESS=address)
+            result = subprocess.run(['sh', '-c', launcher, 'desktop', 'xfce', 'a b'],
+                                    env=environment, capture_output=True, text=True, timeout=5)
+            self.assertEqual(23, result.returncode, result.stderr)
+            value = json.loads(result.stdout)
+            self.assertEqual(['xfce4-session', 'a b'], value['argv'])
+            if address.endswith('/1000/bus'):
+                self.assertEqual(['--user', '--scope', '--collect', '--quiet',
+                                  '--property=BindsTo=graphical-session.target'], json.loads(value['scope']))
+            else:
+                self.assertIsNone(value['scope'])
+
+    def test_desktop_ready_publishes_only_present_display_and_audio_variables(self):
+        publisher = self.directory / 'dbus-update-activation-environment'
+        publisher.write_text('#!' + sys.executable + '\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n')
+        publisher.chmod(0o755)
+        manager = self.directory / 'systemd-run'
+        manager.write_text('#!/bin/sh\nexit 1\n')
+        manager.chmod(0o755)
+        launcher = self.run_script('--print-desktop-session').stdout
+        for systemd in (False, True):
+            environment = dict(self.environment, XDG_RUNTIME_DIR='/run/user/1000',
+                               DBUS_SESSION_BUS_ADDRESS='unix:path=/run/user/1000/bus' if systemd else 'unix:path=/private-bus',
+                               WAYLAND_DISPLAY='wayland-1', PULSE_SERVER='unix:/session/audio')
+            for key in ('DISPLAY', 'XDG_CURRENT_DESKTOP', 'XDG_SESSION_TYPE', 'PIPEWIRE_REMOTE', 'PIPEWIRE_RUNTIME_DIR'):
+                environment.pop(key, None)
+            result = subprocess.run(['sh', '-c', launcher, 'desktop', '--ready'],
+                                    env=environment, capture_output=True, text=True, timeout=5)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual((['--systemd'] if systemd else []) + ['WAYLAND_DISPLAY', 'PULSE_SERVER'],
+                             json.loads(result.stdout))
+        setup = self.run_script('--print-system-setup').stdout
+        self.assertIn('path=/usr/local/libexec/magicdesk-desktop-ready\n', setup)
+        self.assertIn('exec magicdesk-desktop-session --ready\n', setup)
 
     def test_root_desktop_autostart_preserves_user_and_distribution_settings(self):
         setup = self.run_script('--print-system-setup').stdout
@@ -1437,6 +1693,11 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
                 self.assertEqual(0, result.returncode, result.stderr)
                 calls = self.calls()
                 downloads = [c for c in calls if c[0] == 'download']
+                if distro == 'opensuse':
+                    self.assertEqual(2, len(downloads))
+                    checksum = downloads.pop(0)
+                    self.assertEqual(checksum[1], downloads[0][1] + '.sha256')
+                    self.assertEqual(downloads[0][-1], 'a' * 64)
                 self.assertEqual(1, len(downloads))
                 self.assertTrue(downloads[0][1].startswith('https://'))
                 self.assertEqual('--sha256', downloads[0][-2])
@@ -1488,6 +1749,27 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
         self.assertEqual(23, result.returncode)
         self.assertTrue(any(c[0] == 'download' for c in self.calls()))
         self.assertFalse(any(c[0] == 'install' for c in self.calls()))
+
+    def test_rolling_rootfs_uses_upstream_checksum_before_archive(self):
+        result = self.run_script('--yes', '--distro', 'opensuse')
+        self.assertEqual(0, result.returncode, result.stderr)
+        downloads = [c for c in self.calls() if c[0] == 'download']
+        self.assertEqual(2, len(downloads))
+        self.assertEqual(downloads[1][1] + '.sha256', downloads[0][1])
+        self.assertEqual(['--sha256', 'a' * 64], downloads[1][-2:])
+        self.assertNotIn('Snapshot', downloads[1][1])
+
+    def test_rolling_rootfs_rejects_invalid_or_ambiguous_checksums(self):
+        name = 'opensuse-tumbleweed-image.aarch64-lxc.tar.xz'
+        line = 'b' * 64 + '  ' + name + '\n'
+        for checksum in ('bad', 'c' * 64 + '  other.tar.xz\n', line + line, 'g' * 64 + '  ' + name):
+            with self.subTest(checksum=checksum):
+                self.log.unlink(missing_ok=True)
+                result = self.run_script('--yes', '--distro', 'opensuse', TEST_CHECKSUM=checksum)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn('Invalid official checksum', result.stderr)
+                self.assertEqual(1, len([c for c in self.calls() if c[0] == 'download']))
+                self.assertFalse(any(c[0] == 'install' for c in self.calls()))
 
     def test_rootfs_failure_retains_conversion_but_does_not_import_partial_output(self):
         result = self.run_script('--yes', '--distro', 'void', '--downloads', str(self.directory / 'downloads'),
@@ -1702,6 +1984,49 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
         self.assertNotIn('libglvnd-dev', alpine)
         self.assertIn('prepare_glvnd\n', graphics)
         self.assertIn('cp -a "$private_glvnd/lib/." "$work/stage$prefix/lib/"', graphics)
+
+    def protocols_helper(self):
+        payload = self.run_script('--print-graphics-setup').stdout
+        return payload[payload.index('prepare_wayland_protocols() {'):payload.index('\nprepare_glvnd() {')]
+
+    def test_protocols_bootstrap_keeps_sufficient_system_version(self):
+        tool = self.directory / 'pkg-config'
+        tool.write_text('#!/bin/sh\ntest "$1" = --atleast-version=1.41 && test "$2" = wayland-protocols\n')
+        tool.chmod(0o755)
+        run = subprocess.run(['sh', '-eu', '-c', self.protocols_helper() +
+                              '\nprepare_wayland_protocols\nprintf "%s" "$PKG_CONFIG_PATH"'],
+                             env=dict(self.environment, PKG_CONFIG_PATH='/previous'),
+                             capture_output=True, text=True, timeout=5)
+        self.assertEqual(0, run.returncode, run.stderr)
+        self.assertEqual('/previous', run.stdout)
+
+    def test_protocols_bootstrap_reuses_private_build_inputs(self):
+        tool = self.directory / 'pkg-config'
+        prefix = self.directory / 'tools/wayland-protocols-1.41'
+        prefix.mkdir(parents=True)
+        (prefix / '.complete').touch()
+        tool.write_text('#!/bin/sh\ncase "$PKG_CONFIG_PATH" in */share/pkgconfig:/previous) exit 0;; *) exit 1;; esac\n')
+        tool.chmod(0o755)
+        run = subprocess.run(['sh', '-eu', '-c', self.protocols_helper() +
+                              '\nprepare_wayland_protocols\nprintf "%s" "$PKG_CONFIG_PATH"'],
+                             env=dict(self.environment, work=str(self.directory), PKG_CONFIG_PATH='/previous'),
+                             capture_output=True, text=True, timeout=5)
+        self.assertEqual(0, run.returncode, run.stderr)
+        self.assertEqual(str(prefix / 'share/pkgconfig') + ':/previous', run.stdout)
+
+    def test_protocols_bootstrap_rejects_invalid_archive_before_extracting(self):
+        for name, body in [('pkg-config', 'exit 1'), ('curl', 'exit 0'),
+                           ('tar', 'touch "$work/unexpected-extraction"')]:
+            tool = self.directory / name
+            tool.write_text('#!/bin/sh\n' + body + '\n')
+            tool.chmod(0o755)
+        (self.directory / 'wayland-protocols-1.41.tar.xz.part').write_text('invalid archive')
+        helper = self.protocols_helper().replace('/var/cache/magicdesk/mesa/downloads', str(self.directory))
+        run = subprocess.run(['sh', '-eu', '-c', helper + '\nprepare_wayland_protocols'],
+                             env=dict(self.environment, work=str(self.directory)),
+                             capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(0, run.returncode)
+        self.assertFalse((self.directory / 'unexpected-extraction').exists())
 
     def glvnd_helper(self):
         payload = self.run_script('--print-graphics-setup').stdout

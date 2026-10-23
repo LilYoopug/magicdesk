@@ -119,11 +119,14 @@ class SnapGPUTest(unittest.TestCase):
         library.parent.mkdir(parents=True)
         library.touch()
         with patch.object(self.helper, 'run') as run:
+            run.return_value.stdout = 'MD_MESA_PROBE_OK\n'
             self.helper.verify_runtime(self.root, Path('/snap/core24/1'), provider)
         argv = run.call_args.args[0]
         self.assertIn('/snap/core24/1/usr', argv)
         self.assertIn('/mdgl/lib:/mdprovider/usr/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu', argv)
         self.assertNotIn('LD_LIBRARY_PATH', run.call_args.kwargs['env'])
+        self.assertEqual(argv[-3:], ['--preload', '/probe', '/usr/bin/true'])
+        self.assertIn('/mdgl/lib/libEGL_mesa.so.0', run.call_args.kwargs['env']['MD_MESA_PROBE_LIBRARIES'])
 
     def test_failed_abi_probe_never_publishes_image(self):
         with patch.object(self.helper, 'verify_runtime', side_effect=ValueError('ABI mismatch')):

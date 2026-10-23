@@ -164,12 +164,29 @@ Use `MESA_LOADER_DRIVER_OVERRIDE=zink`, the intended Vulkan ICD and no
 `WAYLAND_DEBUG=client` buffer submissions. A renderer string alone is not proof
 that the client presented a frame.
 
+### Guest Desktop Services
+
+`magicdesk-desktop-session` reuses an inherited D-Bus session, or creates a
+private one when launched directly. When that bus belongs to a running systemd
+user manager, the desktop runs in its own transient scope bound to
+`graphical-session.target`. Scope lifetime supplies the dependency required by
+session services such as desktop portals; closing one session does not manually
+stop the shared target. OpenRC, runit and private D-Bus launches do not acquire a
+systemd dependency.
+
+The recipe's fallback Weston configuration invokes
+`magicdesk-desktop-session --ready` after compositor startup to publish the child
+display and audio endpoints for D-Bus activation. User and distribution Weston
+configuration take precedence. A custom `[autolaunch]` program should invoke the
+same ready hook before starting applications. The hook publishes only the
+explicit display/audio variables, not the whole process environment.
+
 ### Flatpak GPU Drivers
 
 Flatpak clients need a GL extension inside their runtime; host driver paths and
 environment variables alone are insufficient. The Turnip recipe installs
-`magicdesk-flatpak-gl`, which reuses the selected Mesa build without compiling
-another copy or downloading a driver extension. It reads installed ARM64 runtime
+`magicdesk-flatpak-gl`, which first tries to reuse the selected Mesa build.
+It reads installed ARM64 runtime
 metadata, relocates the EGL/Vulkan manifests, and publishes Flatpak's automatically
 selected local `org.freedesktop.Platform.GL.host` extension. The helper runs after
 graphics setup, on desktop-session startup and through a Flatpak install/update
@@ -179,11 +196,40 @@ trigger. It can also be run manually inside the guest:
 magicdesk-flatpak-gl
 ```
 
+These automatic paths only publish already-built libraries; they never install
+an SDK or compile a second Mesa, even when an SDK is already installed.
+
 Each runtime sharing a GL branch must pass a sandboxed loader/dlopen check,
 including nested GBM backends, before
-publication. A runtime commit change repeats admission without copying unchanged
+publication. The probe is a small shared module with no linked libc dependency;
+the target runtime's loader supplies its C functions. This also permits checking
+glibc runtimes from a musl distribution. Success requires the probe's explicit
+completion marker, not merely a zero loader exit code.
+A runtime commit change repeats admission without copying unchanged
 Mesa libraries. This detects missing dependencies/symbols, not every possible
-driver/runtime incompatibility. Admission failure is reported and withdraws the
+driver/runtime incompatibility. If the runtime loader rejects the host libraries,
+the helper reports the incompatibility without publishing that driver. This can
+happen when the distribution's libc is newer than the Flatpak runtime. A separate
+Mesa build using the same patched sources and options inside the matching SDK
+is available only through an explicit command:
+
+```sh
+magicdesk-flatpak-gl --build-sdk
+```
+
+No host libc or binary Python modules enter that SDK build. This is optional
+preparation, not part of the distribution installation or desktop launch.
+
+The SDK must already be installed in the same user/system installation. A missing
+SDK produces its exact `flatpak install` command; run it, then repeat
+`magicdesk-flatpak-gl --build-sdk`. The helper does not start nested installation transactions
+from Flatpak's trigger. SDK builds retain their objects on failure and reuse a
+completed prefix keyed by source/configuration and SDK deployment; changing the
+compiler job count does not invalidate it. Each consuming runtime must still pass
+the loader check before publication. These builds can take as long as the original
+Mesa build, but they are not repeated on ordinary application launches.
+
+Admission failure is reported and withdraws the
 owned extension; independently installed `GL.host` directories are not replaced.
 New Mesa builds replace the extension atomically. Old bundles remain under the
 installation's `.magicdesk-gl/retired-*` directory because running sandboxes can

@@ -799,9 +799,13 @@ shell is not an equivalent setup.
 
 See the [init matrix](../native/guest-exec-lab/init-matrix.md) and
 [init fixtures](../native/guest-exec-lab/namespaces.md#namespace-clients) for setup
-and exact assertions. Kernel-module loading and unavailable hardware services
-need container-appropriate configuration; Debian/openKylin default-target checks
-explicitly drop `CAP_SYS_MODULE`. SteamOS's default boot remains degraded on
+and exact assertions. The recipe adds `ConditionVirtualization=!container` to
+systemd's module-loading units: they do not modify the host kernel in a container,
+but remain available for a native boot of an exported rootfs. This is applied
+after package setup, including `--resume`; it does not mask other services or
+hide their failures. Older Debian/openKylin checks explicitly dropped
+`CAP_SYS_MODULE`. Unavailable hardware still needs appropriate configuration.
+SteamOS's default boot remains degraded on
 hardware/network units. Passing a userspace boot does not certify a display
 manager, graphical login or hardware boot.
 
@@ -1157,6 +1161,13 @@ available to the selected Android UID.
 Their opened files retain native IO; network and device inventories remain owned
 by their guest providers. This grants neither hardware write authority nor access
 to other Android device trees, and does not make missing GPU drivers available.
+
+Launch-owned device `uevent` attributes accept standard synthetic actions and
+optional UUID/argument records through the same device-event bus. Reads retain
+the authoritative device properties; writes notify guest subscribers without
+modifying Android sysfs. Attribute permissions, readonly mounts and unplugged
+device lifetime remain enforced. Other projected hardware attributes stay
+read-only.
 
 ## Prepared Userspace
 
