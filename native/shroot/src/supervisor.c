@@ -23,6 +23,7 @@
 #include "svc_machine.h"
 #include "guest_domain.h"
 #include "task_resources.h"
+#include "cgroup.h"
 #include "network_route.h"
 #include "network_io.h"
 #include "fd_mutation.h"
@@ -446,6 +447,7 @@ struct thread {
     int debug_step_call, debug_birth;
     pid_t debug_exec_old;
     int kernel_stopped, kernel_resume, interrupt_pending, trace_options_dirty, debug_call_active, debug_adapter;
+    int freezer_resume, freezer_signal;
     pid_t vfork_child;
     int terminal_observation;
     unsigned long debug_options;
@@ -568,6 +570,10 @@ static int socket_events=-1;
 static uint64_t ipc_sequence;
 static struct md_namespace_broker *broker;
 static struct md_task_registry *tasks;
+static struct md_cgroup_member *freezer;
+static uint64_t freezer_generation;
+static int freezer_enabled;
+static void freezer_progress(void);
 static struct md_identity launch_identity;
 static int virtual_identity;
 static struct md_admission admission = {.source = -1};
@@ -737,6 +743,7 @@ static void cleanup(void) {
     md_task_quiesce_destroy(entry_fence_barrier); entry_fence_barrier=NULL;
     md_memory_release(entry_fence_memory); entry_fence_memory=NULL; entry_fence_stage=0;
     md_task_registry_destroy(tasks); tasks = NULL;
+    md_cgroup_member_release(freezer); freezer=NULL;
     md_fd_exchanges_destroy(fd_exchanges); fd_exchanges=NULL;
     md_identity_release(&launch_identity);
     if (listener >= 0) close(listener);
@@ -3606,7 +3613,8 @@ static int task_action_borrowable(struct thread *p,struct thread *requester) {
     return p->ready && !birth_stop_pending(p) && !p->resume_lost && !p->terminal_stop
         && !p->listening && !p->vfork_child && !p->interrupt_pending
         && !p->mapping && !p->memory_capture && !p->fd_running && (!traced || debug_held || debug_running)
-        && (waiter || debug_held || (!p->kernel_stopped && (p->phase==IDLE || p->phase==DISPATCHING
+        && (waiter || debug_held || (p->freezer_resume && debugger_at_boundary(p))
+            || (!p->kernel_stopped && (p->phase==IDLE || p->phase==DISPATCHING
             || p->phase==WATCH_READ || p->phase==EPOLL_WAIT || p->phase==PROCESS_OBSERVING)));
 }
 static void task_action_start(struct thread *t) {
@@ -5984,6 +5992,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
 }
 static void fd_progress(void) {
     md_event_acknowledge(fd_ready);
+    freezer_progress();
     retry_dispatch(1);
     adapter_progress();
 }
@@ -6506,6 +6515,39 @@ static int debugger_at_boundary(const struct thread *t) {
     return t->phase==IDLE && !t->metadata_restart && !t->fd_running && !t->fd_order.table && !t->fs_order.fs
         && !t->signal_delivery.active;
 }
+static int freezer_parked(const struct thread *t) {
+    return t->phase==WATCH_READ || t->phase==IPC_WAITING || t->phase==SOCKET_WAITING || t->phase==FILE_WAITING
+        || t->phase==CONTROL_WAITING || t->phase==CLOSE_WAITING || t->phase==EPOLL_WAIT
+        || t->phase==DEBUG_PARK_EXIT;
+}
+static void freezer_progress(void) {
+    uint64_t generation=md_cgroup_freezer_generation(freezer);
+    if (generation==freezer_generation) return;
+    freezer_generation=generation;
+    /* Empty frozen groups may acquire newborn members without another write. */
+    freezer_enabled=1;
+    for (struct thread *t=threads;t;t=t->next) if (t->pid && t->born) {
+        if (!md_cgroup_member_freezing(t->resources.cgroup) || t->terminal_stop) {
+            md_cgroup_member_frozen(t->resources.cgroup,0);
+            if (t->freezer_resume) {
+                int sig=t->freezer_signal;
+                t->freezer_resume=t->freezer_signal=0;
+                resume(t->pid,sig);
+            }
+            continue;
+        }
+        if (t->listening || freezer_parked(t)
+                || (t->kernel_stopped && debugger_at_boundary(t))) {
+            md_cgroup_member_frozen(t->resources.cgroup,1);
+        } else if ((debugger_at_boundary(t) || t->phase==OBSERVING || t->phase==PROCESS_OBSERVING)
+                && !t->kernel_stopped && t->initial_stop && !t->interrupt_pending
+                && !t->resume_lost && memory_available(t->pid)) {
+            /* EVENT_WAIT: interrupt confirms suspension; exit retires the
+             * member. No guest job-control or signal disposition is changed. */
+            tracee_request(t,PTRACE_INTERRUPT,NULL,NULL,"cgroup-freeze");
+        }
+    }
+}
 static void memory_access_capture(struct thread *t) {
     int error=md_memory_private_access_capture(t->memory,t->pid);
     TRACE("PROBE memory-access pid=%d result=%d\n",t->pid,error);
@@ -6585,6 +6627,16 @@ static void resume(pid_t pid, int sig) {
     }
     CHECK(!md_task_registry_publish(tasks, t->pid, t->tgid, &t->identity, &t->resources));
     enum phase phase = t->phase;
+    if (freezer_enabled && md_cgroup_member_freezing(t->resources.cgroup)) {
+        if (debugger_at_boundary(t)) {
+            CHECK(!t->freezer_resume || !sig || !t->freezer_signal || sig==t->freezer_signal);
+            t->freezer_resume=1;
+            if (sig) t->freezer_signal=sig;
+            md_cgroup_member_frozen(t->resources.cgroup,1);
+            return;
+        }
+        if (freezer_parked(t)) md_cgroup_member_frozen(t->resources.cgroup,1);
+    }
     struct md_svc_registry *machine=md_memory_svc(t->memory);
     if (machine && !machine->disabled && (md_memory_exposed(t->memory)
             || t->debug_options || md_debugger_traced(debugger,pid)))
@@ -8460,6 +8512,7 @@ int main(int argc, char **argv) {
         thread(leader)->resources.network=md_network_namespace_retain(launch_network.space);
     }
     CHECK(!md_task_registry_publish(tasks,leader,leader,&thread(leader)->identity,&thread(leader)->resources));
+    freezer=md_cgroup_member_retain(thread(leader)->resources.cgroup);
     if (selected_hostname) CHECK(!md_uts_namespace_set(thread(leader)->resources.uts,0,
         selected_hostname,strlen(selected_hostname)));
     byte = 'g'; CHECK(write(channel[0], &byte, 1) == 1); close(channel[0]);

@@ -49,6 +49,8 @@ struct group {
     unsigned subtree;
     uint64_t pids_max;
     uint64_t populated, event_id, generation;
+    uint64_t stopped;
+    int freeze, effective_freeze, frozen;
 };
 struct world {
     atomic_uint refs;
@@ -59,6 +61,8 @@ struct world {
     unsigned next_hierarchy;
     struct md_cgroup_programs *programs;
     int namespace_created;
+    atomic_uint_fast64_t freezer_generation;
+    struct md_resource_wakeup *freezer_wakeup;
 };
 struct md_cgroup_view {
     struct world *world;
@@ -84,6 +88,7 @@ struct md_cgroup_member {
     struct named_group *named;
     pid_t tid,tgid;
     int departed,reserved;
+    atomic_int freezing, stopped;
     struct md_pid_identity *pid,*pid_group;
 };
 struct md_cgroup_namespace {
@@ -141,9 +146,40 @@ static void group_event(struct md_cgroup_view *v,struct group *g,unsigned mask) 
     ++g->generation;
     if (v->events) md_watch_source_emit(v->events,g->event_id,mask,0,NULL,0);
 }
+static int freezing(const struct group *g) {
+    for (;g;g=g->parent) if (g->freeze) return 1;
+    return 0;
+}
+static void frozen_event(struct md_cgroup_view *v,struct group *g) {
+    int frozen=g->effective_freeze && g->stopped==g->populated;
+    if (g->frozen!=frozen) { g->frozen=frozen; group_event(v,g,IN_MODIFY); }
+}
+static void freezer_changed(struct world *w) {
+    atomic_fetch_add_explicit(&w->freezer_generation,1,memory_order_release);
+    if (w->freezer_wakeup) md_resource_wakeup_signal(w->freezer_wakeup);
+}
+uint64_t md_cgroup_freezer_generation(const struct md_cgroup_member *m) {
+    return m ? atomic_load_explicit(&m->world->freezer_generation,memory_order_acquire) : 0;
+}
+int md_cgroup_member_freezing(const struct md_cgroup_member *m) {
+    return m && atomic_load_explicit(&m->freezing,memory_order_acquire);
+}
+void md_cgroup_member_frozen(struct md_cgroup_member *m,int stopped) {
+    if (!m || atomic_load_explicit(&m->stopped,memory_order_relaxed)==stopped) return;
+    struct world *w=m->world;
+    pthread_mutex_lock(&w->lock);
+    if (m->stopped!=stopped) {
+        m->stopped=stopped;
+        if (m->tid) for (struct group *g=m->groups[0];g;g=g->parent) {
+            if (stopped) ++g->stopped; else --g->stopped;
+            frozen_event(w->views[0],g);
+        }
+    }
+    pthread_mutex_unlock(&w->lock);
+}
 /* Membership changes touch only the two branches below their common ancestor.
  * Fork/exit in a populated branch cannot manufacture an empty notification. */
-static void membership_change(struct md_cgroup_view *v,struct group *old,struct group *next) {
+static void membership_change(struct md_cgroup_view *v,struct group *old,struct group *next,int stopped) {
     if (!v || v->kind!=UNIFIED || old==next) return;
     struct group *common=old;
     while (common) {
@@ -152,10 +188,16 @@ static void membership_change(struct md_cgroup_view *v,struct group *old,struct 
         if (at) break;
         common=common->parent;
     }
-    for (struct group *g=old;g!=common;g=g->parent)
+    for (struct group *g=old;g!=common;g=g->parent) {
+        if (stopped) --g->stopped;
         if (!--g->populated) group_event(v,g,IN_MODIFY);
-    for (struct group *g=next;g!=common;g=g->parent)
+        frozen_event(v,g);
+    }
+    for (struct group *g=next;g!=common;g=g->parent) {
+        if (stopped) ++g->stopped;
         if (!g->populated++) group_event(v,g,IN_MODIFY);
+        frozen_event(v,g);
+    }
 }
 static struct world *retain(struct world *w) { atomic_fetch_add(&w->refs,1); return w; }
 static void clear_programs(struct group *g) {
@@ -172,6 +214,7 @@ static void release(struct world *w) {
         md_watch_source_release(v->events); md_temporary_directory_release(v->storage); free(v);
     }
     md_cgroup_programs_release(w->programs);
+    md_resource_wakeup_release(w->freezer_wakeup);
     pthread_mutex_destroy(&w->lock); free(w);
 }
 struct md_cgroup_programs *md_cgroup_program_registry(struct md_cgroup_member *m,int create) {
@@ -212,12 +255,14 @@ const struct md_user_namespace *md_cgroup_namespace_owner(const struct md_cgroup
 struct md_cgroup_member *md_cgroup_member_new(void) {
     struct world *w=calloc(1,sizeof(*w)); if (!w) return NULL;
     atomic_init(&w->refs,1);
+    atomic_init(&w->freezer_generation,0);
     w->next_hierarchy=2;
     int error=pthread_mutex_init(&w->lock,NULL);
     if (error) { free(w); errno=error; return NULL; }
     struct md_cgroup_member *m=calloc(1,sizeof(*m));
     if (!m) { release(w); return NULL; }
-    atomic_init(&m->refs,1); m->world=w; w->members=m; return m;
+    atomic_init(&m->refs,1); atomic_init(&m->freezing,0); atomic_init(&m->stopped,0);
+    m->world=w; w->members=m; return m;
 }
 struct md_cgroup_member *md_cgroup_member_fork(struct md_cgroup_member *old) {
     if (!old) return NULL;
@@ -229,6 +274,8 @@ struct md_cgroup_member *md_cgroup_member_fork(struct md_cgroup_member *old) {
         pthread_mutex_unlock(&m->world->lock); release(m->world); free(m); errno=-r; return NULL;
     }
     memcpy(m->groups,old->groups,sizeof(m->groups));
+    atomic_init(&m->freezing,freezing(m->groups[0]));
+    atomic_init(&m->stopped,0);
     m->next=m->world->members; m->world->members=m;
     pthread_mutex_unlock(&m->world->lock); return m;
 }
@@ -238,7 +285,7 @@ struct md_cgroup_member *md_cgroup_member_retain(struct md_cgroup_member *m) {
 void md_cgroup_member_release(struct md_cgroup_member *m) {
     if (!m || atomic_fetch_sub(&m->refs,1)!=1) return;
     struct world *w=m->world; pthread_mutex_lock(&w->lock);
-    if (m->tid) membership_change(w->views[0],m->groups[0],NULL);
+    if (m->tid) membership_change(w->views[0],m->groups[0],NULL,m->stopped);
     struct md_cgroup_member **at=&w->members;
     while (*at!=m) at=&(*at)->next;
     *at=m->next;
@@ -250,8 +297,8 @@ void md_cgroup_member_publish(struct md_cgroup_member *m,pid_t tid,pid_t tgid,
     if (!m) return;
     pthread_mutex_lock(&m->world->lock);
     struct md_pid_identity *old=m->pid,*old_group=m->pid_group;
-    if (!m->tid && tid) membership_change(m->world->views[0],NULL,m->groups[0]);
-    else if (m->tid && !tid) membership_change(m->world->views[0],m->groups[0],NULL);
+    if (!m->tid && tid) membership_change(m->world->views[0],NULL,m->groups[0],m->stopped);
+    else if (m->tid && !tid) membership_change(m->world->views[0],m->groups[0],NULL,m->stopped);
     m->tid=tid; m->tgid=tgid; m->departed=0; m->reserved=0; m->pid=md_pid_identity_retain(pid);
     m->pid_group=md_pid_identity_retain(group);
     pthread_mutex_unlock(&m->world->lock); md_pid_identity_release(old); md_pid_identity_release(old_group);
@@ -260,7 +307,7 @@ void md_cgroup_member_depart(struct md_cgroup_member *m,pid_t tid) {
     if (!m) return;
     pthread_mutex_lock(&m->world->lock);
     if (m->tid==tid && tid) {
-        membership_change(m->world->views[0],m->groups[0],NULL);
+        membership_change(m->world->views[0],m->groups[0],NULL,m->stopped);
         m->tid=0; m->departed=1;
     }
     pthread_mutex_unlock(&m->world->lock);
@@ -288,6 +335,7 @@ static int populate(struct md_cgroup_view *v,struct group *g) {
     if (v->next_event_id==UINT64_MAX) return -EOVERFLOW;
     g->event_id=++v->next_event_id;
     g->pids_max=UINT64_MAX;
+    g->effective_freeze=g->frozen=freezing(g);
     for (unsigned i=0;i<FILES;++i) if (controls[i].views&(1U<<v->kind)) {
         if ((i==RELEASE && g->parent) || !enabled(g,i)) continue;
         int error=control_create(g,i); if (error) return error;
@@ -645,6 +693,7 @@ int md_cgroup_member_clone(struct md_cgroup_member *parent,struct md_fs_anchor *
     if (!r) {
         atomic_init(&m->refs,1); m->world=retain(v->world); m->reserved=1;
         memcpy(m->groups,parent->groups,sizeof(m->groups)); m->groups[0]=g;
+        atomic_init(&m->freezing,freezing(g)); atomic_init(&m->stopped,0);
         m->next=v->world->members; v->world->members=m; *out=m;
     }
     pthread_mutex_unlock(&v->world->lock);
@@ -728,7 +777,7 @@ static long control_read(void *ctx,const struct md_control_actor *actor,void *da
         break;
     }
     case EVENTS:
-        fprintf(stream,"populated %d\nfrozen 0\n",o->group->populated!=0);
+        fprintf(stream,"populated %d\nfrozen %d\n",o->group->populated!=0,o->group->frozen);
         break;
     case TYPE: fputs("domain\n",stream); break;
     case CONTROLLERS: case SUBTREE:
@@ -746,7 +795,8 @@ static long control_read(void *ctx,const struct md_control_actor *actor,void *da
         fprintf(stream,"%" PRIu64 "\n",count); break;
     }
     case PIDS_EVENTS: fputs("max 0\n",stream); break;
-    case FREEZE: case NOTIFY: fputs("0\n",stream); break;
+    case FREEZE: fprintf(stream,"%d\n",o->group->freeze); break;
+    case NOTIFY: fputs("0\n",stream); break;
     case LIST: fputs("a *:* rwm\n",stream); break;
     default: error=-EACCES; break;
     }
@@ -796,9 +846,11 @@ static long control_write(void *ctx,const struct md_control_actor *actor,const v
         for (struct md_cgroup_member *m=v->world->members;m;m=m->next)
             if (m==target || (o->file==PROCS && m->tid && m->tgid==target->tgid)) {
                 struct group **slot=member_group(m,v);
-                if (m->tid) membership_change(v,*slot,o->group);
+                if (m->tid) membership_change(v,*slot,o->group,m->stopped);
                 *slot=o->group;
+                if (v->kind==UNIFIED) m->freezing=freezing(o->group);
             }
+        if (v->kind==UNIFIED && md_cgroup_freezer_generation(target)) freezer_changed(v->world);
         break;
     }
     /* Resource values are retained compatibility policy, not host enforcement.
@@ -814,7 +866,21 @@ static long control_write(void *ctx,const struct md_control_actor *actor,const v
         }
         break;
     case TYPE: r=strcmp(text,"domain") ? -EOPNOTSUPP : 0; break;
-    case FREEZE: case NOTIFY: r=strcmp(text,"0") ? -EOPNOTSUPP : 0; break;
+    case FREEZE:
+        if (strcmp(text,"0") && strcmp(text,"1")) { r=-EINVAL; break; }
+        if (!o->group->parent && text[0]=='1') { r=-EOPNOTSUPP; break; }
+        if (o->group->freeze==(text[0]=='1')) break;
+        if (!v->world->freezer_wakeup)
+            v->world->freezer_wakeup=md_resource_wakeup_retain(actor->wakeup);
+        o->group->freeze=text[0]=='1';
+        for (struct group *g=v->groups;g;g=g->next) {
+            g->effective_freeze=freezing(g); frozen_event(v,g);
+        }
+        for (struct md_cgroup_member *m=v->world->members;m;m=m->next)
+            m->freezing=m->groups[0] && m->groups[0]->effective_freeze;
+        freezer_changed(v->world);
+        break;
+    case NOTIFY: r=strcmp(text,"0") ? -EOPNOTSUPP : 0; break;
     case RELEASE: r=n ? -EOPNOTSUPP : 0; break;
     case ALLOW: r=strcmp(text,"a") && strcmp(text,"a *:* rwm") ? -EOPNOTSUPP : 0; break;
     case DENY: r=-EOPNOTSUPP; break;

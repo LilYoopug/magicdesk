@@ -581,6 +581,10 @@ baseline; no reader/writer endpoint is retained. `--case mount-namespace`,
 Chromium and `test_glycin_runtime.py` cover these paths under shell identity.
 Native statx may return mount ID zero for anonymous objects; the adapter retains
 that result instead of treating it as a failed mount lookup.
+The logical v2 freezer uses existing PTRACE_INTERRUPT stops and eventfd wakeups,
+not host cgroup permissions or injected SIGSTOP. `test_cgroup_guest` covers
+freeze/thaw, nested membership and newborn tasks; stock CUPS exercises Snap's
+freezer workflow. No post-5.15 interface is added.
 
 Opt-in routed networking uses the Linux 5.15 NETLINK_ROUTE wire contract in
 `network_route`, retained namespace/interface/endpoint owners in `network_model`

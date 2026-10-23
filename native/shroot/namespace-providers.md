@@ -631,14 +631,21 @@ enabled below. Removed controls invalidate retained FDs even after re-enabling.
 `pids.max` retains a nonnegative integer or max; `pids.current` counts live threads
 recursively on read; `pids.events` reports max 0. These values are permissive
 compatibility state, not enforced limits. Population accounting tracks lifecycle,
-not quota enforcement. CPU/memory/IO limits and
-freezing remain unavailable. The v1
+not quota enforcement. CPU/memory/IO limits remain unavailable. The v1
 devices list is always `a *:* rwm`; all-device allowance is accepted, restrictive
-rules are rejected. Unsupported controller enabling, freezes and release agents
+rules are rejected. Unsupported controller enabling and release agents
 return EOPNOTSUPP. This interface never accesses Android's cgroup hierarchy or
 provides a resource/security boundary. Ownership delegation is supported, but
 full kernel cgroup delegation containment and independent-supervisor hierarchy
 transfer are not implemented.
+
+The v2 freezer parks guest tasks at owned ptrace stops, not application-visible
+SIGSTOP delivery. `cgroup.events` reports frozen only after all affected tasks
+reach their stop; thaw resumes retained continuations and signals. Membership
+changes, fork/clone and nested frozen groups share this owner, including a child
+born into an initially empty frozen group. A generation change wakes the existing
+supervisor loop; inactive freezers do not scan tasks on each syscall. Snap's
+stock freeze/thaw workflow uses this mechanism without touching Android cgroups.
 
 `cgroup_program` owns launch-local logical BPF program IDs, descriptors and
 cgroup2 device attachments. `namespace_bpf` captures the bounded syscall ABI;

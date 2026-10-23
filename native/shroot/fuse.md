@@ -221,10 +221,11 @@ the snap for another independent boot. `--snap-file PATH` can use a cached
 official image with normal signature checks when the external store is
 unavailable. `--cold-launch-checks N` also exercises repeated launches within
 one boot, with namespace-start/finish markers separate from total elapsed time.
-Real cgroup population events let systemd retire completed scopes; freezing
-genuinely live tasks remains separately unsupported.
-Current snapd can warn about that freezer during removal even when removal and
-the mount-cleanup assertions succeed; this is not advertised as freezer support.
+Real cgroup population events let systemd retire completed scopes. The cgroup
+freezer parks tasks at owned interception boundaries without injecting SIGSTOP;
+new children inherit effective freezing, including the first member of an empty
+frozen group. CUPS boot checks exercise snapd's freezer and namespace preparation
+through repeated starts and real IPP requests, with the stock Snap timeouts.
 
 Init fixtures mount private `/tmp` and `/var/tmp`, as well as `/run`, before
 booting systemd. Its tmpfiles cleanup must not remove another launch's compiler

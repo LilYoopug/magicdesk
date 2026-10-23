@@ -32,6 +32,11 @@ struct md_cgroup_member *md_cgroup_member_retain(struct md_cgroup_member *);
 void md_cgroup_member_release(struct md_cgroup_member *);
 void md_cgroup_member_publish(struct md_cgroup_member *,pid_t,pid_t,struct md_pid_identity *,struct md_pid_identity *);
 void md_cgroup_member_depart(struct md_cgroup_member *,pid_t);
+/* Requested state is independent from the supervisor's confirmed suspension.
+ * Generation changes wake the existing resource loop, never a periodic scan. */
+uint64_t md_cgroup_freezer_generation(const struct md_cgroup_member *);
+int md_cgroup_member_freezing(const struct md_cgroup_member *);
+void md_cgroup_member_frozen(struct md_cgroup_member *,int);
 /* A unified hierarchy, a permissive v1 devices hierarchy and named v1
  * membership hierarchies per launch. Mounts, namespaces and open controls
  * retain them. Resource policy is not enforced against Android cgroups. */

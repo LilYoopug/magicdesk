@@ -5,6 +5,7 @@
 #include <linux/magic.h>
 #include <linux/mount.h>
 #include <linux/nsfs.h>
+#include <linux/sched.h>
 #include <sched.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -21,6 +22,9 @@
 #include <sys/epoll.h>
 #include <sys/inotify.h>
 #include <sys/ptrace.h>
+#include <sys/mman.h>
+#include <stdatomic.h>
+#include <time.h>
 
 static const char *membership_proc="/proc";
 static void delegation_metadata(void) {
@@ -90,6 +94,115 @@ static int writing(const char *path,const char *text) {
     int fd=open(path,O_WRONLY|O_CLOEXEC|O_NOCTTY); assert(fd>=0);
     ssize_t n=write(fd,text,strlen(text)); int error=errno; close(fd); errno=error;
     return (int)n;
+}
+static struct { atomic_ulong count; atomic_uint signals; } *freeze_shared;
+static void freeze_signal(int signal) { (void)signal; ++freeze_shared->signals; }
+static void *freeze_worker(void *unused) {
+    (void)unused;
+    for (;;) atomic_fetch_add_explicit(&freeze_shared->count,1,memory_order_relaxed);
+    return NULL;
+}
+static long long monotonic_ms(void) {
+    struct timespec now; assert(!clock_gettime(CLOCK_MONOTONIC,&now));
+    return (long long)now.tv_sec*1000+now.tv_nsec/1000000;
+}
+static void await_frozen(const char *group,int frozen) {
+    char path[256]; snprintf(path,sizeof(path),"%s/cgroup.events",group);
+    int fd=open(path,O_RDONLY|O_CLOEXEC); assert(fd>=0);
+    long long deadline=monotonic_ms()+5000;
+    for (;;) {
+        char text[128]; assert(!lseek(fd,0,SEEK_SET));
+        ssize_t n=read(fd,text,sizeof(text)-1); assert(n>0); text[n]=0;
+        if (strstr(text,frozen ? "frozen 1\n" : "frozen 0\n")) break;
+        int left=(int)(deadline-monotonic_ms()); assert(left>0);
+        struct pollfd event={.fd=fd,.events=POLLPRI};
+        /* EVENT_WAIT: freezer completion changes cgroup.events; expiry fails. */
+        int ready=poll(&event,1,left);
+        if (ready<=0) fprintf(stderr,"freezer %s wanted=%d state=%s\n",group,frozen,text);
+        assert(ready==1);
+    }
+    close(fd);
+}
+static void freezer_newborn(const char *leaf) {
+    int newborn[2]; assert(!pipe(newborn));
+    int group=open(leaf,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(group>=0);
+    struct clone_args args={.flags=CLONE_INTO_CGROUP,.exit_signal=SIGCHLD,.cgroup=(unsigned)group};
+    pid_t child=(pid_t)syscall(SYS_clone3,&args,sizeof(args)); assert(child>=0);
+    if (!child) { assert(write(newborn[1],"x",1)==1); _exit(0); }
+    close(group); close(newborn[1]);
+    await_frozen(leaf,1);
+    struct pollfd pending={.fd=newborn[0],.events=POLLIN};
+    assert(!poll(&pending,1,50));
+    char pid[32],byte; snprintf(pid,sizeof(pid),"%d",child);
+    assert(writing("/tmp/cgv2/cgroup.procs",pid)==(int)strlen(pid));
+    /* EVENT_WAIT: migration out of the frozen subtree releases the newborn. */
+    assert(poll(&pending,1,5000)==1 && read(newborn[0],&byte,1)==1); close(newborn[0]);
+    int status;
+    assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    await_frozen(leaf,1);
+}
+static void freezer_groups(void) {
+    const char *base="/tmp/cgv2/freezer",*leaf="/tmp/cgv2/freezer/leaf";
+    assert(!mkdir(base,0700) && !mkdir(leaf,0700));
+    assert(writing("/tmp/cgv2/freezer/leaf/cgroup.freeze","1")==1);
+    await_frozen(leaf,1);
+    freezer_newborn(leaf);
+    assert(writing("/tmp/cgv2/freezer/leaf/cgroup.freeze","0")==1);
+    await_frozen(leaf,0);
+    freeze_shared=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
+    assert(freeze_shared!=MAP_FAILED);
+    atomic_init(&freeze_shared->count,0); atomic_init(&freeze_shared->signals,0);
+    int ready[2],finish[2]; assert(!pipe(ready) && !pipe(finish));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        close(ready[0]); close(finish[1]);
+        struct sigaction action={.sa_handler=freeze_signal,.sa_flags=SA_RESTART};
+        assert(!sigaction(SIGUSR1,&action,NULL));
+        assert(writing("/tmp/cgv2/freezer/leaf/cgroup.procs","0")==1);
+        pthread_t worker; assert(!pthread_create(&worker,NULL,freeze_worker,NULL));
+        assert(write(ready[1],"x",1)==1);
+        char byte; assert(read(finish[0],&byte,1)==1); _exit(0);
+    }
+    close(ready[1]); close(finish[0]);
+    char byte; assert(read(ready[0],&byte,1)==1); close(ready[0]);
+    for (unsigned i=0;i<3;++i) {
+        assert(writing("/tmp/cgv2/freezer/cgroup.freeze","1")==1);
+        await_frozen(base,1); await_frozen(leaf,1);
+        unsigned long before=freeze_shared->count;
+        unsigned signals=freeze_shared->signals;
+        assert(!kill(child,SIGUSR1));
+        /* Negative execution assertion over a real scheduling interval. */
+        assert(!poll(NULL,0,100));
+        assert(freeze_shared->count==before && freeze_shared->signals==signals);
+        assert(writing("/tmp/cgv2/freezer/leaf/cgroup.freeze","1")==1);
+        assert(writing("/tmp/cgv2/freezer/cgroup.freeze","0")==1);
+        await_frozen(base,0); await_frozen(leaf,1);
+        assert(!poll(NULL,0,30)); assert(freeze_shared->count==before);
+        assert(writing("/tmp/cgv2/freezer/leaf/cgroup.freeze","0")==1);
+        await_frozen(leaf,0);
+        long long deadline=monotonic_ms()+5000;
+        while (freeze_shared->count==before || freeze_shared->signals==signals) {
+            assert(monotonic_ms()<deadline); sched_yield();
+        }
+    }
+    assert(!kill(child,SIGSTOP));
+    int status; assert(waitpid(child,&status,WUNTRACED)==child && WIFSTOPPED(status));
+    assert(writing("/tmp/cgv2/freezer/leaf/cgroup.freeze","1")==1);
+    await_frozen(leaf,1);
+    assert(writing("/tmp/cgv2/freezer/leaf/cgroup.freeze","0")==1);
+    await_frozen(leaf,0);
+    unsigned long before=freeze_shared->count;
+    assert(!poll(NULL,0,50)); assert(freeze_shared->count==before);
+    assert(!kill(child,SIGCONT));
+    assert(writing("/tmp/cgv2/freezer/leaf/cgroup.freeze","1")==1);
+    await_frozen(leaf,1);
+    assert(!kill(child,SIGKILL));
+    assert(waitpid(child,&status,0)==child && WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL);
+    await_frozen(leaf,1);
+    freezer_newborn(leaf);
+    close(finish[1]); assert(!munmap(freeze_shared,4096));
+    assert(!rmdir(leaf) && !rmdir(base));
+    puts("PASS cgroup freezer: threads, blocked IO, nested thaw, signals, job control, fatal exit, clone3 and migration");
 }
 static void named_hierarchies(void) {
     const char *first="/tmp/cg-named",*alias="/tmp/cg-named-alias",*other="/tmp/cg-other";
@@ -435,6 +548,7 @@ int test_cgroup_guest(int pid_namespace) {
         close(retired); assert(!rmdir("/tmp/cgv2/reused"));
     }
     read_text("/proc/cgroups",text,sizeof(text)); assert(strstr(text,"devices\t1\t1\t1"));
+    freezer_groups();
     assert(!umount2("/tmp/cgv2",0) && !umount2("/tmp/cgv1",0));
     assert(!rmdir("/tmp/cgv2") && !rmdir("/tmp/cgv1"));
     puts("PASS guest cgroup: membership, fork, typed IO, readonly, permissive pids and devices"); return 0;
