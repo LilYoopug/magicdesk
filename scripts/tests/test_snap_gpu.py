@@ -75,6 +75,37 @@ class SnapGPUTest(unittest.TestCase):
             self.helper.wait_for_component(Path('/snap/mesa-2404/123'), 'ready')
             wait.assert_not_called()
 
+    def test_new_or_unpublished_content_restarts_monitor_but_ready_content_does_not(self):
+        self.helper.SNAP_DATA = self.directory / 'data'
+        marker = self.helper.SNAP_DATA / '123/kernel-gpu-2404/kernel-gpu-2404-sentinel'
+        marker.parent.mkdir(parents=True)
+        provider = Path('/snap/mesa-2404/123')
+        for previous in (None, 'old', 'ready'):
+            with self.subTest(previous=previous):
+                marker.unlink(missing_ok=True)
+                if previous is not None:
+                    marker.write_text(previous + '\n')
+                calls = []
+                with patch.object(self.helper, 'run', side_effect=lambda argv: calls.append(argv)), \
+                     patch.object(self.helper, 'wait_for_component',
+                                  side_effect=lambda *args: calls.append(('wait', *args))):
+                    self.helper.publish_component(provider, 'ready')
+                expected = [['snap', 'start', '--enable', 'mesa-2404.component-monitor']]
+                if previous != 'ready':
+                    expected.append(['snap', 'restart', 'mesa-2404.component-monitor'])
+                self.assertEqual(calls, expected + [('wait', provider, 'ready')])
+
+    def test_monitor_restart_failure_is_not_successful_publication(self):
+        self.helper.SNAP_DATA = self.directory / 'data'
+        def run(argv):
+            if argv[1] == 'restart':
+                raise subprocess.CalledProcessError(1, argv)
+        with patch.object(self.helper, 'run', side_effect=run), \
+             patch.object(self.helper, 'wait_for_component') as wait:
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.helper.publish_component(Path('/snap/mesa-2404/123'), 'new')
+            wait.assert_not_called()
+
     def test_external_library_symlink_is_rejected(self):
         (self.prefix / 'lib/escape.so').symlink_to('/etc/passwd')
         with self.assertRaisesRegex(ValueError, 'escapes'):

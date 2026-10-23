@@ -442,7 +442,10 @@ Turnip setup installs distribution-specific build dependencies and compiles Mesa
 non-DRM Wayland/Zink and capability-probed KGSL timestamp changes are embedded
 in the installer and applied without fuzz. All distribution recipes share this
 patch, including non-DRM EGLDevice identification from the real driver's
-acceleration capability and UUID. An APK update does not rebuild installed
+acceleration capability and UUID. Empty Mesa worker queues defer thread creation
+until their first job, allowing Chromium to enter its ordinary GPU sandbox after
+driver initialization. Explicit worker counts and parallel scheduling remain
+unchanged once work starts. An APK update does not rebuild installed
 Mesa: use the resume command above, then restart the affected applications.
 Turnip, Zink, EGL,
 GLX and GBM come from that same build. Zink also supports GPU rendering with
@@ -473,6 +476,11 @@ replacement enables it for new launches. Failure preserves the previous profile;
 existing programs are not restarted. This suitability check is not proof that
 every OpenGL application renders correctly. Build/render checks cover Debian
 and SteamOS configurations; other toolchains and GPUs require separate validation.
+On musl guests, activation also publishes the selected library directory in
+`/etc/ld-musl-aarch64.path`, preserving unrelated administrator paths. This keeps
+driver lookup stable when an application rewrites its initial environment;
+`LD_LIBRARY_PATH` alone is insufficient. Switching profiles removes only the
+previously selected private directory. glibc retains its existing discovery path.
 Software fallback uses the distribution's unchanged libraries.
 SteamOS's supplied Mesa contains Zink but no Gallium llvmpipe driver. Its software
 profile installs the official `vulkan-swrast` and matching `llvm17-libs` packages
@@ -802,8 +810,11 @@ See the [init matrix](../native/guest-exec-lab/init-matrix.md) and
 and exact assertions. The recipe adds `ConditionVirtualization=!container` to
 systemd's module-loading units: they do not modify the host kernel in a container,
 but remain available for a native boot of an exported rootfs. This is applied
-after package setup, including `--resume`; it does not mask other services or
-hide their failures. Older Debian/openKylin checks explicitly dropped
+after package setup, including `--resume`. A systemd generator additionally
+masks host binfmt registration and the recovery image's physical Deckard/SteamVR
+services and partition-set mounts for container boots only. Its runtime output
+does not change packaged units or administrator overrides; native boots retain
+them. Ordinary service failures remain visible. Older Debian/openKylin checks explicitly dropped
 `CAP_SYS_MODULE`. Unavailable hardware still needs appropriate configuration.
 SteamOS's default boot remains degraded on
 hardware/network units. Passing a userspace boot does not certify a display

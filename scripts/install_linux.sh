@@ -229,6 +229,139 @@ Zink retains GPU rendering with sw_winsys readback presentation when the client
 disables Kopper or the X server lacks DRI3. Direct Vulkan presentation is unchanged.
 Readback requires a presenting winsys; Kopper's loader-less DRI winsys does not
 advertise that callback, so offscreen flushes retain their original no-op behavior.
+Worker queues start on their first submitted job, not empty initialization, so
+driver enumeration/context setup does not prevent a later single-thread sandbox.
+Explicit worker counts and normal parallel scheduling are retained after startup.
+
+--- a/src/util/u_queue.c
++++ b/src/util/u_queue.c
+@@ -44,6 +44,10 @@
+
+ /* Define 256MB */
+ #define S_256MB (256 * 1024 * 1024)
++/* Private state: num_threads is the requested count until the first job.
++ * Empty queues must not create threads before an application enters a sandbox.
++ */
++#define UTIL_QUEUE_DEFERRED (1u << 31)
+
+ static void
+ util_queue_kill_threads(struct util_queue *queue, unsigned keep_num_threads,
+@@ -325,6 +329,8 @@
+ {
+    struct thread_input *input =
+       (struct thread_input *) malloc(sizeof(struct thread_input));
++   if (!input)
++      return false;
+    input->queue = queue;
+    input->thread_index = index;
+
+@@ -362,6 +368,13 @@
+
+    unsigned old_num_threads = queue->num_threads;
+
++   if (queue->flags & UTIL_QUEUE_DEFERRED) {
++      queue->num_threads = num_threads;
++      if (!locked)
++         mtx_unlock(&queue->lock);
++      return;
++   }
++
+    if (num_threads == old_num_threads) {
+       if (!locked)
+          mtx_unlock(&queue->lock);
+@@ -400,8 +413,6 @@
+                 unsigned flags,
+                 void *global_data)
+ {
+-   unsigned i;
+-
+    /* Form the thread name from process_name and name, limited to 13
+     * characters. Characters 14-15 are reserved for the thread number.
+     * Character 16 should be 0. Final form: "process:name12"
+@@ -431,7 +442,7 @@
+    }
+
+    queue->create_threads_on_demand = true;
+-   queue->flags = flags;
++   queue->flags = flags | UTIL_QUEUE_DEFERRED;
+    queue->max_threads = num_threads;
+    queue->num_threads = 1;
+    queue->max_jobs = max_jobs;
+@@ -452,20 +463,6 @@
+    if (!queue->threads)
+       goto fail;
+
+-   /* start threads */
+-   for (i = 0; i < queue->num_threads; i++) {
+-      if (!util_queue_create_thread(queue, i)) {
+-         if (i == 0) {
+-            /* no threads created, fail */
+-            goto fail;
+-         } else {
+-            /* at least one thread created, so use it */
+-            queue->num_threads = i;
+-            break;
+-         }
+-      }
+-   }
+-
+    add_to_atexit_list(queue);
+    return true;
+
+@@ -491,6 +488,15 @@
+    if (!locked)
+       mtx_lock(&queue->lock);
+
++   if (queue->flags & UTIL_QUEUE_DEFERRED) {
++      queue->num_threads = MIN2(queue->num_threads, keep_num_threads);
++      if (!queue->num_threads)
++         queue->flags &= ~UTIL_QUEUE_DEFERRED;
++      if (!locked)
++         mtx_unlock(&queue->lock);
++      return;
++   }
++
+    if (keep_num_threads >= queue->num_threads) {
+       if (!locked)
+          mtx_unlock(&queue->lock);
+@@ -555,6 +561,19 @@
+
+    if (!locked)
+       mtx_lock(&queue->lock);
++   if (queue->flags & UTIL_QUEUE_DEFERRED) {
++      unsigned wanted = queue->num_threads;
++      queue->flags &= ~UTIL_QUEUE_DEFERRED;
++      queue->num_threads = 0;
++      util_queue_adjust_num_threads(queue, wanted, true);
++      if (!queue->num_threads) {
++         /* add_job has no error return: never drop work or leave an unsignalled
++          * fence when the first worker cannot be started.
++          */
++         fprintf(stderr, "Mesa: could not start worker queue %s\n", queue->name);
++         abort();
++      }
++   }
+    if (queue->num_threads == 0) {
+       if (!locked)
+          mtx_unlock(&queue->lock);
+@@ -699,7 +718,7 @@
+    mtx_lock(&queue->lock);
+
+    /* The number of threads can be changed to 0, e.g. by the atexit handler. */
+-   if (!queue->num_threads) {
++   if (!queue->num_threads || (queue->flags & UTIL_QUEUE_DEFERRED)) {
+       mtx_unlock(&queue->lock);
+       return;
+    }
+@@ -736,7 +755,7 @@
+ util_queue_get_thread_time_nano(struct util_queue *queue, unsigned thread_index)
+ {
+    /* Allow some flexibility by not raising an error. */
+-   if (thread_index >= queue->num_threads)
++   if (thread_index >= queue->num_threads || (queue->flags & UTIL_QUEUE_DEFERRED))
+       return 0;
+
+    return util_thread_get_time_nano(queue->threads[thread_index]);
 
 --- a/src/glx/drisw_glx.c
 +++ b/src/glx/drisw_glx.c
@@ -2482,6 +2615,20 @@ def check_connection():
                 raise ValueError('mesa-2404 already uses another GPU provider; disconnect it explicitly')
 
 
+def publish_component(provider, identity):
+    run(['snap', 'start', '--enable', 'mesa-2404.component-monitor'])
+    marker = SNAP_DATA / provider.name / 'kernel-gpu-2404/kernel-gpu-2404-sentinel'
+    try:
+        ready = marker.read_text().strip() == identity
+    except FileNotFoundError:
+        ready = False
+    if not ready:
+        # An existing monitor retains its old content mount across a connection
+        # update. Restart through snapd to enter the newly prepared namespace.
+        run(['snap', 'restart', 'mesa-2404.component-monitor'])
+    wait_for_component(provider, identity)
+
+
 def wait_for_component(provider, identity):
     directory = SNAP_DATA / provider.name / 'kernel-gpu-2404'
     marker = directory / 'kernel-gpu-2404-sentinel'
@@ -2645,8 +2792,7 @@ def main():
             # Locally built content is unsigned; this does not disable confinement.
             run(['snap', 'install', '--dangerous', str(image)])
         run(['snap', 'connect', 'mesa-2404:kernel-gpu-2404', NAME + ':kernel-gpu-2404'])
-        run(['snap', 'start', '--enable', 'mesa-2404.component-monitor'])
-        wait_for_component(provider, identity)
+        publish_component(provider, identity)
         print('Snap GPU connected. Applications keep their mesa-2404:gpu-2404 connection.')
 
 
@@ -3087,6 +3233,34 @@ DRIVER_MANIFESTS
         mv -f "$egl_manifest.new" "$egl_manifest"
     else
         rm -f "$vulkan_manifest" "$egl_manifest"
+    fi
+    if [ -e /lib/ld-musl-aarch64.so.1 ] &&
+            { [ "$gpu" = turnip ] || [ -r /etc/magicdesk/mesa-prefix ]; }; then
+        # musl retains pointers into the initial environment. Programs which
+        # rewrite argv/environ (including Chromium's zygote) need system lookup
+        # too, as do protected programs which cannot use LD_LIBRARY_PATH.
+        python3 - "$gpu" "${prefix:-}" <<'MUSL_GRAPHICS_PATH'
+from pathlib import Path
+import sys
+
+path = Path('/etc/ld-musl-aarch64.path')
+marker = Path('/etc/magicdesk/mesa-prefix')
+previous_prefix = marker.read_text().strip() if marker.is_file() else ''
+previous = previous_prefix + '/lib' if previous_prefix else None
+selected = sys.argv[2] + '/lib' if sys.argv[1] == 'turnip' else None
+contents = path.read_text() if path.exists() else '/lib:/usr/local/lib:/usr/lib'
+paths = [item for item in contents.replace(':', '\n').split('\n')
+         if item and item not in (previous, selected)]
+if selected:
+    paths.insert(0, selected)
+temporary = path.with_name(path.name + '.new')
+try:
+    temporary.write_text('\n'.join(paths) + '\n')
+    temporary.chmod(0o644)
+    temporary.replace(path)
+finally:
+    temporary.unlink(missing_ok=True)
+MUSL_GRAPHICS_PATH
     fi
 )
 # Disable old discovery before replacing its profile. A failed activation may
@@ -3754,6 +3928,32 @@ if [ -d /usr/lib/systemd/system ] || [ -d /lib/systemd/system ]; then
         mkdir -p "/etc/systemd/system/$unit.d"
         printf '[Unit]\nConditionVirtualization=!container\n' > "/etc/systemd/system/$unit.d/50-magicdesk-container.conf"
     done
+    # A runtime mask also excludes dependencies of physical mount units. A
+    # condition on home.mount alone would still pull in its disk/fsck jobs.
+    mkdir -p /usr/local/lib/systemd/system-generators
+    cat > /usr/local/lib/systemd/system-generators/magicdesk-container-hardware <<'CONTAINER_HARDWARE'
+#!/bin/sh
+set -eu
+systemd-detect-virt --container --quiet || exit 0
+for unit in proc-sys-fs-binfmt_misc.mount systemd-binfmt.service \
+    deckard-audio-setup.service deckard-boot-images.service deckard-fpga.service \
+    deckard-led-control.service deckard-typec-logger.service deckard-power-monitor.service \
+    deckard-charger.service deckard-fan-control.service gpu-trace.service steamos-boot.service \
+    steamvr-program-ble.service steamvr-set-kernel-thread-priorities.service \
+    steamvr-v4l2loopback.service; do
+    if [ -f "/usr/lib/systemd/system/$unit" ] || [ -f "/lib/systemd/system/$unit" ]; then
+        ln -sf /dev/null "$1/$unit"
+    fi
+done
+# Only vendor partition-set mounts. Administrator units in /etc take priority
+# over this normal-priority generator output and are never rewritten.
+for path in /usr/lib/systemd/system/*.mount /lib/systemd/system/*.mount; do
+    if [ -f "$path" ] && grep -q '^What=/dev/disk/by-partsets/' "$path"; then
+        ln -sf /dev/null "$1/${path##*/}"
+    fi
+done
+CONTAINER_HARDWARE
+    chmod 755 /usr/local/lib/systemd/system-generators/magicdesk-container-hardware
 fi
 if [ -d /etc/runit ]; then
     mkdir -p /usr/local/libexec

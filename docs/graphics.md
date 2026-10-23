@@ -275,6 +275,9 @@ Firefox-specific mount or runtime exception. Absolute host driver paths are
 replaced with paths inside the mounted content. The helper will not replace an
 already connected third-party provider. A bounded inotify wait checks the
 monitor's publication marker; starting its service alone is not success.
+If the requested content is not yet published, preparation restarts the monitor
+through snapd so it acquires the updated content mount. An unchanged, already
+published bundle does not restart the service.
 
 `snap install --dangerous` here admits the locally built unsigned driver package;
 it does not request classic/devmode or disable the application's seccomp sandbox.

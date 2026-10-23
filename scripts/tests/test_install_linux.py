@@ -642,7 +642,7 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
         self.assertGreater(start, setup.index('packages $extras'))
         root = self.directory / 'systemd-root'
         root.mkdir()
-        fragment = re.sub(r'/(?:usr/lib|lib|etc)/systemd/system|/etc/(?:runit|sv)',
+        fragment = re.sub(r'/(?:usr/local/lib|usr/lib|lib|etc)/systemd/(?:system-generators|system)|/etc/(?:runit|sv)',
                           lambda match: str(root) + match[0], setup[start:end])
         # EVENT_WAIT: the isolated recipe fragment exits without host changes.
         def prepare():
@@ -658,7 +658,35 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
             (path / '90-user.conf').write_text('[Unit]\nDescription=Retained\n')
         prepare()
         self.assertEqual('[Unit]\nDescription=Retained\n', (path / '90-user.conf').read_text())
-        self.assertNotIn('/dev/null', fragment)
+        units = root / 'usr/lib/systemd/system'
+        (units / 'deckard-fpga.service').write_text('[Service]\nExecStart=/bin/false\n')
+        (units / 'home.mount').write_text('[Mount]\nWhat=/dev/disk/by-partsets/shared/home\nWhere=/home\n')
+        override = root / 'etc/systemd/system/home.mount'
+        override.write_text('[Mount]\nWhat=/dev/my-home\nWhere=/home\n')
+        generator = root / 'usr/local/lib/systemd/system-generators/magicdesk-container-hardware'
+        output = root / 'generated'
+        output.mkdir()
+        commands = root / 'bin'
+        commands.mkdir()
+        detect = commands / 'systemd-detect-virt'
+        detect.write_text('#!/bin/sh\ntest "$*" = "--container --quiet" || exit 2\nexit "$TEST_NATIVE"\n')
+        detect.chmod(0o755)
+        env = {**os.environ, 'PATH': str(commands) + ':' + os.environ['PATH']}
+        # EVENT_WAIT: generator completion; native boot must retain vendor units.
+        subprocess.run(['sh', str(generator), str(output)], check=True,
+                       env={**env, 'TEST_NATIVE': '1'}, timeout=5)
+        self.assertEqual([], list(output.iterdir()))
+        for _ in range(2):
+            subprocess.run(['sh', str(generator), str(output)], check=True,
+                           env={**env, 'TEST_NATIVE': '0'}, timeout=5)
+        self.assertEqual({'home.mount', 'deckard-fpga.service'}, {p.name for p in output.iterdir()})
+        self.assertTrue(all(p.is_symlink() and os.readlink(p) == '/dev/null' for p in output.iterdir()))
+        self.assertEqual('[Mount]\nWhat=/dev/my-home\nWhere=/home\n', override.read_text())
+        (output / 'home.mount').unlink()
+        (units / 'home.mount').write_text('[Mount]\nWhat=/dev/other\nWhere=/home\n')
+        subprocess.run(['sh', str(generator), str(output)], check=True,
+                       env={**env, 'TEST_NATIVE': '0'}, timeout=5)
+        self.assertFalse((output / 'home.mount').is_symlink())
 
     def test_pacman_keeps_installed_dependency_providers(self):
         setup = self.run_script('--print-system-setup').stdout
@@ -2130,6 +2158,8 @@ packages ninja meson pkgconf
             .replace('/etc/vulkan', str(self.directory / 'etc-vulkan')) \
             .replace('/etc/glvnd', str(self.directory / 'etc-glvnd')) \
             .replace('/etc/magicdesk/', str(self.directory / 'etc-magicdesk') + '/') \
+            .replace('/lib/ld-musl-aarch64.so.1', str(self.directory / 'musl-loader')) \
+            .replace('/etc/ld-musl-aarch64.path', str(self.directory / 'musl-path')) \
             .replace('/usr/share/flatpak/triggers', str(self.directory / 'triggers'))
 
     def private_mesa_prefix(self):
@@ -2179,6 +2209,52 @@ packages ninja meson pkgconf
                     self.assertEqual("zink|zink|" + str(prefix / 'lib/gbm'), activated.stdout)
                 else:
                     self.assertEqual("previous profile\n", profile.read_text())
+
+    def test_musl_graphics_system_lookup_follows_profile(self):
+        recipe = self.profile_recipe()
+        prefix = self.private_mesa_prefix()
+        profile = self.directory / 'graphics.sh'
+        lookup = self.directory / 'musl-path'
+        marker = self.directory / 'etc-magicdesk/mesa-prefix'
+        probe = self.directory / 'vulkaninfo'
+        probe.write_text('#!/bin/sh\necho driverID = DRIVER_ID_MESA_TURNIP\n')
+        probe.chmod(0o755)
+        environment = dict(self.environment, gpu='turnip', ID='alpine', automatic='no',
+                           prefix=str(prefix), candidate=str(profile) + '.new',
+                           profile=str(profile), work=str(self.directory))
+
+        def activate(**changes):
+            subprocess.run(['sh', '-eu', '-c', recipe], env=dict(environment, **changes),
+                           capture_output=True, text=True, check=True, timeout=5)
+
+        # glibc must not acquire a musl configuration, regardless of distro ID.
+        activate()
+        self.assertFalse(lookup.exists())
+        (self.directory / 'musl-loader').touch()
+        defaults = ['/lib', '/usr/local/lib', '/usr/lib']
+        activate()
+        self.assertEqual([str(prefix / 'lib'), *defaults], lookup.read_text().splitlines())
+        self.assertEqual(0o644, lookup.stat().st_mode & 0o777)
+        activate()
+        self.assertEqual([str(prefix / 'lib'), *defaults], lookup.read_text().splitlines())
+
+        marker.write_text('/opt/previous\n')
+        lookup.write_text('/custom:/opt/previous/lib:/lib\n/other:/usr/lib\n')
+        activate()
+        self.assertEqual([str(prefix / 'lib'), '/custom', '/lib', '/other', '/usr/lib'],
+                         lookup.read_text().splitlines())
+        activate(gpu='software')
+        self.assertEqual(['/custom', '/lib', '/other', '/usr/lib'], lookup.read_text().splitlines())
+        self.assertFalse(marker.exists())
+        self.assertFalse(lookup.with_name(lookup.name + '.new').exists())
+
+        # A failed driver probe cannot publish a new system lookup path.
+        probe.write_text('#!/bin/sh\nexit 1\n')
+        before = lookup.read_bytes()
+        result = subprocess.run(['sh', '-eu', '-c', recipe], env=environment,
+                                capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual(before, lookup.read_bytes())
 
     def test_profile_missing_driver_preserves_previous_selection(self):
         recipe = self.profile_recipe()
