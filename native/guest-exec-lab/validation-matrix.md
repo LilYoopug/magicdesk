@@ -53,8 +53,8 @@ not just a completed Mesa build or successful device enumeration.
 | Recipe ID | Recipe setup | Package lifecycle | PID 1 boot | Service lifecycle | Turnip rendering |
 | --- | --- | --- | --- | --- | --- |
 | debian | P/N | I/N | P/N | P/N | I/N |
-| ubuntu | H/N | H/N | H/N | H/N | I/N |
-| alpine | P/N | I/N | I/N | I/N | I/N |
+| ubuntu | P/N | P/N | P/N | I/N | P/N |
+| alpine | P/N | P/N | P/N | P/N | P/N |
 | fedora | P/N | P/N | P/N | P/N | P/N |
 | arch | P/N | P/N | P/N | P/N | I/N |
 | opensuse | P/N | I/N | P/N | P/N | N/N |
@@ -63,12 +63,12 @@ not just a completed Mesa build or successful device enumeration.
 | manjaro | P/N | N/N | H/N | H/N | N/N |
 | void | P/N | N/N | P/N | P/N | I/N |
 | armtix | P/N | P/N | F/N | P/N | N/N |
-| steamos | H/N | H/N | H/N | H/N | H/N |
+| steamos | P/N | I/N | F/N | I/N | I/N |
 
 Package lifecycle means install, update/reinstall, verification and removal,
 including transaction hooks. A zero package-manager exit with failed hooks is
-not a pass. Historical SteamOS default boot remains degraded; H must not be
-read as a healthy default target. See [init contracts and limits](init-matrix.md).
+not a pass. SteamOS default boot remains degraded; focused control-target tests
+do not certify a healthy default target. See [init contracts and limits](init-matrix.md).
 
 ## Containers And Virtual Machines
 
@@ -87,8 +87,8 @@ neither a TCG pass nor guest `/dev/kvm` absence establishes host KVM availabilit
 | Recipe ID | Docker | Podman | Libvirt + QEMU | QEMU TCG boot |
 | --- | --- | --- | --- | --- |
 | debian | P/N | P/N | P/N | P/N |
-| ubuntu | P/N | P/N | N/N | N/N |
-| alpine | P/N | P/N | N/N | N/N |
+| ubuntu | P/N | P/N | P/N | P/N |
+| alpine | P/N | P/N | P/N | P/N |
 | fedora | P/N | P/N | P/N | P/N |
 | arch | P/N | P/N | P/N | P/N |
 | opensuse | P/N | P/N | P/N | P/N |
@@ -97,7 +97,7 @@ neither a TCG pass nor guest `/dev/kvm` absence establishes host KVM availabilit
 | manjaro | P/N | P/N | P/N | P/N |
 | void | P/N | P/N | P/N | P/N |
 | armtix | P/N | P/N | P/N | P/N |
-| steamos | H/N | P/N | N/N | N/N |
+| steamos | P/N | P/N | N/N | P/N |
 
 ## Packaged Browsers And Portals
 
@@ -112,8 +112,8 @@ certify Snap. Snap's documented degraded mode is not AppArmor enforcement.
 | Recipe ID | Flatpak Chromium | Flatpak Firefox | Snap Chromium | Snap Firefox | Document portal |
 | --- | --- | --- | --- | --- | --- |
 | debian | I/N | N/N | N/N | N/N | I/N |
-| ubuntu | N/N | N/N | I/N | H/N | H/N |
-| alpine | N/N | N/N | N/N | N/N | N/N |
+| ubuntu | N/N | N/N | P/N | P/N | P/N |
+| alpine | N/N | N/N | NA/NA | NA/NA | N/N |
 | fedora | N/N | I/N | N/N | N/N | I/N |
 | arch | N/N | N/N | N/N | N/N | N/N |
 | opensuse | N/N | N/N | N/N | N/N | N/N |
@@ -122,7 +122,7 @@ certify Snap. Snap's documented degraded mode is not AppArmor enforcement.
 | manjaro | N/N | N/N | N/N | N/N | N/N |
 | void | P/N | P/N | N/N | N/N | P/N |
 | armtix | P/N | P/N | N/N | N/N | P/N |
-| steamos | H/N | H/N | N/N | N/N | H/N |
+| steamos | H/N | F/N | N/N | N/N | I/N |
 
 ## Desktop And Development
 
@@ -136,8 +136,8 @@ Gamepads need real buttons, axes and reconnect. Steam login is not gameplay.
 | Recipe ID | Desktop | Native Chromium | Native Firefox | VS Code | Audio | Gamepad | Steam/game |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | debian | I/N | N/N | N/N | I/N | N/N | N/N | N/N |
-| ubuntu | I/N | N/N | N/N | H/N | N/N | N/N | N/N |
-| alpine | I/N | F/N | N/N | N/N | N/N | N/N | N/N |
+| ubuntu | I/N | N/N | N/N | P/N | N/N | N/N | N/N |
+| alpine | I/N | P/N | P/N | N/N | N/N | N/N | N/N |
 | fedora | I/N | N/N | N/N | I/N | N/N | N/N | N/N |
 | arch | I/N | N/N | N/N | N/N | N/N | N/N | N/N |
 | opensuse | N/N | N/N | N/N | N/N | N/N | N/N | N/N |
@@ -146,7 +146,7 @@ Gamepads need real buttons, axes and reconnect. Steam login is not gameplay.
 | manjaro | N/N | N/N | N/N | N/N | N/N | N/N | N/N |
 | void | I/N | N/N | N/N | P/N | N/N | N/N | N/N |
 | armtix | I/N | N/N | N/N | P/N | N/N | N/N | N/N |
-| steamos | H/N | N/N | N/N | H/N | H/N | H/N | H/N |
+| steamos | I/N | N/N | N/N | H/N | H/N | H/N | F/N |
 
 Preserve separate application/package versions in the receipt.
 Historical Fedora GNOME devkit/llvmpipe coverage does not certify GDM or hardware
@@ -163,8 +163,8 @@ OS owning machined and the stock nspawn unit; record the nested OS separately.
 | Recipe ID | nspawn command | machinectl boot/lifecycle | BuildKit | LXC | LTP core |
 | --- | --- | --- | --- | --- | --- |
 | debian | N/N | P/N | N/N | N/N | N/N |
-| ubuntu | N/N | N/N | N/N | N/N | N/N |
-| alpine | N/N | N/N | N/N | N/N | N/N |
+| ubuntu | N/N | P/N | P/N | P/N | P/N |
+| alpine | NA/NA | NA/NA | P/N | P/N | P/N |
 | fedora | N/N | P/N | P/N | P/N | I/N |
 | arch | I/N | P/N | P/N | P/N | N/N |
 | opensuse | N/N | P/N | P/N | P/N | I/N |
@@ -173,7 +173,7 @@ OS owning machined and the stock nspawn unit; record the nested OS separately.
 | manjaro | N/N | P/N | P/N | P/N | P/N |
 | void | N/N | N/N | P/N | P/N | P/N |
 | armtix | N/N | N/N | P/N | P/N | P/N |
-| steamos | N/N | N/N | N/N | N/N | N/N |
+| steamos | N/N | P/N | P/N | F/N | P/N |
 
 ### Workload Contracts
 
@@ -320,22 +320,44 @@ tests. Local report paths identify evidence, not durable public downloads.
 | Fedora direct QEMU | `build/installed-fedora-turnip/oci-services-df0485453492407c98ccc883ccf88508.json`; QEMU 10.2.2, ARM64 kernel/initramfs serial boot and clean exit with TCG. KVM and VM networking are not covered |
 | Fedora BuildKit | `build/installed-fedora-turnip/oci-services-08b8e9442b0544c99e0ad3971addc562.json`; official BuildKit 0.34.1 ARM64 archive SHA-256 `c8c97b84baf89dfe0ea85063ac24ad88eb909979ea476ce3ef9e8e11e60ebef8`, Fedora CNI 1.9.1, TOML-configured OCI/overlayfs/CNI worker with sandbox. Multistage/cache/secret/export/run/cancel/cleanup pass; rootless/containerd workers and external networking untested |
 | Fedora LTP core | `build/installed-fedora-turnip/oci-services-4911f111f0124271b8ed88ec97db48f7.json`; reviewed 20250930 sources built with Fedora compiler/libc, guest UID 1000. Six complete binaries pass; `epoll_create01` has two libc passes and one TCONF for the absent ARM64 legacy `__NR_epoll_create` ABI. No failed/broken checks; partial coverage remains I, not P |
-| Alpine recipe setup | `build/installer-alpine-turnip.json`, `build/installer-alpine-turnip-graphics.json`; official Alpine 3.23.6 minirootfs, OpenRC, ordinary user `mdtester`, Weston and recipe-built Turnip 26.2.3. Package install/update passed; complete removal/hook lifecycle and default boot acceptance remain open |
-| Booted Alpine Docker | `build/installed-alpine-turnip/oci-services-2d14d73fd3fc4136a8657f02c699749c.json`; Docker 29.5.2, containerd 2.2.0, runc 1.4, overlay, nftables/no userland proxy; bridge TCP/UDP, peer names, local outbound, binds/exec, port conflicts and release |
-| Booted Alpine Podman | `build/installed-alpine-turnip/oci-services-53ce67cd91414e999b62de5d4724e954.json`; headless OpenRC, Podman 5.7.0, overlay, bridge with iptables frontend, stock seccomp and enabled cgroups; TCP/UDP, peer names, local outbound, binds/exec, conflicts and port release. Both containers pass internet access and 20 external DNS requests each |
-| Alpine graphics | Retained fixture `40b1817740c04f168813229740d5435e`, command `7e065d9b179442fa887e1e3248747928`: Weston renders with Zink/Turnip on Adreno 840; packaged Chromium 149 renders a page but its GPU process receives SIGSEGV and WebGL is unavailable. Full input/download/portal acceptance and ordinary udev control ownership remain open |
-| Booted Ubuntu containers | `build/installed-ubuntu-fuse/oci-services-f1b3c700b35d486a86254a0c5fa56278.json` (stock Docker service), `build/installed-ubuntu-fuse/oci-services-30c079114d4240b4bb0d70a16679bebe.json` (Podman, headless systemd/control target); staged native hashes in receipts. Bridge, published TCP/UDP, peer IP/name exchanges, binds/exec, conflicts and port release pass; both containers in each run also pass internet access and 20 external DNS requests each |
+| Alpine recipe setup | `build/installer-alpine-turnip.json`, `build/installer-alpine-turnip-graphics.json`; official Alpine 3.23.6 minirootfs, OpenRC, ordinary user `mdtester`, Weston and recipe-built Turnip 26.2.3. Current helper refresh: `build/alpine-recipe-matrix-current/oci-services-b1df331f4f7341bda5a6d27757e3116a.json`. `build/alpine-matrix-apk-complete.log` covers tree 2.2.1-r0 install/reinstall, package-file audit, removal and BusyBox trigger restoration |
+| Alpine OpenRC | `build/alpine-matrix-boot-current/oci-services-64622aa756d44ce9acb3d5bd338c99f0.json`; stock OpenRC 0.63 PID 1 with the fixture's explicit container runlevels and private bridge. Boot completion, syslog/crond start/restart/stop, PID retirement and exact launch cleanup pass. This does not certify host hardware services or unchanged bare-metal runlevels |
+| Booted Alpine Docker | `build/installed-alpine-turnip/oci-services-5d0cbe2689884d1083178d71f455d1b8.json`; Docker 29.5.2, stock OpenRC service without daemon.json, default containerd snapshotter/overlayfs and iptables-nft frontend; bridge TCP/UDP, peer names, local outbound, binds/exec, port conflicts and release. Both containers pass internet access and 20 external DNS requests each. This is separate from the previously tested explicit nftables/no-userland-proxy configuration |
+| Booted Alpine Podman | `build/installed-alpine-turnip/oci-services-6c8ac187f2a24a28b5a0ff39a3a4da88.json`; OpenRC, Podman 5.7.0, overlay, bridge with iptables frontend, stock seccomp and enabled cgroups; TCP/UDP, peer names, local outbound, binds/exec, conflicts and port release. Both containers pass internet access and 20 external DNS requests each. Installing its unconditional INPUT counter while Chromium already owns direct connections remains blocked with EBUSY; this pass starts Podman before browser traffic |
+| Alpine Libvirt/QEMU | `build/installed-alpine-turnip/oci-services-7d97ee05fd2b412eb251b22f9528c577.json`; packaged modular libvirt with virtlogd/virtqemud, managed TCG kernel/initrd boot, paused start/resume, serial, poweroff, undefine and cleanup. Direct QEMU: `build/installed-alpine-turnip/oci-services-2df2d3e800724350ba714170b9460593.json`. VM networking and KVM untested |
+| Alpine LXC | `build/installed-alpine-turnip/oci-services-3b4d3d68c4744f2dbec4999beb3cd33f.json`; packaged LXC 6.0.5, stock common policy/seccomp, nested Debian, attach/services, mounts, TCP/UDP, three normal/forced boot-stop cycles and exact process/veth/cgroup cleanup. Outer bridge control uses Alpine BusyBox ip |
+| Alpine BuildKit | `build/installed-alpine-turnip/oci-services-18b75e110b7c4559a15b7776687c9840.json`; official Alpine buildkit/buildctl 0.25.1-r6 packages, CNI 1.8.0-r6, OCI worker under OpenRC. Multistage build, cache reuse/invalidation, secret/cache mounts, exported-image execution, cancellation and cleanup pass |
+| Alpine LTP core | `build/installed-alpine-turnip/oci-services-45f8dc69710041ed83f9d67f6e5bd33d.json`; reviewed 20250930 sources built with Alpine compiler/musl; all seven binaries pass as guest UID 1000 |
+| Alpine unavailable packages | `build/alpine-matrix-buildctl-install.log`; enabled official v3.23 main/community repositories supply neither systemd/nspawn nor snapd. Those package-specific workflows are NA; OpenRC, LXC and native browsers remain separate checks, not substitute passes for Snap or nspawn |
+| Alpine graphics/Chromium | `build/alpine-egl-gbm-current.log` covers 64 GBM/EGL frames. `build/installed-alpine-turnip/alpine-chromium-lazy-queue-prototype/gui-report.json` and `alpine-chromium-sandbox-final/gui-report.json` cover packaged Chromium 149.0.7827.53: ordinary-user Wayland input, download, GTK chooser/readback, WebGL green pixels, normal close and same-profile relaunch. Both GPU reports confirm hardware composition, `Sandboxed: true` and zero GPU-process crashes. Recipe Mesa 26.2.3 received an incremental rebuild with the common queue patch; this is not a new full installation. `a2c3a0ac1b9c4220abb0785a0ee36f29.log` covers the real Mesa queue lifecycle/failure fixture. Document-portal grants and full desktop discovery remain separate |
+| Alpine native Firefox | Staged fixture `57359ca724544117b985100886d3507f`; `build/installed-alpine-turnip/alpine-firefox-verified/gui-report.json` and `alpine-firefox-verified-relaunch/gui-report.json` pass ordinary-user input, download, file readback, WebGL green pixels, normal close and reuse of the same profile. Firefox reports its privacy-masked Adreno renderer name, not the actual device model. File selection uses the GTK fallback because the desktop portal service is absent; this does not certify document grants or Flatpak |
+| Ubuntu recipe/packages | `build/ubuntu-recipe-matrix-current/oci-services-48ed04289e704edfad13dd42656e89ba.json`; current recipe helper refresh retains installed Turnip. `build/ubuntu-package-lifecycle-current.log` and `build/ubuntu-package-policy-verify-current.log` cover hello 2.10-3build1 install/reinstall, retained-file checksums and removal. Two documentation omissions match the image's explicit dpkg exclusions, checked separately in `build/ubuntu-package-policy-current.log`; dpkg audit is empty |
+| Booted Ubuntu containers | `build/installed-ubuntu-fuse/oci-services-46aaa9fe2ec54283aabb3cd6b7a973b9.json` (stock Docker service), `build/installed-ubuntu-fuse/oci-services-84e3905829284b8d8923dc103a717180.json` (Podman, headless systemd/control target); staged native hashes in receipts. Bridge, published TCP/UDP, peer IP/name exchanges, binds/exec, conflicts and port release pass; both containers in each run also pass internet access and 20 external DNS requests each |
+| Ubuntu Libvirt/QEMU | `build/installed-ubuntu-fuse/oci-services-ad1ba3366d594c0086ca6b13638c2efc.json`; official libvirt 10.0.0/QEMU 8.2.2, managed TCG boot, paused start/resume, serial, poweroff, undefine and cleanup. Direct TCG: `oci-services-ba2e038c0e7c4ce39e047fc78ed56c79.json`. VM networking and KVM remain untested |
+| Ubuntu machinectl/LXC | `build/installed-ubuntu-fuse/oci-services-10e11441c9ef4854804ec93a997e3953.json` (systemd 255.4 machinectl) and `oci-services-18fb21efdf1f4e8d9cd83028b9472adf.json` (LXC 5.0.3): nested Debian, stock policies, shell/services, namespace/mount checks, bridge TCP/UDP, three normal/forced-stop cycles and process/veth cleanup pass |
+| Ubuntu BuildKit | `build/installed-ubuntu-fuse/oci-services-7cb5bd022e60453096744368fd7cf7eb.json`; official upstream 0.34.1 archive for testing only, distribution CNI 1.1.1, OCI/overlayfs sandbox. Multistage build, cache reuse/invalidation, secrets, export/Podman execution, cancellation and cleanup pass. Rootless/containerd workers remain untested |
+| Ubuntu LTP core | `build/installed-ubuntu-fuse/oci-services-34d8493fa9554fdd9625c4edd76c9b69.json`; reviewed 20250930 built with the Ubuntu compiler/glibc, all seven tests pass as the installed ordinary user `ubuntu`, UID 1000 |
 | Ubuntu cold Snap Chromium | `build/ubuntu-snap-captured-writes-clean/oci-services-77b29f4d93c645ce871c95c6014e4cfc.json`: three uninstrumented discarded-namespace confined-shell launches pass in 26.74/24.22/26.64 s, with CPU policy maxima 2.112/1.8624 GHz. Instrumented receipt `build/ubuntu-snap-captured-writes-profile/oci-services-028219ad597245049fbbfcdf0fae94dc.json` records 55,557 captured control writes and 5,433,244 main-supervisor ptrace requests. Changed CPU limits exclude a clean elapsed-time comparison with earlier builds. Stock 30 s helper deadline is unchanged; substantial margin remains open |
-| Ubuntu Snap Chromium GUI | Retained native fixture `d225845a01ff43ae84ef648da865cafd`; `build/installed-ubuntu-fuse/chromium-refreshed-3/gui-report.json`: Chromium 155.0.8059.84 revision 3564 after successful stock `snap refresh` (change 105, log `3040cb6165054f57b0b499f8dd338247.log`). Guest UID 1000, stock sandbox and Wayland pass keyboard/pointer, download/chooser readback, normal close and WebGL pixels through ANGLE/Zink/Turnip on Adreno 840. Earlier revision 3560 also passed close/relaunch. Focused Weston/systemd fixture closes with graphics/display/HOME cleanup; this does not certify recipe discovery or document-portal grants |
+| Ubuntu Snap Chromium GUI | `build/installed-ubuntu-fuse/ubuntu-chromium-sandbox-final/gui-report.json` and `ubuntu-chromium-sandbox-relaunch/gui-report.json`; stock Chromium 155.0.8059.84 revision 3564, guest UID 1000 and Wayland. Input, download/chooser readback, WebGL pixels, normal close and same-profile relaunch pass. Both GPU reports confirm hardware composition, `Sandboxed: true` and zero GPU crashes. Incrementally rebuilt recipe Mesa uses the common deferred-queue patch and the standard GPU content publisher; `bb4e82b4e74a479b8ecbb46e50a02424.log` checks matching installed/published library hashes. `ab2742619b54423a994fd4edef28a78a.log` covers two package/connection switches with automatic publication; `146c3b683c604612b3b45c5f3d9a285a.log` covers unchanged preparation without monitor restart. `ff5b6839ccaa4e94b57de1434f0892ba.log` covers Mesa queue lifecycle/failure tests against Ubuntu glibc. Cold-start margin, full recipe desktop discovery and document grants remain separate |
 | Ubuntu FUSE | `build/ubuntu-fuse-capture-wait/oci-services-391bc722a78e40a4962610b1c6d63c8a.json` and `build/ubuntu-fuse-capture-wait-close/oci-services-79a6826040174c54884fb96153bb7d51.json`; SquashFS hardlink exec/reexec, ORIGIN, set-ID/nosuid, vectored/partial IO, shared/private mapping races and filtered close/flush/FD-reuse checks pass. This is not document-portal GUI acceptance |
-| Ubuntu default services | `build/ubuntu-matrix-cups-fixed/oci-services-684acee80f0b453ab5be6f3efcc6f74d.json`; PID 1 reaches its target, but CUPS readiness/restart and dockerd service failure require investigation; an active startup shell is not service readiness |
-| SteamOS default boot | `build/steamos-matrix-default-boot/oci-services-a4815ff6455a46c8a5fa0538ec657f7e.json`; degraded boot, Deckard hardware services, resolver/firewall and tmpfiles descriptor failures need reconciliation with the recipe before application acceptance |
+| Ubuntu Snap Firefox | `build/installed-ubuntu-fuse/ubuntu-firefox-current/gui-report.json` and `ubuntu-firefox-relaunch-current/gui-report.json` cover fresh and same-profile Firefox 158.0-2 revision 9056. Stock refresh change 106 completes all hooks (`build/ubuntu-firefox-refresh-resolved.log`); `ubuntu-firefox-updated-current/gui-report.json` passes again on 158.0.1-1 revision 9112 with the same profile. Ordinary UID 1000, stock sandbox, input, download, chooser/readback, WebGL green pixels and normal exit |
+| Ubuntu Snap portal | `build/installed-ubuntu-fuse/ubuntu-snap-portal-updated.json`; two ordinary-user document grant/read/write/revoke and SIGTERM/reactivation rounds pass after the Firefox update, including exact portal exit and FUSE mount removal. Firefox GUI receipts separately cover chooser/readback |
+| Ubuntu VS Code | `build/installed-ubuntu-fuse/ubuntu-vscode-current/gui-report.json`; Code 1.142.0, Electron 43.7.7: editor/save, external-file watch, integrated PTY, GDB breakpoint/step/locals, window reload and normal close. Hardware composition/WebGL and renderer seccomp/NNP are enabled |
+| Ubuntu default boot | `build/ubuntu-default-complete-current/oci-services-a2c2bbdb31da4e0ea6f9980a3dff0529.json`; stock systemd 255.4 reaches running with zero failed units on a private bridge; D-Bus/logind, journal readback/restart and RTKit lifecycle pass. CUPS initially restarts, LXC shutdown reports an error, and libvirt's default bridge control remains unsupported; VM-network acceptance is separate |
+| Ubuntu services | `build/ubuntu-cups-restart-current.log`: stock CUPS Snap answers lpstat before and after service restart, then stops normally. `build/ubuntu-rtkit-current.log`: RTKit D-Bus query/restart/stop; `build/ubuntu-logger-claim-current.log`: journal write/sync/readback with the requested parent PID. These focused control-target runs do not certify the default OS target |
+| SteamOS recipe/default boot | `build/steamos-recipe-hardware-current/oci-services-c668b2e77f3a4d77958f4f40811784f0.json`; official recovery image, current helper refresh and full pacman synchronization. `build/steamos-default-hardware-current/oci-services-93c38c0172f14d92aa9c0d4c45dde124.json` remains degraded: Avahi cannot share its UDP port; firewalld rejects unsupported rules. Tmpfiles completes. Hardware boot and the package removal/verification lifecycle are not certified |
+| SteamOS Docker | `build/installed-steamos/oci-services-8fb322d2f22048b2a44664b671732ee7.json`; official upstream Docker 29.1.3 binaries installed only for the lab, nftables/no userland proxy, overlay2 and stock container seccomp/cgroups. Headless systemd passes bridge TCP/UDP, peer names, local outbound, binds/exec, conflicts, port release and 20 DNS requests plus HTTP per container. Under concurrent Plasma/browser/BuildKit load, `oci-services-d37d40beacb3444f9c3d546fbcb25aad.json` timed out during internet access and task cleanup; concurrent-load acceptance remains open |
+| SteamOS machinectl | `build/installed-steamos/oci-services-fb35961b3aa643c798479f264b5e2bd5.json`; stock systemd-nspawn template, nested Debian, shell/services, private UID map, veth TCP/UDP, normal poweroff, forced leader death, restart and process/veth cleanup pass headlessly. `build/steamos-nspawn-current.log` records a systemctl timeout under graphical load; that scenario remains open |
+| SteamOS BuildKit | `build/installed-steamos/oci-services-30f589a9207c412ca7fcf8485cc2105b.json`; upstream 0.34.1 and CNI 1.8.0 binaries installed only for testing because enabled distro repositories lack packages. Multistage build, cache reuse/invalidation, secret/cache mounts, OCI export and execution, cancellation and cleanup pass |
+| SteamOS LXC | `build/installed-steamos/oci-services-ff79554694fe4323ab88a29509e6b2b0.json`; packaged LXC 6.0.0 writes to FD -1 after an absent IPv6 sysctl. Boot fails. This is also present in upstream 6.0.0 network.c; no fake IPv6 control or successful invalid-FD write is provided |
+| SteamOS QEMU/LTP | `build/installed-steamos/oci-services-9a0df3dbb34343389baf1a40bb9adf0d.json`: packaged QEMU 9.0 TCG kernel/initrd serial boot and clean exit. `oci-services-6ddd15e3132b4dce8c3e8e95cd9dc6aa.json`: all seven reviewed LTP 20250930 tests pass with the guest toolchain as UID 1000. Libvirt has no package in enabled repos and remains untested |
+| SteamOS Plasma/Flatpak | Recipe Plasma Wayland renders through KWin/Zink/Turnip (`build/steamos-plasma-support-current.log`). `build/installed-steamos/steamos-firefox-verified/gui-report.json` passes Firefox input, download, chooser readback, WebGL pixels and normal close. Same-profile relaunch under container load loses WebGL and trips Firefox's watchdog (`steamos-firefox-verified-relaunch/gui-report.json`); repeat acceptance fails. `build/steamos-portal-current.log` passes document grants, write/read and live revocation. The auto-restored Steam client reports transport error 0x3000; neither client nor gameplay acceptance passes |
 | Debian/Arch recipe setup | `build/installer-debian-turnip.json`, `build/installer-arch-turnip.json`, `build/installer-arch-turnip-render-only.log`; rendering/application acceptance remains open |
 | Debian default boot/services | `build/debian-turnip-boot/oci-services-33ba076e37744211a82f0c348c8c5839.json`, `build/debian-turnip-systemd-fixed/oci-services-f7a091b709d84ad1ba282be55b888d6a.json` |
 | Arch default boot/services | `build/arch-default-bridge-current/oci-services-3c014103a9cc4944beeb1999ff86627b.json`; private `bridge`, default target reaches `running`, journal write/sync/readback, D-Bus and logind restart pass; resolved is active. In `routed`, its initial-namespace bind to port 53 is also an Android publication and is denied by the host; this pass does not cover that mode |
 | Booted Debian Docker | `build/installed-debian-turnip/oci-services-372c29b83a41433c967a53619048ae80.json`; 26.1.5, overlay2, iptables, no userland proxy, TCP/UDP/peer names/local outbound/port conflicts and release; external internet not revalidated |
 | Booted Debian Podman | `build/installed-debian-turnip/oci-services-f472a602c8fd4b1b8114b5e72f13c459.json`; 5.4.2, overlay, bridge/nftables, stock seccomp, enabled cgroups, no `--ulimit` overrides; TCP/UDP/peer names/local outbound/binds/repeated exec/conflicts/port release; both containers pass internet access and 20 external DNS requests each |
-| Booted SteamOS Podman | `build/installed-steamos/oci-services-0200184ae9e4442bab1a0e2ee7650fca.json`; 5.5.2, retained headless systemd/control target, overlay, bridge, stock seccomp, enabled cgroups, no `--ulimit` overrides; published TCP/UDP, peer names, local outbound, binds/exec, conflicts, port release and internet with 20 external DNS requests per container. This is not default-target or Plasma acceptance |
+| Booted SteamOS Podman | `build/installed-steamos/oci-services-c7f3ba36461a4bb18ffa6530083d4dcb.json`; 5.5.2, retained headless systemd/control target, overlay, bridge, stock seccomp, enabled cgroups, no `--ulimit` overrides; published TCP/UDP, peer names, local outbound, binds/exec, conflicts, port release and internet with 20 external DNS requests per container. Installing an unconditional INPUT counter over existing native browser connections still returns EBUSY. This is not default-target or concurrent Plasma acceptance |
 | Booted Arch Docker | `build/installed-arch-turnip/oci-services-f22142e8b86d445487808334efd9d370.json`; nftables, no userland proxy, local TCP/UDP/peers/port release; external internet not revalidated |
 | Booted Arch Podman | `build/installed-arch-turnip/oci-services-77b349d3bd484dcea16079deba040c5e.json`; staged native hashes, overlay, bridge, stock seccomp, enabled cgroups, no `--ulimit` overrides; published TCP/UDP, peer names, local outbound, binds/exec, conflicts and port release; both containers also pass internet access and 20 external DNS requests each |
 | Debian direct QEMU TCG | `build/debian-qemu-tcg/oci-services-c5ddb332933a4cb79cb23fff41767722.json`; kernel/initrd serial boot, not KVM or VM networking |

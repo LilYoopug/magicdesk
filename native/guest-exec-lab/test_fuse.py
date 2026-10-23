@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run stock FUSE clients in a private runtime, retaining per-command receipts."""
 import argparse
+import shlex
 from pathlib import Path
 import subprocess
 
@@ -16,13 +17,15 @@ def main():
     parser.add_argument('--output', type=Path, default=Path('build/fuse-results'))
     parser.add_argument('--portal-user', default='1000:1000')
     parser.add_argument('--portal-home', default='/home/steamos')
+    parser.add_argument('--portal-app', default='org.chromium.Chromium')
+    parser.add_argument('--portal-backend', choices=('flatpak', 'snap'), default='flatpak')
     parser.add_argument('--debug', action='store_true')
     add_machine_entry_argument(parser)
     args = parser.parse_args()
     suite = Suite(args.output, args.build, machine_entry=args.machine_entry)
     try:
         fixtures = Path(__file__).resolve().parent / 'fixtures'
-        name = ('flatpak-document-portal.sh' if args.case == 'portal' else
+        name = ('sandbox-document-portal.sh' if args.case == 'portal' else
                 'graphical-session-cleanup.py' if args.case == 'session' else
                 'fuse-close.c' if args.case == 'close' else f'fuse-{args.case}.py')
         suite.transport.upload(suite.client, fixtures / name, suite.base + '/fixture')
@@ -39,7 +42,8 @@ def main():
             session = args.output / 'session.sh'
             session.write_text(subprocess.check_output(['java', '-cp', str(classes),
                 'io.github.mekhontsev.magicdesk.GraphicalRecipe',
-                '/usr/bin/python3 /mnt/fixture child' if args.case == 'session' else '/bin/sh /mnt/fixture'],
+                '/usr/bin/python3 /mnt/fixture child' if args.case == 'session' else
+                shlex.join(['/bin/sh', '/mnt/fixture', args.portal_app, args.portal_backend])],
                 text=True, timeout=30))
             suite.transport.upload(suite.client, session, suite.base + '/session')
             command = suite.guest(args.store, '--bind-ro', suite.base, '/mnt',

@@ -42,7 +42,7 @@ EOF
 cat > "$1/driver.sh" <<'EOF'
 set -eux
 trap 'code=$?; journalctl --no-pager -u snapd.service -n 100 > "$1/journal.log" || :; systemctl exit "$code"' EXIT
-systemctl start dbus.socket snapd.socket
+systemctl start dbus.socket snapd.mounts.target snapd.socket
 systemctl start snapd.service
 snap version
 snap debug sandbox-features > "$1/sandbox-features.log"

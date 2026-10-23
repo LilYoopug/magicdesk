@@ -16,6 +16,46 @@ SteamOS, libc/toolkit applications and guest GPU rendering. A rendered composito
 
 ## Holo ARM64 Userspace
 
+### Mesa Queue And Sandbox Admission
+
+The common recipe patch defers empty `util_queue` worker creation until the
+first submitted job. Initialization, worker-count selection and empty finish
+must not make a process multithreaded before Chromium's GPU sandbox admission.
+First submission starts the requested workers; subsequent jobs retain normal
+parallel scheduling. A partial worker-creation failure keeps the workers that
+started. Failure to create even one worker is explicit and fatal, not a silently
+dropped job or an unsignalled fence: the submission API has no error return.
+
+Inside a guest retaining its recipe build, run:
+
+```sh
+prefix=$(cat /etc/magicdesk/mesa-prefix)
+python3 fixtures/mesa-queue.py /var/cache/magicdesk/mesa/${prefix##*/}/build
+```
+
+The fixture links the actual built Mesa utility libraries with their original
+feature defines. It covers empty initialization/finish/destruction/atexit,
+parallel first jobs, resizing, concurrent producers, partial creation failure
+and explicit first-worker failure. A thread-creation wrapper injects failures
+only into the test binary, never the installed driver.
+
+Alpine Chromium 149.0.7827.53 passes ordinary-user Wayland input, download,
+chooser/readback, WebGL pixels and same-profile relaunch with the common Mesa
+26.2.3 patch. `chrome://gpu` reports hardware composition, `Sandboxed: true`
+and zero GPU-process crashes. The recipe's musl system search path keeps the
+selected EGL/GBM libraries consistent when Chromium rewrites argv/environment
+storage. These are driver/loader changes, not Chromium flags or a browser build.
+Keep GPU sandbox admission separate from renderer sandbox and hardware-renderer
+checks; a hardware-rendered page alone does not certify GPU sandboxing.
+
+The same queue fixture passes against Ubuntu glibc. Ubuntu Chromium Snap
+155.0.8059.84 also passes the GUI workflow and same-profile relaunch with
+hardware composition, GPU sandbox admission and no GPU crashes. This run uses
+an explicitly identified lab bundle of incrementally rebuilt recipe libraries,
+published by `magicdesk-snap-gpu`, not a second Mesa build or a modified browser.
+The publisher additionally covers switching driver content and repeating
+unchanged preparation; its consumer-side library hashes must match the build.
+
 ### Flatpak Chromium
 
 Run `sh fixtures/flatpak-chromium-smoke.sh` from a terminal in the running guest
@@ -39,7 +79,7 @@ override KDE's own DPMS. The install/update trigger and ordinary GL.host selecti
 have been checked on SteamOS with Freedesktop 25.08. Other runtimes need their own
 admission and rendering checks; see [the publisher](../../docs/graphics.md#flatpak-gpu-drivers).
 
-`sh fixtures/flatpak-document-portal.sh` separately requires temporary document
+`sh fixtures/sandbox-document-portal.sh APP [flatpak|snap]` separately requires temporary document
 export, read/write through the exported path inside Flatpak, and revocation. It
 does not alter browser permissions or disable the portal. The SteamOS fixture
 passes with the guest FUSE provider, including live permission revocation. This
@@ -150,6 +190,11 @@ passes them, plus attachment, active IO, SHM, JIT and strace-detach cases. See
 Use the real user manager's bus (`/run/user/UID/bus`) for this scenario, and
 import the compositor environment into its activation services. An unrelated
 `dbus-run-session` bus cannot activate an already-running systemd user manager.
+In a focused control-target boot, start `snapd.mounts.target`, `snapd.socket`
+and `snapd.service` before launching installed snaps. Starting one application
+unit alone mounts its own image, but may leave its base/content snaps absent;
+the normal OS boot supplies those mount dependencies. Do not mask this fixture
+error with custom bind mounts or modified snap-confine arguments.
 The focused init regression is:
 
 ```sh

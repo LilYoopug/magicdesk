@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Interactive packaged-browser receipts inside a prepared desktop/user session."""
 import argparse
+import fcntl
 import hashlib
 import http.server
 import json
@@ -49,12 +50,15 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     args.common.mkdir(parents=True, exist_ok=True)
     work = args.reuse_work or Path(tempfile.mkdtemp(prefix='shroot-gui-', dir=args.common))
+    # Retain ownership until receipts are committed; a premature relaunch must
+    # not delete the first run's download while its browser is still closing.
+    ownership = (work / '.fixture.lock').open('a')
+    fcntl.flock(ownership, fcntl.LOCK_EX | fcntl.LOCK_NB)
     profile = work / 'profile'
     if args.reuse_work:
         assert profile.is_dir(), profile
         downloaded = work / 'shroot-snap.txt'
         assert downloaded.read_bytes() == DATA, 'Only reuse a completed fixture directory'
-        downloaded.unlink()
     else:
         profile.mkdir()
     if args.browser == 'firefox':
@@ -110,6 +114,8 @@ def main():
             self.end_headers()
 
     server = http.server.ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
+    if args.reuse_work:
+        downloaded.unlink()
     worker = threading.Thread(target=server.serve_forever)
     worker.start()
     try:

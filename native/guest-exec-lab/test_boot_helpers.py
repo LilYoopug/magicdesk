@@ -14,6 +14,7 @@ import urllib.error
 from init_fixture import installed_boot, start_service, enable_runit_service, RUNIT_START
 from installed_desktop import wait_controller
 from test_os_boot import check_runit_boot
+from test_snap import PREPARE as SNAP_PREPARE
 
 sys.path.insert(0, str(Path(__file__).with_name('fixtures')))
 from network_exchange import exchange
@@ -21,6 +22,11 @@ from systemd_ready import wait_systemd
 
 
 class BootHelpers(unittest.TestCase):
+    def test_snap_prepares_existing_base_mounts(self):
+        self.assertIn('systemctl start dbus.socket snapd.mounts.target snapd.socket\n'
+                      'systemctl start snapd.service\nsnap version\n', SNAP_PREPARE)
+        subprocess.run(['sh', '-n'], input=SNAP_PREPARE, text=True, check=True)
+
     def test_observer_cannot_hide_failed_runit_stage(self):
         observer = '\nPASS runit stock PID1 boot and service lifecycle\n'
         check_runit_boot('Mounting filesystems [done]' + observer)

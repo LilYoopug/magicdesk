@@ -14,14 +14,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--app', default='org.chromium.Chromium')
+    parser.add_argument('--backend', choices=('flatpak', 'snap'), default='flatpak')
     args = parser.parse_args()
     assert os.geteuid() != 0, 'Use the ordinary recipe desktop user'
     document = Path(os.environ['XDG_RUNTIME_DIR']) / 'doc'
-    report = dict(passed=False, uid=os.getuid(), rounds=[])
+    report = dict(passed=False, uid=os.getuid(), app=args.app, backend=args.backend, rounds=[])
     args.output.parent.mkdir(parents=True, exist_ok=True)
     try:
         for _ in range(2):
-            subprocess.run(['sh', str(Path(__file__).with_name('flatpak-document-portal.sh')), args.app],
+            subprocess.run(['sh', str(Path(__file__).with_name('sandbox-document-portal.sh')), args.app, args.backend],
                            check=True, timeout=90)
             owner = subprocess.check_output([
                 'gdbus', 'call', '--session', '--dest', 'org.freedesktop.DBus',

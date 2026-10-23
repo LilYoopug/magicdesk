@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Retained init fixture with optional Weston in an installed environment.
+"""Retained init fixture with an optional recipe desktop in an installed environment.
 
 Default-target boot is independently checked by test_os_boot.py. This focused
 session hosts the existing browser, portal, container and VS Code fixtures.
@@ -76,6 +76,7 @@ def main():
     parser.add_argument('--timeout', type=int, default=300, help='Shell command failure bound in seconds')
     parser.add_argument('--init', choices=('systemd', 'openrc', 'runit'), default='systemd')
     parser.add_argument('--headless', action='store_true', help='Boot control/init only, without user session, display or GPU')
+    parser.add_argument('--desktop', choices=('weston', 'plasma-wayland'), default='weston')
     parser.add_argument('--build', type=Path, help='Stage a native build; otherwise use the installed APK')
     parser.add_argument('--entry', choices=('lazy', 'base'), default='lazy')
     parser.add_argument('value', nargs='?')
@@ -97,7 +98,8 @@ def main():
             suite.finish()
             parser.error('Stop the active graphics fixture before starting an isolated desktop fixture')
         state = suite.report
-        state.update(name=args.name, user=args.user, init=args.init, headless=args.headless, entryMode=args.entry, token=uuid.uuid4().hex,
+        state.update(name=args.name, user=args.user, init=args.init, desktop=args.desktop,
+                     headless=args.headless, entryMode=args.entry, token=uuid.uuid4().hex,
                      rootPort=port(), userPort=port(), target=target)
         state['homeLeaseBefore'] = before['homeLease']
         try:
@@ -154,6 +156,12 @@ def main():
         autostart += str(state['userPort']) + ' ' + state['token'] + '\n'
         bus = ('export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus\n'
                if args.init == 'systemd' else 'unset DBUS_SESSION_BUS_ADDRESS\n')
+        desktop = (f'weston --socket=wayland-1 --config={target}/weston.ini --width=1200 --height=800 --idle-time=0'
+                   if args.desktop == 'weston' else 'plasma-wayland')
+        configuration = '' if args.desktop == 'weston' else f'''export XDG_CONFIG_HOME={target}/desktop-config
+mkdir -p "$XDG_CONFIG_HOME/autostart"
+cp {target}/controller.desktop "$XDG_CONFIG_HOME/autostart/"
+'''
         session = f'''#!/bin/bash
 set -eux
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -161,13 +169,15 @@ export HOME={shlex.quote(home)} USER={user} LOGNAME={user}
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 {bus.rstrip()}
 export WAYLAND_DISPLAY=/tmp/magicdesk-wayland/wayland-0
-exec magicdesk-desktop-session weston --socket=wayland-1 --config={target}/weston.ini --width=1200 --height=800 --idle-time=0
+{configuration}exec magicdesk-desktop-session {desktop}
 '''
         files = {'boot.sh': boot, 'driver.sh': driver, 'session.sh': session, 'autostart.sh': autostart,
+                 'controller.desktop': '[Desktop Entry]\nType=Application\nName=Shroot validation controller\n'
+                     + 'Exec=/bin/sh ' + target + '/autostart.sh\n',
                  'weston.ini': '[core]\nxwayland=true\n[autolaunch]\npath=' + target + '/autostart.sh\n'}
         fixtures = Path(__file__).with_name('fixtures')
         for name in ('session-controller.py', 'sandbox-browser-gui.py', 'vscode-gui.py', 'vscode-debug.js',
-                     'flatpak-chromium-smoke.sh', 'flatpak-chromium-zink.sh', 'flatpak-document-portal.sh'):
+                     'flatpak-chromium-smoke.sh', 'flatpak-chromium-zink.sh', 'sandbox-document-portal.sh'):
             files[name] = (fixtures / name).read_text()
         for name, content in files.items():
             path = out / name
