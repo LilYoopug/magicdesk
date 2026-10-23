@@ -24,9 +24,6 @@ struct fuse_file {
     unsigned flags,open_flags;
     int opened;
     int published;
-    int snapshot;
-    uint64_t snapshot_changes;
-    struct fuse_attr snapshot_attributes;
 };
 static void *file_retain(void *context) {
     struct fuse_file *f=context; atomic_fetch_add_explicit(&f->references,1,memory_order_relaxed); return f;
@@ -51,7 +48,6 @@ static void file_release(void *context) {
         (f->flags&O_ACCMODE)==O_RDONLY ? IN_CLOSE_NOWRITE : IN_CLOSE_WRITE);
     md_fuse_node_closed(f->view,f->node);
     if (f->opened) md_fuse_file_release_handle(f->view,f->node,&f->opener,f->handle,f->flags);
-    if (f->snapshot>=0) close(f->snapshot);
     md_fuse_name_release(f->view,f->name);
     md_fs_anchor_release(f->origin); md_identity_release(&f->opener); md_fuse_view_release(f->view); free(f);
 }
@@ -394,30 +390,18 @@ static long mapping_resume(struct md_control_pending *base,void *data,size_t siz
         if (result!=sizeof(reply)) return -EPROTO;
         md_fuse_request_release(p->attributes); p->attributes=NULL;
         p->attr=reply.attr;
-        pthread_mutex_lock(&f->view->lock);
-        int cached=f->snapshot>=0 && p->changes==f->snapshot_changes
-            && p->changes==f->node->changes && md_fuse_image_same(&p->attr,&f->snapshot_attributes);
-        int fd=cached ? fcntl(f->snapshot,F_DUPFD_CLOEXEC,3) : -1;
-        int error=cached && fd<0 ? -errno : 0;
-        pthread_mutex_unlock(&f->view->lock);
-        if (cached) return error ? error : mapping_publish(p,fd);
-        error=md_fuse_image_new(f->view->session,&p->identity,p->pid,f->node->id,f->handle,&p->attr,&p->image);
+        int fd=(f->open_flags&FOPEN_DIRECT_IO) ? -ENOENT
+            : md_fuse_snapshot_get(f->view,f->node,&p->attr,p->changes);
+        if (fd>=0) return mapping_publish(p,fd);
+        if (fd!=-ENOENT) return fd;
+        int error=md_fuse_image_new(f->view->session,&p->identity,p->pid,f->node->id,f->handle,&p->attr,&p->image);
         if (error) return error;
     }
     int fd=md_fuse_image_advance(p->image,p->wake);
     if (fd<0) return fd;
-    pthread_mutex_lock(&f->view->lock);
-    int changed=p->changes!=f->node->changes;
-    pthread_mutex_unlock(&f->view->lock);
-    if (changed) { close(fd); return -EAGAIN; }
-    int cached=fcntl(fd,F_DUPFD_CLOEXEC,3);
-    if (cached>=0) {
-        pthread_mutex_lock(&f->view->lock);
-        int old=f->snapshot; f->snapshot=cached; f->snapshot_attributes=p->attr;
-        f->snapshot_changes=p->changes;
-        pthread_mutex_unlock(&f->view->lock);
-        if (old>=0) close(old);
-    }
+    int error=(f->open_flags&FOPEN_DIRECT_IO) ? 0
+        : md_fuse_snapshot_store(f->view,f->node,&p->attr,p->changes,fd);
+    if (error) { close(fd); return error; }
     return mapping_publish(p,fd);
 }
 static void mapping_destroy(struct md_control_pending *base) {
@@ -467,12 +451,15 @@ int md_fuse_file_publish(struct fuse_view *view,struct fuse_node *node,struct md
         if (opened) md_fuse_file_release_handle(view,node,identity,opened->fh,flags);
         return -ENOMEM;
     }
-    atomic_init(&f->references,1); f->view=md_fuse_view_retain(view); f->node=node; f->snapshot=-1;
+    atomic_init(&f->references,1); f->view=md_fuse_view_retain(view); f->node=node;
     f->name=md_fuse_name_retain(view,node,parent,name);
     f->origin=md_fs_anchor_retain(origin); f->opener=md_identity_copy(identity);
     f->flags=flags&~(O_CREAT|O_EXCL|O_TRUNC|O_NOCTTY);
     pthread_mutex_lock(&view->lock); ++node->opened; pthread_mutex_unlock(&view->lock);
-    if (opened) { f->handle=opened->fh; f->open_flags=opened->open_flags; f->opened=1; }
+    if (opened) {
+        f->handle=opened->fh; f->open_flags=opened->open_flags; f->opened=1;
+        md_fuse_snapshot_open(view,node,opened->open_flags);
+    }
     int error=md_fs_control_publish(file_descriptor(f,f->flags),(struct md_control_file){&file_ops,f},
         f->origin,&f->opener,f->flags,out,output);
     if (!error && opened) { f->published=1; md_fuse_file_event(view,node,f->name,IN_OPEN); }

@@ -22,6 +22,7 @@ struct fuse_node {
     struct stat carrier,attributes;
     struct md_resource_queue *writes;
     struct md_fuse_mapping *mapping;
+    struct fuse_snapshot *snapshot;
     unsigned opened;
     int deleted;
 };
@@ -50,7 +51,14 @@ struct fuse_view {
     struct md_watch_source *events;
     unsigned rename_cookie;
     uint64_t name_epoch;
+    struct fuse_snapshot *images_first,*images_last;
+    uint64_t images_bytes;
+    unsigned images_count;
 };
+uint64_t md_fuse_snapshot_open(struct fuse_view *,struct fuse_node *,unsigned flags);
+int md_fuse_snapshot_get(struct fuse_view *,struct fuse_node *,const struct fuse_attr *,uint64_t changes);
+int md_fuse_snapshot_store(struct fuse_view *,struct fuse_node *,const struct fuse_attr *,uint64_t changes,int fd);
+void md_fuse_snapshot_clear(struct fuse_view *);
 void *md_fuse_view_retain(void *);
 void md_fuse_view_release(void *);
 int md_fuse_view_attributes(struct fuse_view *,const struct fuse_attr *,struct stat *);

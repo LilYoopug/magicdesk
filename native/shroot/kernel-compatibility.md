@@ -16,6 +16,9 @@ O_TMPFILE-backed read-only shared mappings with ordinary pwrite/ftruncate;
 there is no post-5.15 host dependency. `test_fuse_transport`, `test_fuse_device`,
 `test_fuse_filesystem` and the stock rofiles/portal/squashfuse fixtures cover
 protocol, cancellation, publication and teardown. See [FUSE limits](fuse.md).
+`fuse_snapshot` reuses sealed images across exec/mmap with baseline F_DUPFD_CLOEXEC,
+FOPEN_KEEP_CACHE and explicit inode invalidation. Its bounded cache adds no host
+kernel dependency or work to ordinary native-backed IO.
 
 Native-leaf storage uses baseline openat/fstat/fchmod, user xattrs, proc FD magic
 links and fsync. `inode_native.c` uses the retained proc alias for O_PATH metadata,

@@ -3,9 +3,11 @@
 #include "fs_continuation.h"
 #include "fuse_device.h"
 #include "fuse_transport.h"
+#include "fuse_view_internal.h"
 #include "proc_file.h"
 #include "inode_watch.h"
 #include "linux_abi.h"
+#include "image_identity.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -33,6 +35,7 @@ static int flush_error;
 static int write_error;
 static int read_error;
 static unsigned read_requests,open_flags;
+static int open_error;
 static unsigned write_limit,defer_opcode;
 static unsigned char deferred_reply[512];
 static size_t deferred_size;
@@ -184,6 +187,7 @@ static unsigned serve(struct md_fuse_connection *connection) {
         memcpy(payload,&result,sizeof(result)); out->len+=sizeof(result); break;
     }
     case FUSE_OPEN: case FUSE_OPENDIR: {
+        if (open_error) { out->error=open_error; break; }
         struct fuse_open_out result={.fh=h->nodeid*10,.open_flags=open_flags};
         memcpy(payload,&result,sizeof(result)); out->len+=sizeof(result); break;
     }
@@ -451,6 +455,93 @@ static void carrier_capacity(struct md_fs_context *context,struct md_fuse_connec
     entry_seconds=0;
     assert(!setrlimit(RLIMIT_NOFILE,&saved));
     puts("PASS FUSE carrier capacity: 2048 indexed names with 256 native descriptors and cached revisit");
+}
+static int executable_image(struct md_fs_context *context,struct md_fuse_connection *connection) {
+    struct md_image_identity identity;
+    struct md_fs_request q={.operation=MD_FS_OPEN_IMAGE,.directory={-1,-1},.path={"/fuse/file",NULL}};
+    struct md_fs_result r=run_request(context,connection,&q,
+        (struct md_fs_output){.data=&identity,.capacity=sizeof(identity)});
+    assert(!r.error && r.fd>=0 && !strcmp(identity.path,"/fuse/file"));
+    assert(serve(connection)==FUSE_RELEASE);
+    return r.fd;
+}
+static void image_cache(struct md_fs_context *context,struct md_fuse_connection *connection) {
+    file_mode=0755; open_flags=FOPEN_KEEP_CACHE;
+    int first=executable_image(context,connection);
+    unsigned before=read_requests;
+    int second=executable_image(context,connection);
+    assert(read_requests==before);
+    struct stat a,b;
+    assert(!fstat(first,&a) && !fstat(second,&b) && a.st_ino==b.st_ino && a.st_dev==b.st_dev);
+    close(second);
+    open_error=-EACCES;
+    struct md_image_identity identity;
+    struct md_fs_request denied={.operation=MD_FS_OPEN_IMAGE,.directory={-1,-1},.path={"/fuse/file",NULL}};
+    struct md_fs_result denied_result=run_request(context,connection,&denied,
+        (struct md_fs_output){.data=&identity,.capacity=sizeof(identity)});
+    assert(denied_result.error==-EACCES && denied_result.fd<0 && read_requests==before);
+    open_error=0;
+    struct md_proc_file *file=NULL;
+    struct md_fs_request q={.operation=MD_FS_OPEN,.directory={-1,-1},.path={"/fuse/file",NULL},.flags=O_RDONLY};
+    struct md_fs_result r=run_request(context,connection,&q,
+        (struct md_fs_output){.control=capture_file,.control_context=&file});
+    assert(!r.error && r.fd>=0 && file); close(r.fd);
+    second=mapping(file,context,connection);
+    assert(read_requests==before && !fstat(second,&b) && a.st_ino==b.st_ino);
+    close(second); md_proc_file_release(file); assert(serve(connection)==FUSE_RELEASE);
+    /* A daemon may keep attrs unchanged, but must invalidate cached contents. */
+    struct { struct fuse_out_header header; struct fuse_notify_inval_inode_out inode; } invalid={
+        .header={.len=sizeof(invalid),.error=FUSE_NOTIFY_INVAL_INODE},.inode={.ino=2,.off=0}};
+    char old=contents[0]; contents[0]=old=='I' ? 'J' : 'I';
+    assert(md_fuse_connection_write(connection,&invalid,sizeof(invalid))==sizeof(invalid));
+    second=executable_image(context,connection);
+    char byte;
+    assert(read_requests>before && pread(second,&byte,1,0)==1 && byte==contents[0]);
+    assert(pread(first,&byte,1,0)==1 && byte==old);
+    close(first); close(second);
+    before=read_requests; open_flags=0;
+    second=executable_image(context,connection); close(second);
+    assert(read_requests>before);
+    before=read_requests; open_flags=FOPEN_DIRECT_IO|FOPEN_KEEP_CACHE;
+    second=executable_image(context,connection); close(second);
+    assert(read_requests>before);
+    before=read_requests;
+    second=executable_image(context,connection); close(second);
+    assert(read_requests>before);
+    file_mode=0644; open_flags=0;
+    puts("PASS FUSE image cache: exec/mmap inode reuse, invalidation, open flags and immutable old mappings");
+}
+static void image_cache_bounds(void) {
+    struct fuse_view view={.lock=PTHREAD_MUTEX_INITIALIZER};
+    struct fuse_node nodes[65]={0};
+    int fd=memfd_create("fuse-cache-test",MFD_CLOEXEC); assert(fd>=0);
+    struct fuse_attr small={.size=1};
+    for (unsigned i=0;i<64;++i) assert(!md_fuse_snapshot_store(&view,nodes+i,&small,0,fd));
+    assert(view.images_count==64 && view.images_bytes==64);
+    int retained=md_fuse_snapshot_get(&view,nodes,&small,0); assert(retained>=0);
+    assert(!md_fuse_snapshot_store(&view,nodes+64,&small,0,fd));
+    assert(nodes[0].snapshot && !nodes[1].snapshot && nodes[64].snapshot && view.images_count==64);
+    assert(md_fuse_snapshot_get(&view,nodes+1,&small,0)==-ENOENT);
+    assert(md_fuse_snapshot_open(&view,nodes,0)==1);
+    assert(!nodes[0].snapshot && view.images_count==63);
+    assert(md_fuse_snapshot_store(&view,nodes,&small,0,fd)==-EAGAIN);
+    assert(md_fuse_snapshot_get(&view,nodes,&small,0)==-EAGAIN);
+    assert(!md_fuse_snapshot_store(&view,nodes,&small,1,fd));
+    struct fuse_attr changed=small; ++changed.mtime;
+    assert(md_fuse_snapshot_get(&view,nodes,&changed,1)==-ENOENT && !nodes[0].snapshot);
+    md_fuse_snapshot_clear(&view);
+    struct fuse_attr large={.size=128ULL*1024*1024};
+    for (unsigned i=1;i<=3;++i) assert(!md_fuse_snapshot_store(&view,nodes+i,&large,0,fd));
+    assert(!nodes[1].snapshot && nodes[2].snapshot && nodes[3].snapshot);
+    assert(view.images_count==2 && view.images_bytes==256ULL*1024*1024);
+    large.size=view.images_bytes+1;
+    assert(!md_fuse_snapshot_store(&view,nodes+4,&large,0,fd));
+    assert(!nodes[4].snapshot && view.images_count==2);
+    md_fuse_snapshot_clear(&view);
+    assert(!view.images_count && !view.images_bytes && !view.images_first && !view.images_last);
+    assert(fcntl(retained,F_GETFD)>=0); close(retained); close(fd);
+    pthread_mutex_destroy(&view.lock);
+    puts("PASS FUSE image cache: count/byte bounds, LRU, stale publication and retained descriptors");
 }
 static long read_page(struct md_proc_file_io *op,struct md_fs_context *context,
         struct md_fuse_connection *connection,void *data,size_t capacity) {
@@ -980,6 +1071,7 @@ static void lease_permissions(struct md_fs_context *context) {
     puts("PASS FUSE name leases preserve parent access, file permissions and daemon disconnect");
 }
 void md_test_fuse_filesystem(struct md_filesystem *fs) {
+    image_cache_bounds();
     extern void md_test_watch_source(void);
     md_test_watch_source();
     struct md_fs_context context={.filesystem=fs,.has_identity=1,.task={.identity=md_identity_new(0,0)}};
@@ -1036,6 +1128,7 @@ void md_test_fuse_filesystem(struct md_filesystem *fs) {
     /* Until an operation has a protocol implementation it cannot use carriers. */
     r=run(&context,connection,MD_FS_OPEN,"/fuse/file",O_RDONLY,NULL,0); assert(r.error==-EOPNOTSUPP && r.fd<0);
     files(&context,connection);
+    image_cache(&context,connection);
     paged_reads(&context,connection);
     close_completion(&context,connection);
     append_ordering(&context,connection);

@@ -57,6 +57,7 @@ void md_fuse_view_release(void *context) {
     }
     md_watch_source_emit(v->events,0,IN_UNMOUNT,0,NULL,0);
     md_watch_source_release(v->events);
+    md_fuse_snapshot_clear(v);
     for (unsigned i=0;i<NODE_BUCKETS;++i) while (v->by_id[i]) {
         struct fuse_node *n=v->by_id[i]; v->by_id[i]=n->id_next;
         if (n->writes) { md_resource_queue_destroy(n->writes); free(n->writes); }
@@ -596,7 +597,8 @@ struct view_operation {
     struct md_fuse_image *image;
     char *image_path;
     struct fuse_attr attributes;
-    uint64_t image_handle;
+    uint64_t image_handle,image_changes;
+    unsigned image_flags;
     int executable,image_opened,access_checked;
     struct md_identity identity;
     unsigned opcode;
@@ -992,6 +994,23 @@ static void operation_attributes(struct view_operation *p,struct md_filesystem *
         md_fs_stat_info(st,&out->info); out->info.mount_id=p->origin->mount->id;
     }
 }
+static void publish_image(struct view_operation *p,int fd,struct md_fs_result *out,
+        const struct md_fs_output *output) {
+    pthread_mutex_lock(&p->view->lock);
+    if (p->image_changes!=p->node->changes) out->error=-EAGAIN;
+    pthread_mutex_unlock(&p->view->lock);
+    if (!out->error && p->base.request.operation==MD_FS_OPEN_IMAGE) {
+        if (!output->data || output->capacity<sizeof(struct md_image_identity)) out->error=-ERANGE;
+        else {
+            struct md_image_identity *identity=output->data;
+            memset(identity,0,sizeof(*identity));
+            snprintf(identity->path,sizeof(identity->path),"%s",p->image_path);
+            out->size=offsetof(struct md_image_identity,path)+strlen(identity->path)+1;
+        }
+    }
+    if (out->error) close(fd);
+    else { out->fd=fd; if (output->origin) *output->origin=md_fs_anchor_retain(p->origin); }
+}
 static void operation_resume(struct md_fs_continuation *base,struct md_filesystem *fs,
         struct md_fs_result *out,const struct md_fs_output *output) {
     struct view_operation *p=(void *)base;
@@ -1005,17 +1024,9 @@ static void operation_resume(struct md_fs_continuation *base,struct md_filesyste
             if (fd==-EINPROGRESS) *output->continuation=base;
             return;
         }
-        if (q->operation==MD_FS_OPEN_IMAGE) {
-            if (!output->data || output->capacity<sizeof(struct md_image_identity)) out->error=-ERANGE;
-            else {
-                struct md_image_identity *identity=output->data;
-                memset(identity,0,sizeof(*identity));
-                snprintf(identity->path,sizeof(identity->path),"%s",p->image_path);
-                out->size=offsetof(struct md_image_identity,path)+strlen(identity->path)+1;
-            }
-        }
-        if (out->error) close(fd);
-        else { out->fd=fd; if (output->origin) *output->origin=md_fs_anchor_retain(p->origin); }
+        if (!(p->image_flags&FOPEN_DIRECT_IO))
+            out->error=md_fuse_snapshot_store(p->view,p->node,&p->attributes,p->image_changes,fd);
+        publish_image(p,fd,out,output);
         return;
     }
     if (!p->request) {
@@ -1131,7 +1142,13 @@ static void operation_resume(struct md_fs_continuation *base,struct md_filesyste
         }
         else if (p->executable) {
             p->image_handle=response.open.fh; p->image_opened=1; p->opcode=0;
+            p->image_flags=response.open.open_flags;
+            p->image_changes=md_fuse_snapshot_open(p->view,p->node,p->image_flags);
             md_fuse_request_release(p->request); p->request=NULL;
+            int fd=(p->image_flags&FOPEN_DIRECT_IO) ? -ENOENT
+                : md_fuse_snapshot_get(p->view,p->node,&p->attributes,p->image_changes);
+            if (fd>=0) { publish_image(p,fd,out,output); return; }
+            if (fd!=-ENOENT) { out->error=fd; return; }
             out->error=md_fuse_image_new(p->view->session,&p->identity,md_fuse_view_pid(p->view,q->actor),
                 p->node->id,p->image_handle,&p->attributes,&p->image);
             if (!out->error) operation_resume(base,fs,out,output);

@@ -18,7 +18,8 @@ remain authoritative. This adds no persistent store format or APK dependency.
 - `fuse_view` owns node IDs/generations, names, attributes and mount operations.
   Carrier names do not consume one retained host FD per node.
 - `fuse_file` owns each open handle, IO and release. `fuse_image` prepares sealed
-  private images for mmap and executable admission. `fuse_mapping` owns the
+  private images for mmap and executable admission. `fuse_snapshot` shares
+  validated images by inode within a bounded per-mount cache. `fuse_mapping` owns the
   lazy per-inode backing for read-only shared mappings.
 - `watch_source` supplies bounded provider events to the existing `inode_watch`
   owner. No listener, event descriptor or event record is allocated until a
@@ -106,6 +107,13 @@ ephemeral and does not change format 17 or create persistent journal traffic.
 MAP_PRIVATE and executable images use sealed snapshots, not a coherent Linux
 page cache. Preparation checks attributes again after copying; detected changes
 fail with EAGAIN. A new mapping revalidates metadata and the invalidation epoch.
+Exec and mmap share these images across opens only when the daemon requests
+FOPEN_KEEP_CACHE. Other opens invalidate the node's cached image; FOPEN_DIRECT_IO
+does not use it. Fresh attributes and the node's mutation/invalidation generation
+gate every reuse, without caching permissions or mount policy. The per-mount
+LRU retains at most 64 images and 256 MiB; oversized files are not retained.
+Eviction closes only the cache's descriptor, leaving published mappings intact.
+Ordinary native-backed files never enter this cache.
 Cancelled preparation has not published an application mapping and explicitly
 permits retry after signal delivery, including handlers without SA_RESTART.
 Its internal daemon wait must not make the loader's mmap return EINTR.

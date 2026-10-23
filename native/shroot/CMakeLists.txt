@@ -64,7 +64,7 @@ list(APPEND inodes ${src}/inode_reserve.c ${src}/inode_durability.c ${src}/inode
 set(namespace_engine ${src}/fs_engine.c ${src}/fs_native.c ${src}/fs_xattr.c ${src}/fs_operation.c ${src}/task_status.c ${src}/ipc_credentials.c ${src}/ipc_peer.c)
 list(APPEND namespace_engine ${src}/fs_devices.c ${src}/fs_continuation.c ${src}/readonly_file.c ${src}/fd_filesystem.c)
 list(APPEND namespace_engine ${src}/fs_render.c)
-list(APPEND namespace_engine ${src}/fuse_view.c ${src}/fuse_file.c ${src}/fuse_xattr.c ${src}/fuse_image.c ${src}/fuse_mapping.c)
+list(APPEND namespace_engine ${src}/fuse_view.c ${src}/fuse_file.c ${src}/fuse_xattr.c ${src}/fuse_image.c ${src}/fuse_mapping.c ${src}/fuse_snapshot.c)
 list(APPEND namespace_engine ${src}/image_io.c ${src}/image_publish.c)
 list(APPEND namespace_engine ${src}/shm_bridge.c ${src}/ipc_namespace_memory.c ${src}/sysv_shm.c ${src}/ipc_storage.c ${src}/ipc_database.c ${src}/ipc_permissions.c)
 set(ipc ${src}/sysv_ipc.c ${src}/sysv_ipc_db.c ${src}/sysv_sem.c ${src}/sysv_msg.c ${src}/sysv_ipc_transport.c ${src}/ipc_storage.c ${src}/ipc_database.c ${src}/ipc_permissions.c)
