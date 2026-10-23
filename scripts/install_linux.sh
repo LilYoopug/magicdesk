@@ -3935,8 +3935,15 @@ if [ -d /usr/lib/systemd/system ] || [ -d /lib/systemd/system ]; then
 #!/bin/sh
 set -eu
 systemd-detect-virt --container --quiet || exit 0
-for unit in proc-sys-fs-binfmt_misc.mount systemd-binfmt.service \
-    deckard-audio-setup.service deckard-boot-images.service deckard-fpga.service \
+# Containers use an eager binfmt mount, independently of host autofs support.
+for units in /usr/lib/systemd/system /lib/systemd/system; do
+    [ -f "$units/proc-sys-fs-binfmt_misc.mount" ] || continue
+    mkdir -p "$1/sysinit.target.wants"
+    ln -sf "$units/proc-sys-fs-binfmt_misc.mount" "$1/sysinit.target.wants/"
+    ln -sf /dev/null "$1/proc-sys-fs-binfmt_misc.automount"
+    break
+done
+for unit in deckard-audio-setup.service deckard-boot-images.service deckard-fpga.service \
     deckard-led-control.service deckard-typec-logger.service deckard-power-monitor.service \
     deckard-charger.service deckard-fan-control.service gpu-trace.service steamos-boot.service \
     steamvr-program-ble.service steamvr-set-kernel-thread-priorities.service \

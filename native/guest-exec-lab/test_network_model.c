@@ -1,4 +1,5 @@
 #include "network_internal.h"
+#include "test_network_fixture.h"
 #include <assert.h>
 #include <errno.h>
 #include <net/if.h>
@@ -7,7 +8,7 @@
 
 void test_network_model(void) {
     struct md_network_namespace *root=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
-    assert(root && root->count==2 && root->default_interface);
+    assert(root && root->count==2 && test_network_default(root,AF_INET) && test_network_default(root,AF_INET6));
     struct md_network_namespace *child=md_network_namespace_copy(root,NULL);
     struct md_network_namespace *foreign=md_network_namespace_new(NULL,MD_NETWORK_PRIVATE);
     assert(child && foreign && child->fabric==root->fabric && foreign->fabric!=root->fabric);
@@ -17,7 +18,7 @@ void test_network_model(void) {
     assert(!md_network_socket_offline(routed_pair));
     assert(md_network_socket_offline(offline_pair));
     md_fd_object_release(routed_pair); md_fd_object_release(offline_pair);
-    assert(child->count==1 && !child->default_interface && !child->links[0].ipv4);
+    assert(child->count==1 && !child->route_count && !child->links[0].address_count);
     unsigned first=0,second=0,bridge=0;
     pthread_mutex_lock(&root->fabric->lock);
     assert(!md_network_interface_add(root,MD_LINK_BRIDGE,"bridge0",&bridge));

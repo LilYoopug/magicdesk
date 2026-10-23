@@ -306,8 +306,8 @@ int md_identity_file_capable(const struct md_identity *id, uint32_t uid, uint32_
         && (cap==CAP_FOWNER || md_user_namespace_from(id->user_namespace,1,gid)!=UINT32_MAX);
 }
 
-int md_exec_image_admit(int fd, uint32_t uid, uint32_t gid, mode_t mode,
-        const struct md_file_capabilities *capabilities, struct md_exec_image **out) {
+static int image_admit(int fd, uint32_t uid, uint32_t gid, mode_t mode,
+        const struct md_file_capabilities *capabilities,int native_elf,struct md_exec_image **out) {
     *out = NULL;
     if (uid == UINT32_MAX || gid == UINT32_MAX || !S_ISREG(mode) || (mode & ~(S_IFREG | 07777)))
         return -EINVAL;
@@ -322,8 +322,8 @@ int md_exec_image_admit(int fd, uint32_t uid, uint32_t gid, mode_t mode,
     /* Scripts cannot obtain set-ID admission. Full ELF/interpreter validation
      * remains the loader's responsibility; this accepts only the native ABI. */
     Elf64_Ehdr header;
-    ssize_t n = !error ? pread(retained, &header, sizeof(header), 0) : -1;
-    if (!error && (n != sizeof(header) || header.e_ident[EI_MAG0] != ELFMAG0
+    ssize_t n = !error && native_elf ? pread(retained, &header, sizeof(header), 0) : -1;
+    if (!error && native_elf && (n != sizeof(header) || header.e_ident[EI_MAG0] != ELFMAG0
             || header.e_ident[EI_MAG1] != ELFMAG1 || header.e_ident[EI_MAG2] != ELFMAG2
             || header.e_ident[EI_MAG3] != ELFMAG3 || header.e_ident[EI_CLASS] != ELFCLASS64
             || header.e_ident[EI_DATA] != ELFDATA2LSB || header.e_machine != EM_AARCH64
@@ -337,6 +337,14 @@ int md_exec_image_admit(int fd, uint32_t uid, uint32_t gid, mode_t mode,
     if (capabilities) image->capabilities=*capabilities;
     *out = image;
     return 0;
+}
+int md_exec_image_admit(int fd,uint32_t uid,uint32_t gid,mode_t mode,
+        const struct md_file_capabilities *caps,struct md_exec_image **out) {
+    return image_admit(fd,uid,gid,mode,caps,1,out);
+}
+int md_exec_image_admit_interpreted(int fd,uint32_t uid,uint32_t gid,mode_t mode,
+        const struct md_file_capabilities *caps,struct md_exec_image **out) {
+    return image_admit(fd,uid,gid,mode,caps,0,out);
 }
 void md_exec_image_release(struct md_exec_image *image) {
     if (image) { close(image->fd); free(image); }

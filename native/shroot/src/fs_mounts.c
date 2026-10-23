@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "binfmt.h"
 #include "fs_mount_internal.h"
 #include "inode_internal.h"
 #include "linux_abi.h"
@@ -354,6 +355,7 @@ int md_fs_mounts_join_context(struct md_filesystem *fs, struct md_guest_domain *
     fs->store->root_id=previous; return r;
 }
 void md_fs_mounts_close(struct md_filesystem *fs) {
+    md_binfmt_registry_destroy(fs->binfmt); fs->binfmt=NULL;
     md_mount_namespace_release(fs->mounts);
     fs->mounts = NULL; fs->native_root = NULL;
     md_fs_storage_prune(fs->storage);
@@ -387,6 +389,8 @@ int md_fs_mounts_open(struct md_filesystem *fs, const struct md_fs_attachment *e
     if (fs->mounts || count > MD_FS_MOUNTS_MAX) return -EINVAL;
     fs->mounts = md_mount_namespace_new();
     if (!fs->mounts) return -errno;
+    fs->binfmt=md_binfmt_registry_new();
+    if (!fs->binfmt) { md_fs_mounts_close(fs); return -ENOMEM; }
     if (!count) return 0;
     struct md_fs_mounts *tree = md_view_tree_new();
     if (!tree) { md_fs_mounts_close(fs); return -ENOMEM; }

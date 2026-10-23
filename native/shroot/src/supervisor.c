@@ -435,7 +435,8 @@ struct thread {
     struct md_fs_anchor *clone_cgroup;
     struct md_identity identity;
     struct md_exec_identity pending_identity;
-    int exec_images[2];
+    int exec_images[3];
+    struct md_fs_anchor *execfd_origin;
     struct md_process_executable *executable, *prepared_executable;
     struct md_fs_anchor *executable_origin, *prepared_executable_origin;
     int exec_images_ready;
@@ -612,10 +613,11 @@ static const unsigned long trace_options = PTRACE_O_TRACESECCOMP | PTRACE_O_TRAC
 static void release_operation(struct thread *t);
 static void metadata_restart_return(struct thread *t,long value);
 static void exec_images_release(struct thread *t) {
+    md_fs_anchor_release(t->execfd_origin); t->execfd_origin=NULL;
     md_exec_image_release(t->exec_setid); t->exec_setid=NULL;
     md_process_executable_release(t->prepared_executable); t->prepared_executable=NULL;
     md_fs_anchor_release(t->prepared_executable_origin); t->prepared_executable_origin=NULL;
-    for (unsigned i=0;i<2;++i) {
+    for (unsigned i=0;i<3;++i) {
         if (t->exec_images[i]>=0) close(t->exec_images[i]);
         t->exec_images[i]=-1;
     }
@@ -954,7 +956,7 @@ static struct thread *thread(pid_t pid) {
         .identity = md_identity_copy(&launch_identity), .memory = md_memory_new(),
         .shm_space = md_shm_space_new(),
         .buffer_open = {.fd=-1}, .proc_image_fd=-1, .control_mapping_fd=-1,
-        .exec_images = {-1,-1},
+        .exec_images = {-1,-1,-1},
         .fd_selector = md_fd_selector_new()};
     CHECK(t->memory && t->fd_selector && t->shm_space);
     unsigned bucket = (unsigned)pid % THREAD_BUCKETS;
@@ -1282,17 +1284,22 @@ static void image_request(struct thread *t, const struct seccomp_notif *q) {
     struct seccomp_notif_resp reply = {.id = q->id};
     if (q->data.instruction_pointer != RAW_GATE || t->phase != IDLE) reply.error = -EPERM;
     else if (q->data.args[0] == MD_GUEST_MAP_IMAGE) {
-        if (q->data.args[2]==MD_IMAGE_TAKE_PROGRAM || q->data.args[2]==MD_IMAGE_TAKE_LOADER) {
+        if (q->data.args[2]>=MD_IMAGE_TAKE_PROGRAM && q->data.args[2]<=MD_IMAGE_TAKE_EXECFD) {
             unsigned index=q->data.args[2]-MD_IMAGE_TAKE_PROGRAM;
             if (t->entered || !t->exec_images_ready || q->data.args[1]
                     || q->data.args[3] || q->data.args[4] || q->data.args[5]
                     || t->exec_images[index]<0) reply.error=-EPERM;
             else {
+                struct md_fd_origin_update update={0};
+                int error=index==2 ? md_fd_origins_prepare(t->resources.files,t->execfd_origin,0,&update) : 0;
+                if (error) { reply.error=error; goto image_reply; }
                 struct seccomp_notif_addfd add={.id=q->id,.flags=SECCOMP_ADDFD_FLAG_SEND,
-                    .srcfd=t->exec_images[index],.newfd_flags=O_CLOEXEC};
+                    .srcfd=t->exec_images[index],.newfd_flags=index==2 ? 0 : O_CLOEXEC};
                 int fd=ioctl(listener,SECCOMP_IOCTL_NOTIF_ADDFD,&add);
+                int saved=errno;
+                if (index==2) md_fd_origins_finish(&update,fd<0 ? -saved : fd);
                 if (fd>=0) { close(t->exec_images[index]); t->exec_images[index]=-1; return; }
-                reply.error=-errno;
+                reply.error=-saved;
             }
         } else if (t->entered || q->data.args[2] > 1) reply.error = -EPERM;
         else if (!q->data.args[2]) {
@@ -1380,6 +1387,7 @@ static void image_request(struct thread *t, const struct seccomp_notif *q) {
             }
         }
     } else reply.error = -EPROTO;
+image_reply:
     CHECK(!ioctl(listener, SECCOMP_IOCTL_NOTIF_SEND, &reply) || errno == ENOENT);
 }
 static void shm_request(struct thread *t, const struct seccomp_notif *q) {
@@ -4477,7 +4485,8 @@ static void proc_io_progress(struct thread *t) {
         struct md_process_limits limits=owner.process ? md_process_limits_value(owner.process) : (struct md_process_limits){0};
         if (owner.identity) md_proc_file_process_state(t->proc_io.file,owner.identity,owner.pid_namespace,
             md_debugger_owner(debugger,owner.pid),owner.process ? &limits : NULL);
-        t->proc_io.actor=(struct md_control_actor){.pid=t->pid,.identity=&t->identity,.resources=&t->resources};
+        t->proc_io.actor=(struct md_control_actor){.pid=t->pid,.identity=&t->identity,.resources=&t->resources,
+            .filesystem=filesystem,.submit=md_fs_worker_control};
         result=md_proc_file_io_execute(&t->proc_io,&t->identity,t->resources.uts,span.data,span.size,(size_t)getpagesize());
     }
     struct md_control_file file=md_proc_file_control(t->proc_file);
@@ -5008,7 +5017,7 @@ static void buffer_complete(struct md_fs_buffer_request *request, pid_t pid, int
         }
         int anonymous=0;
         CHECK(md_fs_buffer_exec_take(request,t->exec_images,&t->exec_mount_flags,&anonymous,
-            &t->prepared_executable_origin,&t->exec_setid)>=0);
+            &t->prepared_executable_origin,&t->execfd_origin,&t->exec_setid)>=0);
         if (anonymous) {
             CHECK(!t->prepared_executable);
             t->prepared_executable=md_process_executable_new(t->exec_images[0]);
@@ -5671,7 +5680,7 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
     }
     case MD_FS_BUFFER_EXEC_PREPARE:
         if (!t->buffer.pool || t->buffer_open.fd>=0 || r->regs[1]!=MD_FS_OPEN_IMAGE || r->regs[2]
-                || t->exec_images[0]>=0 || t->exec_images[1]>=0
+                || t->exec_images[0]>=0 || t->exec_images[1]>=0 || t->exec_images[2]>=0
                 || !((t->phase==IDLE && !t->entered && !t->mapped_image)
                     || (t->phase==DISPATCHING
                         && (t->original.regs[8]==SYS_execve || t->original.regs[8]==SYS_execveat)))) break;
@@ -8639,12 +8648,13 @@ int main(int argc, char **argv) {
                     t->resources.pid=md_pid_identity_retain(t->resources.pid_group);
                     exec_images_release(t);
                     memcpy(t->exec_images,former->exec_images,sizeof(t->exec_images));
+                    t->execfd_origin=former->execfd_origin; former->execfd_origin=NULL;
                     t->prepared_executable=former->prepared_executable; former->prepared_executable=NULL;
                     t->prepared_executable_origin=former->prepared_executable_origin;
                     former->prepared_executable_origin=NULL;
                     t->exec_mount_flags=former->exec_mount_flags;
                     t->exec_setid=former->exec_setid; former->exec_setid=NULL;
-                    former->exec_images[0]=former->exec_images[1]=-1;
+                    former->exec_images[0]=former->exec_images[1]=former->exec_images[2]=-1;
                     md_identity_release(&t->identity);
                     t->identity = md_identity_copy(&former->identity);
                     md_fd_selector_release(t->fd_selector);

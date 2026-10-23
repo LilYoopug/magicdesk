@@ -189,7 +189,8 @@ static const char *filesystem_type(const struct md_view_mount *mount) {
     if (mount && mount->backing==MD_MOUNT_SYSFS) return "sysfs";
     if (mount && mount->provider) {
         unsigned long type=md_provider_tree_filesystem(mount->provider);
-        return type==FUSE_SUPER_MAGIC ? "fuse" : type==SYSFS_MAGIC ? "sysfs" : "tmpfs";
+        return type==FUSE_SUPER_MAGIC ? "fuse" : type==SYSFS_MAGIC ? "sysfs"
+            : type==BINFMTFS_MAGIC ? "binfmt_misc" : "tmpfs";
     }
     if (mount && mount->backing==MD_MOUNT_MQUEUE) return "mqueue";
     if (mount && mount->cgroup) return md_cgroup_legacy(mount->cgroup) ? "cgroup" : "cgroup2";

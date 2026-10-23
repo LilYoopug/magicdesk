@@ -13,18 +13,28 @@ Namespace-local network configuration, supported nftables flow filtering and NAT
 
 `network_profile` owns the bounded native argument contract shared by image
 run/exec/login, the low-level runner and supervisor: host (default), none,
-bridge, the advanced routed backend, publications and DNS. Java's
+bridge, the advanced routed backend, publications, DNS and per-family addressing. Java's
 `GuestNetworkProfile` only carries immutable launch arguments; native code owns
 syntax, preparation and lifetime. MCP and shell CLI use that same runner. OS
 boot inherits the profile through its ordinary launch and namespace setup.
 
 `network_launch` prepares topology before guest execution. Host is a no-op.
 None enables private loopback without an uplink. Bridge retains a routed gateway
-and a private guest namespace in one fabric: gateway bridge `10.88.0.1/24`, guest
-`eth0` `10.88.0.2/24`, loopback and a default route. Independent launches reuse
+and a private guest namespace in one fabric: gateway bridge `10.88.0.1/24` and
+`fd6d:6473:1::1/64`, guest `eth0` `10.88.0.2/24` and `fd6d:6473:1::2/64`,
+loopback and per-family default routes. Independent launches reuse
 these logical addresses without sharing ports or owners. The supervisor owns
 both namespaces; the fabric's peer list remains weak, avoiding a reference cycle.
 Routed remains a supported low-level mode, not an obsolete bridge alias.
+
+The profile resolves `--subnet`, `--ip`, `--ip6` and `--gateway` once before
+preparation. Both topology and publication rules consume the same typed family
+configuration. Original strings are borrowed only to replay arguments through
+launch adapters; packet paths never parse CLI values. Address-family duplication,
+noncanonical prefixes, invalid endpoints and uplink overlap fail before allocation.
+The default topology above remains unchanged. A named/shared network manager is
+not implied by a per-launch profile: independent supervisors still own independent
+fabrics.
 
 Published TCP/UDP ports become shared typed DNAT rules reached from PREROUTING
 and OUTPUT on the gateway;
@@ -62,15 +72,18 @@ namespace annotations retained through descriptor-table operations.
 `network_calls` supplies bounded requests through the existing mapped transport;
 `network_namespace` owns control-socket carriers and `network_route` owns the
 NETLINK_ROUTE codec. Queries and CAP_NET_ADMIN-authorized mutations share one
-model: loopback, bridge/veth, master assignment, IPv4 addresses, routes and
+model: loopback, bridge/veth, master assignment, IPv4/IPv6 addresses, routes and
 typed namespace-FD moves. Replies preserve sequence, port identity, ACK and dump
-completion. Interface state and ACK publication share a fabric turn and mutation
-journal; allocation, encoding or queue failure rolls back all affected namespaces.
+completion. Topology changes share a fabric turn and mutation journal. Replies
+are prepared before notifications become visible; notifications precede the
+ACK, as consumers such as networkd correlate them with pending requests.
+Failures before publication roll back all affected namespaces. Once a listener
+can observe a change, a lost ACK cannot roll it back; overflow requests resync.
 The journal exists only for mutations, not queries or data IO. Netlink carriers
 provide kernel readiness and queue options without changing Android interfaces.
 `network_message` supplies common bounded replies and ACKs; `network_generic`
 publishes the nlctrl family catalogue without claiming absent kernel families.
-Route rule queries expose the IPv4 local/main/default policy; neighbor and
+Route rule queries expose the IPv4/IPv6 local/main/default policy; neighbor and
 traffic-control dumps are empty and their unsupported mutations fail explicitly.
 Strict queries validate complete headers and reject unsupported filters instead
 of silently ignoring them. Route dumps accept the header's table selector and
@@ -120,7 +133,7 @@ permissions and retained namespace authority with Base and lazy entry;
 `test_network_ethernet.c` covers bridge cycles and binding retirement.
 
 Default launches use native networking. Opt-in `--network routed` creates a
-launch-owned fabric with an IPv4 uplink in its initial namespace. Children start
+launch-owned fabric with an IPv4/IPv6 uplink in its initial namespace. Children start
 offline; configured bridge/veth routes grant connectivity. `network_endpoint`
 retains creation-namespace provenance, logical bind/peer addresses and private
 port translation, never a data OFD. The weak fabric endpoint list unlinks before
@@ -146,7 +159,7 @@ address nor handles ancillary data. Keeping a blocking payload receive outside
 the adapter lets a guest debugger interrupt and detach without waiting for
 application data.
 
-IPv4 `IP_PKTINFO` uses logical interface and destination addresses on receive,
+IPv4 `IP_PKTINFO` and IPv6 `IPV6_PKTINFO` use logical interface and destination addresses on receive,
 including a missing `msg_name` and truncated ancillary buffers. Send accepts
 local source/interface selection consistent with the supported route; unknown
 interfaces, nonlocal sources and unsupported routing return explicit errors.
@@ -156,13 +169,48 @@ selection and incoming endpoint lookup. Accepted TCP sockets inherit it. An idle
 bound socket can change the binding transactionally, releasing or restoring its
 external port reservation; existing direct/relayed flows reject retargeting with
 `EBUSY`. Bound flows use the existing relay so link deletion/down is checked;
-unbound sockets retain their existing fast path. IPv6, raw IP sockets, multicast
-subscriptions/broadcast, routed recvmmsg and other outgoing
+unbound sockets retain their existing fast path. General raw IP sockets, TCP/UDP
+multicast subscriptions/broadcast, routed recvmmsg and unsupported outgoing
 ancillary types are unsupported.
 This is not packet-level isolation: native ephemeral backing ports remain
 reachable, and inherited native descriptions retain authority. Independent
 supervisor transfer of these typed network owners is unsupported rather than
 silently dropping their annotations.
+
+`network_ip` supplies family-typed addresses while retaining the IPv4 scalar
+fast path. `network_route_ip` owns shared address/route codecs, connected-route
+deduplication, address lifetimes and route preference. `network_nexthop` retains
+single-interface nexthop objects and their route references; unsupported grouped
+or resilient nexthops fail explicitly. `network_autoconf` manages temporary IPv6
+addresses derived from MANAGETEMPADDR /64 templates. Address expiry, deprecation,
+temporary-address rotation and route expiry share the existing forwarding timer;
+ordinary packet IO does not scan deadlines or read a clock for these controls.
+
+`network_icmp6` supplies namespace-owned raw ICMPv6 control sockets on the same
+Ethernet fabric: router solicitation/advertisement transport, neighbor discovery,
+local echo, scope, interface membership, traffic class and ancillary metadata. It does not open
+Android raw sockets. Userspace networkd can process advertisements and install
+SLAAC addresses/routes. This is not a kernel RA client: unsupported `accept_ra`
+modes and unimplemented controls still fail explicitly.
+IPv6 route metrics accept MTU and hop limit, with `QUICKACK=0` retaining native
+adaptive TCP acknowledgements. `network_transport` combines route/interface
+limits with application socket options at connection or addressed-send preparation.
+IPv6 native sockets enforce MTU and hops; TCP also receives an MSS ceiling.
+Forwarded sockets use the same owner. Ordinary connected payload IO remains
+native. Nonzero IPv4 MTU/hop metrics, locked metrics, forced route QUICKACK and
+other unsupported metrics fail rather than being acknowledged without effect.
+Changing a route/interface ceiling or hop limit already selected by a connected
+native endpoint returns `EBUSY`, with the topology/sysctl update rolled back.
+The endpoint does not retain another data FD (which would delay close/EOF) and
+ordinary `read`/`write` does not check route generations or refresh socket options.
+This is connection-time transport policy, not full Linux live PMTU convergence.
+Application transport options are copied to new relay sockets; changing them
+while that endpoint has active relay mappings also returns `EBUSY`, rather than
+updating only the local leg. Unmediated native sockets remain independently mutable.
+UDP `AF_UNSPEC` disconnect resets the selected source and private flow mapping;
+the original explicit binding remains distinct from the previous route's source.
+External IPv6 TCP/UDP uses native backing sockets and requires an IPv6 route
+permitted to the executor by Android/VPN policy; Shroot does not alter that policy.
 
 ### Nftables and Flow Forwarding
 
@@ -181,7 +229,8 @@ snapshot; stale generation, invalid attributes, unsupported operations, encoding
 failure or failed response publication cannot commit a partial batch. Only a
 successful batch advances the generation. Mutation replies and state replacement
 share the fabric lock; queries and ordinary data IO never clone the catalogue.
-The shared netlink publication contract also serves rtnetlink mutations.
+Rtnetlink additionally publishes asynchronous topology notifications before its
+ACK; its observed-state rollback boundary is described above.
 
 Requests and replies are bounded at 64 KiB in the mapped adapter slot. A ruleset
 has at most 256 tables, 256 chains, 1024 rules, 64 expressions per rule and 1024
@@ -338,9 +387,10 @@ controls. Unknown controls are not implemented.
 Rtnetlink veth creation can assign a generated local name and create its peer
 directly in a namespace selected by an owned namespace FD. Both endpoints share
 one topology transaction, including rollback when response publication fails.
-Renaming is independent of cross-namespace move support. The single supported
-IPv4 default route retains its metric for queries, notifications and matching
-deletion; multiple default routes and policy routing remain unsupported.
+Renaming is independent of cross-namespace move support. IPv4/IPv6 routes retain
+prefix, metric, preference, interface/nexthop and lifetime for lookup, queries,
+notifications and matching deletion. Multiple routes use longest-prefix and
+metric selection; arbitrary policy-routing table mutation remains unsupported.
 
 Native rlimits retain the launch identity's real kernel ceilings. Virtual root
 does not grant Android CAP_SYS_RESOURCE: requests exceeding a hard limit keep
@@ -360,7 +410,7 @@ descriptor contract. It snapshots only live tracked endpoints belonging to the
 selected logical network namespace. Logical addresses, ports and guest owner IDs
 come from the endpoint model; the matching native socket inode supplies kernel
 state and queue counters. This is not a dump of Android's host sockets. The
-current routed transport is IPv4, so IPv6 tables contain only their header.
+IPv4 and IPv6 tables project their corresponding live endpoint families.
 Unowned terminal entries such as TIME_WAIT sockets are not synthesized.
 An open retains its selected namespace across setns; dup shares the offset,
 and reading from offset zero refreshes the snapshot. Unmanaged host networking

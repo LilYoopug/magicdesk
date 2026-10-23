@@ -828,9 +828,10 @@ paths:;
     }
     if (!r && (q->operation == MD_FS_UNLINK || q->operation == MD_FS_RENAME)
             && (mounted_root(&a) || (pair && mounted_root(&b)))) r = -EBUSY;
-    /* Data opens and typed sysfs mutations are authorized by their owner below.
+    /* Access probes inspect permissions, not the provider's ability to create
+     * arbitrary nodes. Data opens and typed sysfs mutations belong to their owner.
      * Generic private-tree mutations must be rejected before native dispatch. */
-    if (!r && mutates(q,&a) && q->operation!=MD_FS_OPEN && q->operation!=MD_FS_REOPEN
+    if (!r && mutates(q,&a) && q->operation!=MD_FS_ACCESS && q->operation!=MD_FS_OPEN && q->operation!=MD_FS_REOPEN
             && a.mount && a.mount->provider && !a.mount->sysfs) {
         int readonly=md_provider_tree_readonly(a.mount->provider,a.fd>=0 ? a.fd : a.parent);
         if (readonly) r=readonly<0 ? readonly : -EROFS;

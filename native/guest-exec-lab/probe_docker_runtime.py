@@ -49,7 +49,8 @@ def wait_daemon_api(endpoint, report, timeout=45):
 
 def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_runtime=False,
           no_new_keyring=False, trace_filesystem=False, create_count=0, trace_network=False, observer='',
-          storage_driver='vfs', data_root='', userland_proxy=True, internet=False, endpoint=''):
+          storage_driver='vfs', data_root='', userland_proxy=True, internet=False, endpoint='', ipv6=False,
+          internet_ipv6=False, ipv6_host='::1'):
     defaults = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     os.environ['PATH'] = os.pathsep.join(dict.fromkeys(
         path for path in (os.environ.get('PATH', '') + os.pathsep + defaults).split(os.pathsep) if path))
@@ -97,9 +98,9 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
         argv += ['--storage-driver=' + storage_driver,
                  '--userland-proxy=' + str(userland_proxy).lower()]
     if profile == 'nftables':
-        argv += ['--firewall-backend=nftables', '--ip6tables=false']
+        argv += ['--firewall-backend=nftables']
     elif profile == 'iptables':
-        argv += ['--iptables=true', '--ip6tables=false']
+        argv += ['--iptables=true']
     if trace_runtime or no_new_keyring:
         wrapper = base / 'runc-trace'
         wrapper.write_text('#!/usr/bin/python3\nimport os, sys\n'
@@ -182,24 +183,29 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
         names = ('md-port-first', 'md-port-second')
         network = 'md-network-ports'
         ports = []
-        assert client('network', 'create', network)
+        family = ['--ipv6'] if ipv6 else []
+        host = '[' + ipv6_host + ']' if ipv6 else '127.0.0.1'
+        def external(**request):
+            return observe(observer, ipv6=ipv6, **request)
+        assert client('network', 'create', *family, network)
         try:
             for name in names:
-                port = observe(observer, operation='allocate')['port']
+                port = external(operation='allocate')['port']
                 ports.append(port)
-                observe(observer, operation='handoff', port=port)
+                external(operation='handoff', port=port)
                 assert client('run', '-d', '--name', name, '--network', network,
-                              '-p', f'127.0.0.1:{port}:8080/tcp', '-p', f'127.0.0.1:{port}:8080/udp',
+                              '-p', f'{host}:{port}:8080/tcp', '-p', f'{host}:{port}:8080/udp',
                               '--cgroupns', cgroupns, '--mount',
                               'type=bind,src=' + str(Path(__file__).with_name('docker_network_fixture.py'))
-                              + ',dst=/fixture.py,readonly', image, 'python3', '/fixture.py', name)
+                              + ',dst=/fixture.py,readonly', image, 'python3', '/fixture.py', name, *family)
                 wait_service(['docker', '--host', endpoint, 'logs', '-f', name])
-                report.setdefault('portChecks', []).append(observe(observer, operation='exchange', port=port, token=name, repeats=20))
+                report.setdefault('portChecks', []).append(external(operation='exchange', port=port, token=name, repeats=20))
             for source, target in (names, tuple(reversed(names))):
-                assert client('inspect', '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', target)
-                address = str(ipaddress.IPv4Address(report['commands'][-1]['output'].strip()))
-                assert client('exec', source, 'python3', '/fixture.py', '--client', address, '8080', target, '20')
-                assert client('exec', source, 'python3', '/fixture.py', '--client', target, '8080', target, '20')
+                field = 'GlobalIPv6Address' if ipv6 else 'IPAddress'
+                assert client('inspect', '--format', '{{range .NetworkSettings.Networks}}{{.' + field + '}}{{end}}', target)
+                address = str(ipaddress.ip_address(report['commands'][-1]['output'].strip()))
+                assert client('exec', source, 'python3', '/fixture.py', '--client', address, '8080', target, '20', *family)
+                assert client('exec', source, 'python3', '/fixture.py', '--client', target, '8080', target, '20', *family)
             report['containerPeerExchangePassed'] = True
             report['namedPeerExchangePassed'] = True
             outbound = observe(observer, operation='outbound')['url']
@@ -207,13 +213,16 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
                 assert client('exec', name, 'python3', '/fixture.py', '--http', outbound)
             report['localOutboundPassed'] = True
             assert not client('run', '--rm', '--name', 'md-port-conflict', '--network', network,
-                              '-p', f'127.0.0.1:{ports[0]}:8080', image, '/bin/true')
+                              '-p', f'{host}:{ports[0]}:8080', image, '/bin/true')
             assert 'already allocated' in report['commands'][-1]['output'] \
                 or 'address already in use' in report['commands'][-1]['output'], report['commands'][-1]
             report['portPublicationTested'] = True
             if internet:
                 report['internetResults'] = [client('exec', name, 'python3', '/fixture.py', '--internet') for name in names]
                 report['internetPassed'] = all(report['internetResults'])
+            if internet_ipv6:
+                report['internetIpv6Results'] = [client('exec', name, 'python3', '/fixture.py', '--internet-ipv6') for name in names]
+                report['internetIpv6Passed'] = all(report['internetIpv6Results'])
         except Exception:
             report['networkRules'] = subprocess.run(['nft', '-a', 'list', 'ruleset'], capture_output=True,
                                                     text=True, timeout=15).stdout
@@ -230,7 +239,7 @@ def guest(profile, image, trace=False, cgroup='none', cgroupns='private', trace_
             network_removed = client('network', 'rm', network)
             assert removed and network_removed, report['commands'][-2:]
         for port in ports:
-            report['portChecks'].append(observe(observer, operation='released', port=port))
+            report['portChecks'].append(external(operation='released', port=port))
         report['portPublicationPassed'] = True
 
     try:
@@ -331,6 +340,9 @@ def main():
     parser.add_argument('--data-root', default='', help='Reuse this disposable daemon image cache')
     parser.add_argument('--userland-proxy', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--internet', action='store_true', help='Also require external DNS and HTTP')
+    parser.add_argument('--ipv6', action='store_true', help='Require a dual-stack bridge and IPv6 TCP/UDP, publication and named peers')
+    parser.add_argument('--ipv6-host', default='::1', help='Native Android IPv6 address for the external port observer')
+    parser.add_argument('--internet-ipv6', action='store_true', help='Require public IPv6 UDP/TCP DNS and verified HTTPS')
     tracing = parser.add_mutually_exclusive_group()
     tracing.add_argument('--trace', action='store_true')
     tracing.add_argument('--trace-runtime', action='store_true')
@@ -347,6 +359,10 @@ def main():
                         help='Verify TCP/UDP publication from outside Shroot; use a Python image')
     add_machine_entry_argument(parser)
     args = parser.parse_args()
+    if args.ipv6 and not args.exercise_ports:
+        parser.error('--ipv6 requires --exercise-ports')
+    if (args.internet_ipv6 or args.ipv6_host != '::1') and not args.ipv6:
+        parser.error('--internet-ipv6 and --ipv6-host require --ipv6')
     if args.exercise_ports and args.profile not in NETWORK_PROFILES:
         parser.error('--exercise-ports requires --profile routed, iptables or nftables')
     if args.image is None:
@@ -361,7 +377,7 @@ def main():
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/probe.py')
         if args.exercise_ports:
             from docker_network_fixture import Observer
-            observer = Observer()
+            observer = Observer(args.ipv6_host)
             suite.transport.upload(suite.client, Path(__file__).with_name('docker_network_fixture.py'),
                                    suite.base + '/docker_network_fixture.py')
         suite.command(prefix + ['--', '/bin/mkdir', target])
@@ -385,7 +401,8 @@ def main():
                                         str(int(args.trace_filesystem)), str(args.create_count),
                                         str(int(args.trace_network)), observer.address if observer else '',
                                         args.storage_driver, args.data_root,
-                                        str(int(args.userland_proxy)), str(int(args.internet))],
+                                        str(int(args.userland_proxy)), str(int(args.internet)), str(int(args.ipv6)),
+                                        str(int(args.internet_ipv6)), args.ipv6_host],
                                quiet=True, timeout=deadline + 30)
         reports = [line.removeprefix('DOCKER_REPORT ') for line in output.splitlines()
                    if line.startswith('DOCKER_REPORT ')]
@@ -400,6 +417,8 @@ def main():
             assert suite.report['probeResult']['readerDrained'], suite.report['probeResult']
             if args.internet:
                 assert suite.report['probeResult'].get('internetPassed'), 'External DNS/HTTP failed; local matrix is recorded separately'
+            if args.internet_ipv6:
+                assert suite.report['probeResult'].get('internetIpv6Passed'), 'External IPv6 DNS/HTTPS failed'
             for item in suite.report['probeResult']['commands']:
                 if 'md-port-conflict' in item['command'] and 'run' in item['command']:
                     continue
@@ -425,6 +444,9 @@ if __name__ == '__main__':
               sys.argv[12] if len(sys.argv)>12 else '', sys.argv[13] if len(sys.argv)>13 else 'vfs',
               sys.argv[14] if len(sys.argv)>14 else '',
               bool(int(sys.argv[15])) if len(sys.argv)>15 else True,
-              bool(int(sys.argv[16])) if len(sys.argv)>16 else False)
+              bool(int(sys.argv[16])) if len(sys.argv)>16 else False,
+              ipv6=bool(int(sys.argv[17])) if len(sys.argv)>17 else False,
+              internet_ipv6=bool(int(sys.argv[18])) if len(sys.argv)>18 else False,
+              ipv6_host=sys.argv[19] if len(sys.argv)>19 else '::1')
     else:
         main()

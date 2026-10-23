@@ -22,6 +22,7 @@ static const struct node { const char *path; enum attribute attribute; const cha
     {"class",DIRECTORY,NULL}, {"class/net",DIRECTORY,NULL},
     {"devices",DIRECTORY,NULL}, {"devices/virtual",DIRECTORY,NULL},
     {"devices/virtual/net",DIRECTORY,NULL},
+    {"firmware",DIRECTORY,NULL},
     {"fs",DIRECTORY,NULL}, {"fs/cgroup",DIRECTORY,NULL}, {"kernel",DIRECTORY,NULL},
 };
 static const struct node attributes[]={

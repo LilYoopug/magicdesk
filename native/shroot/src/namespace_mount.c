@@ -61,6 +61,7 @@ long md_namespace_mount(const struct md_fs *fs, long nr, const unsigned long *a)
             else if (md_equal(type,"cgroup2")) q.mode=MD_FS_MOUNT_CGROUP2;
             else if (md_equal(type,"sysfs")) q.mode=MD_FS_MOUNT_SYSFS;
             else if (md_equal(type,"mqueue")) q.mode=MD_FS_MOUNT_MQUEUE;
+            else if (md_equal(type,"binfmt_misc")) q.mode=MD_FS_MOUNT_BINFMT;
             else if (md_equal(type,"fuse") || (type[0]=='f' && type[1]=='u' && type[2]=='s'
                     && type[3]=='e' && type[4]=='.' && type[5])) q.mode=MD_FS_MOUNT_FUSE;
             else return -ENODEV;

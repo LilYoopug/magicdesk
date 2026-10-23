@@ -136,16 +136,23 @@ static int evaluate_chain(struct md_network_filter *f,const struct md_filter_cha
                 break;
             }
             case MD_FILTER_PAYLOAD: {
-                unsigned char header[20]={0};
+                unsigned char header[40]={0};
                 if (e->key==NFT_PAYLOAD_NETWORK_HEADER) {
-                    header[0]=0x45; header[9]=(unsigned char)p->protocol;
-                    memcpy(header+12,&p->source,4); memcpy(header+16,&p->destination,4);
+                    if (p->destination.family==AF_INET6) {
+                        header[0]=0x60; header[6]=(unsigned char)p->protocol;
+                        memcpy(header+8,p->source.bytes,16); memcpy(header+24,p->destination.bytes,16);
+                    } else {
+                        header[0]=0x45; header[9]=(unsigned char)p->protocol;
+                        memcpy(header+12,p->source.bytes,4); memcpy(header+16,p->destination.bytes,4);
+                    }
                 } else { memcpy(header,&p->source_port,2); memcpy(header+2,&p->destination_port,2); }
+                if (e->aux+e->size>(e->key==NFT_PAYLOAD_NETWORK_HEADER
+                        ? (p->destination.family==AF_INET6 ? 40U : 20U) : 4U)) { match=0; break; }
                 memset(dst,0,(e->size+3)&~3U); memcpy(dst,header+e->aux,e->size); break;
             }
             case MD_FILTER_META:
                 switch (e->key) {
-                case NFT_META_NFPROTO: value=NFPROTO_IPV4; break;
+                case NFT_META_NFPROTO: value=p->destination.family==AF_INET6 ? NFPROTO_IPV6 : NFPROTO_IPV4; break;
                 case NFT_META_L4PROTO: value=p->protocol; break;
                 case NFT_META_MARK: value=p->mark; break;
                 case NFT_META_IIF: value=p->input; break;
@@ -186,13 +193,14 @@ static int evaluate_chain(struct md_network_filter *f,const struct md_filter_cha
                 match=e->operation ? !found : found; break;
             }
             case MD_FILTER_NAT:
+                if (e->family && e->family!=p->destination.family) { match=0; break; }
                 if (e->operation==NFT_NAT_DNAT) {
-                    if (e->key) memcpy(&p->destination,e->constant ? e->value : registers+e->dst,4);
-                    if (e->aux) memcpy(&p->destination_port,e->constant ? e->value+4 : registers+e->src,2);
+                    if (e->key) memcpy(p->destination.bytes,e->constant ? e->value : registers+e->dst,md_ip_size(p->destination));
+                    if (e->aux) memcpy(&p->destination_port,e->constant ? (const void *)&e->nat_port : registers+e->src,2);
                     p->dnat=1; p->status|=1U<<5;
                 } else {
-                    if (e->key) memcpy(&p->source,e->constant ? e->value : registers+e->dst,4);
-                    if (e->aux) memcpy(&p->source_port,e->constant ? e->value+4 : registers+e->src,2);
+                    if (e->key) memcpy(p->source.bytes,e->constant ? e->value : registers+e->dst,md_ip_size(p->source));
+                    if (e->aux) memcpy(&p->source_port,e->constant ? (const void *)&e->nat_port : registers+e->src,2);
                     p->snat=1; p->status|=1U<<4;
                 }
                 return NF_ACCEPT;
@@ -227,6 +235,12 @@ static int evaluate_chain(struct md_network_filter *f,const struct md_filter_cha
 int md_filter_evaluate(struct md_network_filter *f,unsigned hook,struct md_filter_packet *p) {
     return md_filter_evaluate_transition(f,hook,p,NULL,NULL);
 }
+int md_filter_chain_applies(const struct md_network_filter *f,const struct md_filter_chain *c,unsigned family) {
+    unsigned protocol=family==AF_INET6 ? NFPROTO_IPV6 : NFPROTO_IPV4;
+    for (size_t i=0;i<f->count;++i) if (f->tables[i].handle==c->table)
+        return f->tables[i].family==NFPROTO_INET || f->tables[i].family==protocol;
+    return 0;
+}
 int md_filter_evaluate_transition(struct md_network_filter *f,unsigned hook,struct md_filter_packet *p,
         const struct md_filter_rewrite *rewrite,int *nat_priority) {
     /* Order is stable for equal priorities. NF_ACCEPT ends a chain, not the
@@ -238,7 +252,7 @@ int md_filter_evaluate_transition(struct md_network_filter *f,unsigned hook,stru
         size_t count=f ? f->chain_count : 0,selected=count;
         for (size_t i=0;i<count;++i) {
             struct md_filter_chain *c=&f->chains[i];
-            if (c->hook!=(int)hook || (started && (c->priority<previous_priority
+            if (!md_filter_chain_applies(f,c,p->destination.family) || c->hook!=(int)hook || (started && (c->priority<previous_priority
                     || (c->priority==previous_priority && i<=previous_index)))) continue;
             if (selected==count || c->priority<f->chains[selected].priority) selected=i;
         }

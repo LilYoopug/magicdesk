@@ -53,14 +53,14 @@ not just a completed Mesa build or successful device enumeration.
 | Recipe ID | Recipe setup | Package lifecycle | PID 1 boot | Service lifecycle | Turnip rendering |
 | --- | --- | --- | --- | --- | --- |
 | debian | P/N | I/N | P/N | P/N | I/N |
-| ubuntu | P/N | P/N | P/N | I/N | P/N |
+| ubuntu | P/N | P/N | I/N | I/N | P/N |
 | alpine | P/N | P/N | P/N | P/N | P/N |
 | fedora | P/N | P/N | P/N | P/N | P/N |
 | arch | P/N | P/N | P/N | P/N | I/N |
 | opensuse | P/N | I/N | P/N | P/N | N/N |
-| openkylin | P/N | P/N | P/N | H/N | N/N |
-| deepin | P/N | N/N | F/N | H/N | N/N |
-| manjaro | P/N | N/N | H/N | H/N | N/N |
+| openkylin | P/N | P/N | P/N | P/N | N/N |
+| deepin | P/N | N/N | P/N | P/N | N/N |
+| manjaro | P/N | N/N | P/N | P/N | N/N |
 | void | P/N | N/N | P/N | P/N | I/N |
 | armtix | P/N | P/N | F/N | P/N | N/N |
 | steamos | P/N | I/N | F/N | I/N | I/N |
@@ -69,6 +69,75 @@ Package lifecycle means install, update/reinstall, verification and removal,
 including transaction hooks. A zero package-manager exit with failed hooks is
 not a pass. SteamOS default boot remains degraded; focused control-target tests
 do not certify a healthy default target. See [init contracts and limits](init-matrix.md).
+
+### Boot And IPv6 Acceptance
+
+The 2026-10-23 staged-runtime run used each installed recipe environment, without
+an init replacement. All local IPv6 suites passed. The networkd scenario checks
+router solicitation/advertisement, SLAAC lifetimes, gateway installation,
+wait-online, effective MTU/hop limit, TCP/UDP traffic and router withdrawal.
+The binfmt scenario checks the stock boot unit, execution and service restart.
+These do not certify every networkd option or external internet access.
+
+Receipts below are `oci-services-ID.json`: boot receipts are under
+`build/ipv6-binfmt-boot/`, socket receipts under `build/shroot-image-tests/`.
+All runs use default lazy entry; Base remains untested in this batch.
+
+| Recipe | Boot / binfmt / networkd | Boot receipt ID | Local IPv6 receipt ID (PASS) |
+| --- | --- | --- | --- |
+| debian | P / P / P | `575399e858884d1dbe1874242cae6a4c` | `f5225204674149c89d412b6345ce8e6d` |
+| ubuntu | I / P / P | `ab02a8bece5d46de807eb0347bc60696` | `5288fb359718469ea76033506b3cffa6` |
+| alpine | P / N / NA (OpenRC) | `f1baebe8d6554b46a002af7387a0e1ac` | `d0b867759a994e8fbc60692e5285a09e` |
+| fedora | P / P / P | `2dae19fc1aa245cf8f7add26663e40fa` | `5299bce94b364f1e8aa8304d7c8638a3` |
+| arch | P / P / P | `bc915121291e4f34ab51401a0269f49d` | `d69c5902538b433dba0bba1074fa618b` |
+| opensuse | P / P / P | `02e150c483294a1da3bd1a317873ed57` | `32f9692fc7db4dda83a0d406a2758e67` |
+| openkylin | P / P / P | `df13520ab5d741d99a59464f095608a5` | `1714ef9068d045a2a256d80be63d0859` |
+| deepin | P / P / P | `40f5b5045a224a71b27437364a80cc91` | `d4f59c0e2d1d43bcbd4d22b924001072` |
+| manjaro | P / P / P | `f7be656fa9da4364915e575d3af7b30f` | `28c08a0520b148459d0052b90d569b69` |
+| void | P / N / NA (runit) | `c9d13ce4051c47eb8157aecc1a0f29b2` | `d7281d10f2024a239cd902720e544e31` |
+| armtix | F / N / NA (runit) | `7d7b16ec3ea64ccdb9983f4b9afd8447` | `2473bd1c2149472daa21744e1cbdca78` |
+| steamos | F / N / N | `fa6234c4dadc46878677e15ed535fb97` | `0aebd5e239ad43f6b1f1a62cbf5e8249` |
+
+Fedora and openSUSE required their separately packaged networkd, installed in
+the lab from their own repositories before the passing rerun. This does not
+replace openSUSE's Wicked or add a test-only dependency to the user recipe.
+SteamOS's failed default target prevents its post-boot assertions from running:
+Avahi encounters UDP port sharing conflicts and firewalld submits unsupported
+nftables expressions. Armtix reaches runit but its stock root filesystem stage
+fails at read-only superblock reconfiguration (`FSCONFIG_CMD_RECONFIGURE`,
+`EOPNOTSUPP`); service lifecycle alone is not boot acceptance.
+Ubuntu had one `snap.cups.cups-browsed` failure in `snap-update-ns`
+(`76eba5ca4a2a430ea8083fcb3b0465a0`), followed by a diagnostic pass and three
+ordinary passes. Its intermittent startup failure remains unresolved.
+
+### Candidate Distribution: NixOS
+
+NixOS is not yet an installer recipe or a recipe-installed matrix row. The
+2026-10-23 probe uses the official ARM64 LXC rootfs
+`nixos-image-lxc-26.05.12530.c1ff116587e6-aarch64-linux.tar.xz` from
+[Hydra build 350465271](https://hydra.nixos.org/build/350465271), SHA-256
+`333b1d718db3d99147ca2b5fb6d533b4aabaac98420d48e9a5369799433352ae`.
+The imported image and writable probe instance are separate; no foreign
+userspace, altered activation script or disabled service substitutes for NixOS.
+
+| Scenario | Shroot / Base | Evidence under `build/ipv6-binfmt-boot/` |
+| --- | --- | --- |
+| Store registration and forced sandboxed derivation rebuild | P/N | `oci-services-ba4904b02e9c43c8bf2dbcad30f66e25.json`; stock `nix-build --check --option sandbox true`, local inputs, substituters disabled, output readback |
+| Stock activation | F/N | Same receipt; `mount -t ramfs` for `/run/keys` is unsupported |
+| Stock `/sbin/init`, default target and shutdown | F/N | `oci-services-1d85987e21154c23b3e26eb032e13902.json`; systemd 260.5 reaches multi-user, but reports degraded; clean guest shutdown |
+
+The boot uses routed networking with guest-owned DNS; resolvconf and
+network-local-commands complete. A launch-owned read-only DNS mount is not
+compatible with openresolv managing the same file. The only failed unit is
+firewall: focused command diagnostics identify unsupported nftables `pkttype`
+matching (`oci-services-5080f11f05c34de9b7e2b4ff4f21c3fa.json`). DHCP startup
+also encounters unsupported netlink/socket operations and times out internally,
+despite the unit becoming active. This is not network acceptance.
+The boot observer reports journald,
+D-Bus and logind active, but does not run its service-IO acceptance assertions
+after a degraded boot. Desktop, graphics, containers and package lifecycle
+remain untested. Disk-backed logical tmpfs is not a replacement for ramfs's
+memory-only, non-swappable contents, especially for `/run/keys`.
 
 ## Containers And Virtual Machines
 
@@ -98,6 +167,30 @@ neither a TCG pass nor guest `/dev/kvm` absence establishes host KVM availabilit
 | void | P/N | P/N | P/N | P/N |
 | armtix | P/N | P/N | P/N | P/N |
 | steamos | P/N | P/N | N/N | P/N |
+
+### IPv6 Uplink Coverage
+
+The following 2026-10-23 checks use the staged native runtime under Android UID
+2000; they supplement, rather than replace, the booted-service matrix above.
+The ordinary VPN rejects IPv6. An authorized temporary host policy rule selected
+the existing cellular route only for `2606:4700:4700::1111/128` and the test UIDs.
+The container publication check additionally assigned the outer guest's IPv6
+address to Android loopback. Both rules and the address were removed and absence
+verified after the tests; the VPN policy was not changed. This is lab setup,
+not a root dependency or automatic VPN bypass in Shroot.
+
+| Recipe | IPv6 uplink checks | Evidence |
+| --- | --- | --- |
+| alpine | PASS: routed and bridge, UDP DNS, TCP DNS, verified HTTPS, remote IPv6 source | `build/ipv6-binfmt-boot/oci-services-4dbeeb4aceac4edbb3cd934febf41f12.json` |
+| arch | PASS: routed and bridge uplink; local ICMPv6, address/route lifecycle, dual-stack sockets, nftables and publication | `build/shroot-image-tests/oci-services-04b7301938c348ad85458cbbacedea6f.json` |
+| ubuntu | PASS: routed and bridge, UDP DNS, TCP DNS, verified HTTPS, remote IPv6 source | `build/ipv6-binfmt-boot/oci-services-4dbeeb4aceac4edbb3cd934febf41f12.json` |
+| arch / Docker | PASS: nftables, no userland proxy, VFS, cgroup v2; IPv6 TCP/UDP host-address publication, peer IP/names, DNS/HTTPS from both containers, conflicts and released ports | `build/shroot-image-tests/oci-services-f55084f23c3e4036a1ddff141dd841cc.json` |
+| arch / Podman | PASS: overlay, stock seccomp/cgroups; IPv6 TCP/UDP host-address publication, named peers, DNS/HTTPS from both containers, conflicts and released ports | `build/podman-results/oci-services-b8cd9497a9e445488e38c39842e2b2ca.json` |
+
+The publication client is native Termux UID 10601, outside Shroot. Its tested
+address is `fd6d:6473::64`, not `::1`. These receipts do not certify public
+inbound cellular reachability, every distribution's networkd boot, arbitrary
+IPv6 destinations, or a different VPN's behavior.
 
 ## Packaged Browsers And Portals
 

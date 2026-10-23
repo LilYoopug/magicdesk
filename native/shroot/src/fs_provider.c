@@ -51,10 +51,9 @@ int md_fs_provider_operation(struct md_filesystem *fs,struct md_mount_namespace 
     if (!managed) {
         int write_open=(q->operation==MD_FS_OPEN || q->operation==MD_FS_REOPEN)
             && !(q->flags&O_PATH) && (q->flags&(O_ACCMODE|O_TRUNC));
-        int write_access=q->operation==MD_FS_ACCESS && (q->mode&W_OK);
         int write_xattr=q->operation==MD_FS_XATTR_OBJECT
             && (q->mode==MD_FS_XATTR_SET || q->mode==MD_FS_XATTR_REMOVE);
-        if (write_open || write_access || write_xattr) {
+        if (write_open || write_xattr) {
             int readonly=md_provider_tree_readonly(mount->provider,fd);
             if (readonly) { out->error=readonly<0 ? readonly : -EROFS; return 1; }
         }

@@ -33,7 +33,8 @@ int md_command_script(char header[MD_SCRIPT_HEADER], char **name, char **argumen
 void md_command_images_close(struct md_command_images *images) {
     if (images->program>=0) RAW1(close,images->program);
     if (images->loader>=0) RAW1(close,images->loader);
-    *images=(struct md_command_images){.program=-1,.loader=-1};
+    if (images->execfd>=0) RAW1(close,images->execfd);
+    *images=(struct md_command_images)MD_COMMAND_IMAGES_EMPTY;
 }
 static long readable(int input) {
     struct stat st;
@@ -51,7 +52,7 @@ static long readable(int input) {
 }
 int md_command_images_prepare(struct md_command_recipe *recipe, struct md_command_images *images,
         const struct md_program *first, int inaccessible, md_command_acquire acquire, void *context) {
-    *images=(struct md_command_images){.program=-1,.loader=-1};
+    *images=(struct md_command_images)MD_COMMAND_IMAGES_EMPTY;
     memset(recipe,0,sizeof(*recipe));
     struct md_program current=*first;
     long r=readable(first->fd);
@@ -60,7 +61,7 @@ int md_command_images_prepare(struct md_command_recipe *recipe, struct md_comman
     enum md_command_file kind=MD_COMMAND_EXECUTABLE;
     for (;;) {
         char next[MD_INTERPRETER_MAX];
-        r=md_command_images_step(recipe,images,&current,kind,inaccessible,next);
+        r=md_command_images_step(recipe,images,&current,kind,inaccessible,next,NULL,NULL);
         if (r<=0) return (int)r;
         kind=(enum md_command_file)(r-1);
         r=acquire(context,next,&current,kind);
@@ -68,7 +69,8 @@ int md_command_images_prepare(struct md_command_recipe *recipe, struct md_comman
     }
 }
 int md_command_images_step(struct md_command_recipe *recipe,struct md_command_images *images,
-        struct md_program *current,enum md_command_file kind,int inaccessible,char next[MD_INTERPRETER_MAX]) {
+        struct md_program *current,enum md_command_file kind,int inaccessible,char next[MD_INTERPRETER_MAX],
+        md_command_format format,void *context) {
     int fd=current->fd; current->fd=-1;
     if (kind==MD_COMMAND_INTERPRETER) images->loader=fd;
     else {
@@ -86,6 +88,11 @@ int md_command_images_step(struct md_command_recipe *recipe,struct md_command_im
         if (!r && (!S_ISREG(st.st_mode) || (st.st_mode&(S_ISUID|S_ISGID)))) r=-EACCES;
         char header[MD_SCRIPT_HEADER]={0};
         if (!r) r=RAW4(pread64,fd,header,sizeof(header),0);
+        if (r>=0 && format) {
+            int matched=format(context,current,header,(size_t)r,next);
+            if (matched>0) return MD_COMMAND_EXECUTABLE+1;
+            if (matched<0) r=matched;
+        }
         if (r>=0 && (r<2 || header[0]!='#' || header[1]!='!')) {
             r=md_elf_interpreter(fd,next);
             if (!r) {
@@ -95,10 +102,12 @@ int md_command_images_step(struct md_command_recipe *recipe,struct md_command_im
                 return *next ? MD_COMMAND_INTERPRETER+1 : 0;
             }
         } else if (r>=0) {
-            if (!recipe->scripts && inaccessible) r=-ENOENT;
-            else if (recipe->scripts==MD_SCRIPT_DEPTH) r=-ELOOP;
+            if (!recipe->redirects && inaccessible) r=-ENOENT;
+            else if (recipe->redirects==MD_SCRIPT_DEPTH) r=-ELOOP;
             else {
-                memcpy(recipe->lines[recipe->scripts++],header,sizeof(header));
+                struct md_command_redirect *redirect=&recipe->redirect[recipe->redirects++];
+                redirect->kind=MD_REDIRECT_SCRIPT;
+                memcpy(redirect->text,header,sizeof(header));
                 char *name,*option;
                 r=md_command_script(header,&name,&option);
                 if (!r) r=md_copy(next,MD_INTERPRETER_MAX,name);

@@ -72,6 +72,7 @@ struct md_fs_buffer_request {
     struct md_command_images images;
     struct md_exec_image *setid;
     struct md_fs_anchor *image_origin;
+    struct md_fs_anchor *execfd_origin;
     struct md_program *proc_image;
     struct md_file_snapshot snapshot;
     enum { SNAPSHOT_NONE, SNAPSHOT_BEGIN, SNAPSHOT_APPEND, SNAPSHOT_FINISH } snapshot_phase;
@@ -159,6 +160,7 @@ static void dispose(struct md_fs_buffer_request *r) {
     md_command_images_close(&r->images);
     md_exec_image_release(r->setid);
     md_fs_anchor_release(r->image_origin);
+    md_fs_anchor_release(r->execfd_origin);
     if (r->proc_image) {
         if (r->proc_image->fd>=0) close(r->proc_image->fd);
         md_fs_anchor_release(r->proc_image->origin);
@@ -589,7 +591,7 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     }
     if (r->executable) {
         r->error=md_fs_command_prepare(&r->context,&r->request,&r->proc_image,&r->output->command,&r->images,
-            &r->image_origin,&r->setid,&r->execution);
+            &r->image_origin,&r->execfd_origin,&r->setid,&r->execution);
         if (r->error==-EINPROGRESS) { r->error=0; r->work.await=continuation_ready; }
         return;
     }
@@ -758,7 +760,7 @@ static struct md_fs_buffer_request *request_new(struct md_fs_buffer_service *s,p
     if (!r) return NULL;
     atomic_init(&r->cancelled,0);
     r->service=s; r->actor=actor; r->opened.fd=r->control_descriptor=r->fifo_control=-1;
-    r->images=(struct md_command_images){.program=-1,.loader=-1};
+    r->images=(struct md_command_images)MD_COMMAND_IMAGES_EMPTY;
     r->snapshot.fd=-1; r->captured[0]=r->captured[1]=-1;
     return r;
 }
@@ -980,18 +982,19 @@ struct md_landlock_policy *md_fs_buffer_landlock_take(struct md_fs_buffer_reques
     struct md_landlock_policy *policy=r->landlock;
     r->landlock=NULL; return policy;
 }
-int md_fs_buffer_exec_take(struct md_fs_buffer_request *r, int out[2], unsigned *mount_flags, int *anonymous,
-        struct md_fs_anchor **origin, struct md_exec_image **setid) {
+int md_fs_buffer_exec_take(struct md_fs_buffer_request *r, int out[3], unsigned *mount_flags, int *anonymous,
+        struct md_fs_anchor **origin,struct md_fs_anchor **execfd_origin,struct md_exec_image **setid) {
     if (!r) return -EINVAL;
     if (!r->executable) return 0;
-    if (!out || !mount_flags || !anonymous || !origin || *origin || !setid || *setid) return -EINVAL;
-    if (r->error || r->images.program<0 || out[0]>=0 || out[1]>=0) return -EINVAL;
-    out[0]=r->images.program; out[1]=r->images.loader;
+    if (!out || !mount_flags || !anonymous || !origin || *origin || !execfd_origin || *execfd_origin || !setid || *setid) return -EINVAL;
+    if (r->error || r->images.program<0 || out[0]>=0 || out[1]>=0 || out[2]>=0) return -EINVAL;
+    out[0]=r->images.program; out[1]=r->images.loader; out[2]=r->images.execfd;
     *mount_flags=r->images.mount_flags;
     *anonymous=r->images.anonymous;
     *origin=r->image_origin; r->image_origin=NULL;
+    *execfd_origin=r->execfd_origin; r->execfd_origin=NULL;
     *setid=r->setid; r->setid=NULL;
-    r->images=(struct md_command_images){.program=-1,.loader=-1}; return 1;
+    r->images=(struct md_command_images)MD_COMMAND_IMAGES_EMPTY; return 1;
 }
 static struct md_fs_anchor *capture_origin(struct md_fs_buffer_request *r,unsigned index) {
     const struct md_fs_task_capture *capture=&r->request.capture[index];

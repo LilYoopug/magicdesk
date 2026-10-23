@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Namespace-owned IPv4 policy files through ordinary proc IO, under shell."""
+"""Namespace-owned IP policy files through ordinary proc IO, under shell."""
 import argparse
 from contextlib import ExitStack
 import ctypes
@@ -40,13 +40,13 @@ def write(name, text):
 
 def guest():
     os.environ['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-    def ipv4_proc(root):
+    def ip_proc(root):
         controls = Path(root) / 'sys/net'
         assert 'ipv4' in os.listdir(controls)
-        assert 'ipv6' not in os.listdir(controls)
-        denied(lambda: (controls / 'ipv6').stat(), errno.ENOENT)
-        denied(lambda: (controls / 'ipv6/conf/all/forwarding').read_bytes(), errno.ENOENT)
-        denied(lambda: os.open(controls / 'ipv6/conf/all/forwarding', os.O_WRONLY), errno.ENOENT)
+        assert 'ipv6' in os.listdir(controls)
+        assert (controls / 'ipv6/conf/all/forwarding').read_text() == '0\n'
+        assert (controls / 'ipv6/conf/default/disable_ipv6').read_text() == '0\n'
+        assert (controls / 'ipv6/bindv6only').read_text() == '0\n'
         # A pre-existing proc mount keeps its original PID namespace even
         # after unshare(CLONE_NEWPID). Use the PID exposed by that mount.
         process = os.readlink(str(Path(root) / 'self'))
@@ -68,10 +68,10 @@ def guest():
                 os.close(fd)
         for suffix in ('net', 'self/net', 'thread-self/net', process + '/net'):
             directory = Path(root) / suffix
-            denied(lambda: (directory / 'if_inet6').stat(), errno.ENOENT)
-            denied(lambda: (directory / 'if_inet6').read_bytes(), errno.ENOENT)
-            assert 'if_inet6' not in os.listdir(directory), directory
-    ipv4_proc('/proc')
+            assert stat.S_ISREG((directory / 'if_inet6').stat().st_mode)
+            (directory / 'if_inet6').read_bytes()
+            assert 'if_inet6' in os.listdir(directory), directory
+    ip_proc('/proc')
     with ExitStack() as sockets:
         def netlink(protocol=0):
             return sockets.enter_context(socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, protocol))
@@ -87,7 +87,7 @@ def guest():
         first.setsockopt(270, 2, 2)  # DROP_MEMBERSHIP, NOTIFY
         assert first.getsockname()[1] == subscriptions & ~2
         first.setsockopt(270, 1, 2)
-        first.setsockopt(270, 2, 12)  # IPv6 link catalogue is empty but observable.
+        first.setsockopt(270, 2, 12)  # IPv6 link observation.
         assert first.getsockname()[1] == subscriptions & ~(1 << 11)
         first.setsockopt(270, 1, 12)
         for group in (18, 20, 25):  # PREFIX, ND_USEROPT, IPv6 NETCONF
@@ -98,8 +98,22 @@ def guest():
         first.settimeout(5)
         request = struct.pack('=IHHII', 32, 18, 0x301, 71, 0) + bytes([socket.AF_INET6]) + bytes(15)
         assert first.sendto(request, (0, 0)) == len(request)
-        reply, source = first.recvfrom(4096)
-        assert source == (0, 0) and struct.unpack('=IHHIIi', reply) == (20, 3, 2, 71, first.getsockname()[0], 0)
+        complete, links = False, 0
+        while not complete:
+            reply, source = first.recvfrom(65536)
+            assert source == (0, 0)
+            offset = 0
+            while offset < len(reply):
+                size, kind, flags, seq, port = struct.unpack_from('=IHHII', reply, offset)
+                assert seq == 71 and port == first.getsockname()[0] and kind in (3, 16)
+                if kind == 16:
+                    assert reply[offset + 16] == socket.AF_INET6
+                    links += 1
+                else:
+                    assert struct.unpack_from('=i', reply, offset + 16)[0] == 0
+                    complete = True
+                offset += (size + 3) & ~3
+        assert links == 1
         # Standalone nexthops are an empty catalogue, not an unsupported
         # subscription. Modern network managers subscribe before dumping it.
         first.setsockopt(270, 1, 32)  # SOL_NETLINK, ADD_MEMBERSHIP, NEXTHOP
@@ -360,7 +374,7 @@ def guest():
             result = libc.umount2(os.fsencode(directory), 2)
             assert result == 0 or ctypes.get_errno() == errno.EINVAL, ctypes.get_errno()
         cleanup.callback(detach)
-        ipv4_proc(directory)
+        ip_proc(directory)
         conf = Path(directory + '/sys/net/ipv4/conf')
         entries = sorted(p.name for p in conf.iterdir())
         assert entries == ['all', 'default', 'lo'], entries

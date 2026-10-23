@@ -185,8 +185,9 @@ int main(int argc, char **argv) {
         "       image prepare STORE (update supported metadata before use; busy stores are retained)\n"
         "       image exec INSTANCE [OPTIONS] -- COMMAND... | login INSTANCE [OPTIONS] [-- SHELL...]\n"
         "       image run INSTANCE [--user current|UID[:GID]|NAME[:GROUP]] [--cwd PATH] [--entrypoint PROGRAM] [--env KEY=VALUE] [--statistics]\n"
-        "             [--hostname NAME] [--network host|none|bridge|routed] [-p [IPv4:]HOST:GUEST[/tcp|/udp]]\n"
-        "             [--dns IPv4] [--bind HOST GUEST] [--bind-ro HOST GUEST] [--magicdesk] [-- COMMAND...]\n");
+        "             [--hostname NAME] [--network host|none|bridge|routed] [-p [IP:]HOST:GUEST[/tcp|/udp]]\n"
+        "             [--dns IP] [--subnet CIDR] [--ip IPv4] [--ip6 IPv6] [--gateway IP]\n"
+        "             [--bind HOST GUEST] [--bind-ro HOST GUEST] [--magicdesk] [-- COMMAND...]\n");
     if (r) fprintf(stderr, "Guest image: %s (errno=%d)\n", strerror(-r), -r);
     return r ? 1 : 0;
 }

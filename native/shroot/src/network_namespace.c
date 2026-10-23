@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "network_icmp6.h"
 #include "network_internal.h"
 #include "network_route.h"
 #include "network_generic.h"
@@ -25,11 +26,17 @@
 #include <netinet/in.h>
 #include <pthread.h>
 
+static int scoped_ipv6(enum md_network_parameter kind) {
+    return kind==MD_NET_IPV6_FORWARD || kind==MD_NET_IPV6_DISABLE
+        || (kind>=MD_NET_IPV6_DAD && kind<=MD_NET_IPV6_PRIVACY);
+}
+
 int md_network_parameter_scope(struct md_network_namespace *n,enum md_network_parameter kind,
         const char *name,uint64_t *out) {
     if (!md_network_namespace_managed(n)) return -EXDEV;
     *out=0;
-    if (kind<MD_NET_ROUTE_LOCALNET || kind>MD_NET_ARP_NOTIFY) return name && *name ? -EINVAL : 0;
+    if ((kind<MD_NET_ROUTE_LOCALNET || kind>MD_NET_ARP_NOTIFY)
+            && !scoped_ipv6(kind)) return name && *name ? -EINVAL : 0;
     if (!name || !*name) return -EINVAL;
     if (!strcmp(name,"all")) { *out=MD_NET_SCOPE_ALL; return 0; }
     if (!strcmp(name,"default")) { *out=MD_NET_SCOPE_DEFAULT; return 0; }
@@ -40,6 +47,25 @@ int md_network_parameter_scope(struct md_network_namespace *n,enum md_network_pa
     return *out ? 0 : -ENOENT;
 }
 static uint32_t *scoped_value(struct md_network_namespace *n,enum md_network_parameter kind,uint64_t scope) {
+    if (scoped_ipv6(kind)) {
+        struct md_network_ipv6_policy *policy=NULL;
+        if (scope==MD_NET_SCOPE_ALL) policy=&n->all6;
+        else if (scope==MD_NET_SCOPE_DEFAULT) policy=&n->defaults6;
+        else for (unsigned i=0;i<n->count;++i)
+            if (n->links[i].policy_id==scope) { policy=&n->links[i].ipv6; break; }
+        if (!policy) return NULL;
+        switch (kind) {
+        case MD_NET_IPV6_FORWARD: return &policy->forwarding;
+        case MD_NET_IPV6_DISABLE: return &policy->disabled;
+        case MD_NET_IPV6_DAD: return &policy->accept_dad;
+        case MD_NET_IPV6_RA: return &policy->accept_ra;
+        case MD_NET_IPV6_MTU: return &policy->mtu;
+        case MD_NET_IPV6_HOPS: return &policy->hop_limit;
+        case MD_NET_IPV6_ADDRGEN: return &policy->addr_gen_mode;
+        case MD_NET_IPV6_PRIVACY: return &policy->use_tempaddr;
+        default: return NULL;
+        }
+    }
     struct md_network_ipv4_policy *policy=NULL;
     if (scope==MD_NET_SCOPE_ALL) policy=&n->all;
     else if (scope==MD_NET_SCOPE_DEFAULT) policy=&n->defaults;
@@ -57,9 +83,12 @@ int md_network_parameter_read(struct md_network_namespace *n,enum md_network_par
     case MD_NET_PING_GROUPS: memcpy(out,n->ping_groups,sizeof(n->ping_groups)); break;
     case MD_NET_LOCAL_PORTS: memcpy(out,n->local_ports,sizeof(n->local_ports)); break;
     case MD_NET_IPV4_FORWARD: out[0]=n->ipv4_forward; out[1]=0; break;
-    case MD_NET_BRIDGE_FILTER: out[0]=1; out[1]=0; break;
+    case MD_NET_BRIDGE_FILTER: case MD_NET_BRIDGE_FILTER6: out[0]=1; out[1]=0; break;
+    case MD_NET_IPV6_BINDONLY: out[0]=n->bindv6only; out[1]=0; break;
     case MD_NET_TCP_KEEPIDLE: case MD_NET_TCP_KEEPINTVL: case MD_NET_TCP_KEEPCNT:
         out[0]=n->tcp_keepalive[kind-MD_NET_TCP_KEEPIDLE]; out[1]=0; break;
+    case MD_NET_IPV6_FORWARD: case MD_NET_IPV6_DISABLE: case MD_NET_IPV6_DAD: case MD_NET_IPV6_RA:
+    case MD_NET_IPV6_MTU: case MD_NET_IPV6_HOPS: case MD_NET_IPV6_ADDRGEN: case MD_NET_IPV6_PRIVACY:
     case MD_NET_ROUTE_LOCALNET: case MD_NET_RP_FILTER: case MD_NET_ARP_NOTIFY: {
         uint32_t *value=scoped_value(n,kind,scope);
         if (!value) error=-ENODEV;
@@ -92,12 +121,56 @@ int md_network_parameter_write(struct md_network_namespace *n,enum md_network_pa
         if (in[0]>1) error=-EINVAL;
         else n->ipv4_forward=in[0];
         break;
-    case MD_NET_BRIDGE_FILTER:
-        /* The logical bridge always traverses IPv4 hooks. Disabling them is
+    case MD_NET_BRIDGE_FILTER: case MD_NET_BRIDGE_FILTER6:
+        /* The logical bridge always traverses IP hooks. Disabling them is
          * not implemented; do not acknowledge an ineffective policy change. */
         if (in[0]>1) error=-EINVAL;
         else if (!in[0]) error=-EOPNOTSUPP;
         break;
+    case MD_NET_IPV6_BINDONLY:
+        if (in[0]>1) error=-EINVAL;
+        else n->bindv6only=in[0];
+        break;
+    case MD_NET_IPV6_MTU: case MD_NET_IPV6_HOPS: case MD_NET_IPV6_ADDRGEN: case MD_NET_IPV6_PRIVACY: {
+        uint32_t *value=scoped_value(n,kind,scope);
+        struct md_network_interface *link=NULL;
+        for (unsigned i=0;i<n->count;++i) if (n->links[i].policy_id==scope) link=&n->links[i];
+        if (!value) error=-ENODEV;
+        else if (kind==MD_NET_IPV6_MTU && (in[0]<1280 || in[0]>(link ? link->info.mtu : 65536U))) error=-EINVAL;
+        else if (kind==MD_NET_IPV6_HOPS && (in[0]<1 || in[0]>255)) error=-EINVAL;
+        else if (kind==MD_NET_IPV6_ADDRGEN && in[0]>3) error=-EINVAL;
+        else if (kind==MD_NET_IPV6_ADDRGEN && in[0]>1) error=-EOPNOTSUPP;
+        else if (kind==MD_NET_IPV6_PRIVACY && in[0]>INT32_MAX) error=-EINVAL;
+        else if (kind==MD_NET_IPV6_PRIVACY && scope!=MD_NET_SCOPE_DEFAULT)
+            error=md_network_route_privacy(n,scope,in[0]);
+        else {
+            uint32_t previous=*value;
+            *value=in[0];
+            if (kind==MD_NET_IPV6_MTU || kind==MD_NET_IPV6_HOPS)
+                error=md_network_endpoint_transport_update(n);
+            if (error) *value=previous;
+        }
+        break;
+    }
+    case MD_NET_IPV6_FORWARD: case MD_NET_IPV6_DISABLE: case MD_NET_IPV6_DAD: case MD_NET_IPV6_RA: {
+        uint32_t *value=scoped_value(n,kind,scope);
+        if (!value) error=-ENODEV;
+        else if (in[0]>(kind==MD_NET_IPV6_DAD || kind==MD_NET_IPV6_RA ? 2U : 1U)) error=-EINVAL;
+        /* The socket fabric has configured routes, not an ICMPv6 router-
+         * advertisement engine. Expose its disabled state without pretending
+         * that accepting advertisements or SLAAC has been enabled. */
+        else if (kind==MD_NET_IPV6_RA && in[0]) error=-EOPNOTSUPP;
+        else if (kind==MD_NET_IPV6_DISABLE && scope!=MD_NET_SCOPE_DEFAULT)
+            error=md_network_route_disable_ipv6(n,scope,in[0]);
+        else {
+            *value=in[0];
+            if (scope==MD_NET_SCOPE_ALL && kind==MD_NET_IPV6_FORWARD) {
+                n->defaults6.forwarding=in[0];
+                for (unsigned i=0;i<n->count;++i) n->links[i].ipv6.forwarding=in[0];
+            }
+        }
+        break;
+    }
     case MD_NET_TCP_KEEPIDLE: case MD_NET_TCP_KEEPINTVL: case MD_NET_TCP_KEEPCNT: {
         uint32_t *value=&n->tcp_keepalive[kind-MD_NET_TCP_KEEPIDLE];
         /* Kernel socket overrides have a narrower domain than these sysctls.
@@ -119,7 +192,8 @@ int md_network_parameter_write(struct md_network_namespace *n,enum md_network_pa
     }
     default: error=-EINVAL;
     }
-    if (!error && kind>=MD_NET_IPV4_FORWARD && kind<=MD_NET_BRIDGE_FILTER)
+    if (!error && ((kind>=MD_NET_IPV4_FORWARD && kind<=MD_NET_BRIDGE_FILTER)
+            || kind==MD_NET_IPV6_FORWARD || kind==MD_NET_IPV6_DISABLE))
         md_network_forward_changed(n->fabric);
     pthread_mutex_unlock(&n->fabric->lock); return error;
 }
@@ -129,6 +203,7 @@ struct network_socket {
     int peer, receiver, family, type, protocol, bound;
     struct md_socket_filter filter;
     struct md_network_ethernet ethernet;
+    struct md_network_icmp6 icmp6;
     int capped_ack;
     int packet_info, pass_credentials, extended_ack, strict_check;
     struct md_network_listener listener;
@@ -145,6 +220,11 @@ static void socket_destroy(struct md_fd_object *object) {
     if (socket->family==AF_PACKET) {
         pthread_mutex_lock(&socket->space->fabric->lock);
         md_network_ethernet_detach(&socket->ethernet);
+        pthread_mutex_unlock(&socket->space->fabric->lock);
+    }
+    if (socket->icmp6.space) {
+        pthread_mutex_lock(&socket->space->fabric->lock);
+        md_network_icmp6_detach(&socket->icmp6);
         pthread_mutex_unlock(&socket->space->fabric->lock);
     }
     if (socket->peer>=0) close(socket->peer);
@@ -200,10 +280,13 @@ int md_network_socket_open(struct md_network_namespace *n, const struct md_ident
         if (!object) { int error=-errno; close(native); return error; }
         *out=object; *fd=native; return 0;
     }
-    if ((family==AF_INET || family==AF_INET6) && md_network_endpoint_enabled(n))
+    int icmp6=family==AF_INET6 && (type&15)==SOCK_RAW && protocol==IPPROTO_ICMPV6;
+    if ((family==AF_INET || family==AF_INET6) && !icmp6 && md_network_endpoint_enabled(n))
         return md_network_endpoint_open(n,identity->uid.fs,family,type,protocol,out,fd);
     int base=type&15;
-    if (family==AF_NETLINK) {
+    if (icmp6) {
+        if (!md_identity_capable_in(identity,n->owner,CAP_NET_RAW)) return -EPERM;
+    } else if (family==AF_NETLINK) {
         if (protocol!=NETLINK_ROUTE && protocol!=NETLINK_GENERIC && protocol!=NETLINK_NETFILTER) return -EPROTONOSUPPORT;
         if (base!=SOCK_RAW && base!=SOCK_DGRAM) return -ESOCKTNOSUPPORT;
     } else if (family==AF_PACKET) {
@@ -236,6 +319,11 @@ int md_network_socket_open(struct md_network_namespace *n, const struct md_ident
         md_network_ethernet_attach(&s->ethernet,n,s->peer,base,protocol);
         pthread_mutex_unlock(&n->fabric->lock);
     }
+    if (icmp6) {
+        pthread_mutex_lock(&n->fabric->lock);
+        md_network_icmp6_attach(&s->icmp6,n,s->peer);
+        pthread_mutex_unlock(&n->fabric->lock);
+    }
     *out=&s->object; *fd=pair[0]; return 0;
 }
 static int packet_from(int peer,const struct md_network_packet *header,const void *data,size_t size) {
@@ -251,12 +339,15 @@ static int publish_response(void *context,const void *data,size_t size) {
     struct network_socket *s=context;
     return packet(s->peer,0,data,size);
 }
-void md_network_broadcast(struct md_network_namespace *n,unsigned group,const void *data,size_t size) {
+unsigned md_network_broadcast(struct md_network_namespace *n,unsigned group,const void *data,size_t size) {
+    unsigned published=0;
     for (struct md_network_listener *s=n->listeners;s;s=s->next)
         if (s->protocol==NETLINK_ROUTE && (s->groups&(1U<<(group-1)))) {
             int r=packet(s->peer,group,data,size);
             if (r && r!=-ECONNREFUSED) s->overflow=1;
+            if (r!=-ECONNREFUSED) ++published;
         }
+    return published;
 }
 static uint32_t supported_groups(const struct network_socket *s) {
     if (s->protocol==NETLINK_NETFILTER) return 0;
@@ -313,10 +404,11 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
     }
     if (nr==SYS_read || nr==SYS_readv || nr==SYS_recvfrom || nr==SYS_recvmsg) {
         pthread_mutex_lock(&s->space->fabric->lock);
-        int result=(s->listener.overflow || s->ethernet.overflow) ? -ENOBUFS
+        int result=(s->listener.overflow || s->ethernet.overflow || s->icmp6.overflow) ? -ENOBUFS
+            : s->icmp6.space ? md_network_icmp6_options(&s->icmp6)
             : s->family==AF_PACKET ? MD_NETWORK_PACKET_ETHERNET : (s->packet_info ? MD_NETWORK_PACKET_INFO : 0)
                 | (s->pass_credentials ? MD_NETWORK_PACKET_CREDENTIALS : 0);
-        s->listener.overflow=s->ethernet.overflow=0;
+        s->listener.overflow=s->ethernet.overflow=s->icmp6.overflow=0;
         pthread_mutex_unlock(&s->space->fabric->lock);
         return result;
     }
@@ -353,6 +445,19 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
         else return -EOPNOTSUPP;
         return 0;
     }
+    int socket_query=nr==SYS_getsockopt && a[1]==SOL_SOCKET && (a[2]==SO_DOMAIN || a[2]==SO_TYPE
+        || a[2]==SO_PROTOCOL || a[2]==SO_ERROR || a[2]==SO_PASSCRED);
+    if (s->icmp6.space && !socket_query) {
+        pthread_mutex_lock(&space->fabric->lock);
+        int binding=nr==SYS_setsockopt && a[1]==SOL_SOCKET && (a[2]==SO_BINDTODEVICE
+#ifdef SO_BINDTOIFINDEX
+            || a[2]==SO_BINDTOIFINDEX
+#endif
+            );
+        long result=binding && s->icmp6.device && !md_identity_capable_in(identity,space->owner,CAP_NET_RAW)
+            ? -EPERM : md_network_icmp6_call(&s->icmp6,nr,a,data,capacity,size,destination);
+        pthread_mutex_unlock(&space->fabric->lock); return result;
+    }
     if (s->family==AF_PACKET && !(nr==SYS_getsockopt && a[1]==SOL_SOCKET)) {
         pthread_mutex_lock(&space->fabric->lock);
         long result=md_network_ethernet_call(&s->ethernet,nr,a,data,capacity,size,destination);
@@ -385,8 +490,8 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
             pthread_mutex_unlock(&s->space->fabric->lock); break;
         case SO_ERROR:
             pthread_mutex_lock(&s->space->fabric->lock);
-            value=s->listener.overflow || s->ethernet.overflow ? ENOBUFS : 0;
-            s->listener.overflow=s->ethernet.overflow=0;
+            value=s->listener.overflow || s->ethernet.overflow || s->icmp6.overflow ? ENOBUFS : 0;
+            s->listener.overflow=s->ethernet.overflow=s->icmp6.overflow=0;
             pthread_mutex_unlock(&s->space->fabric->lock); break;
         default: return -EOPNOTSUPP;
         }

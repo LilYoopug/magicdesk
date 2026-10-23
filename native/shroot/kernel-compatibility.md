@@ -597,6 +597,24 @@ Android interface. Unit and routed guest tests cover dup, accepted inheritance,
 route/ingress restrictions, rename/removal and transactional idle rebind;
 active-flow retargeting fails explicitly with `EBUSY`.
 
+IPv6 endpoints use baseline AF_INET6, IPV6_V6ONLY and packet-information socket
+options. Address lifetimes, route preference and single nexthop objects are
+guest rtnetlink ABI implemented by `network_route_ip`/`network_nexthop`, not
+host route mutations. `network_icmp6` implements guest raw ICMPv6 on existing
+logical Ethernet queues without host raw-socket privileges. IPv6 lifetime and
+temporary-address maintenance reuse the forwarding owner's monotonic timerfd
+and baseline getrandom; no newer kernel dependency is introduced. Unsupported
+control modes fail explicitly. `test_network_ipv6.{c,py}`, resource tests and
+`test_os_boot.py` networkd checks cover these owners. Optional public tests
+(`test_network_ipv6.py --internet` and Docker/Podman `--internet-ipv6`) require
+an IPv6 uplink allowed by Android; a kernel version alone does not prove it.
+`network_transport` uses baseline IPV6_MTU, IPV6_UNICAST_HOPS and TCP_MAXSEG
+to apply supported route/interface policy to captured native sockets and relays.
+No Android route mutation, capability elevation or post-5.15 option is required.
+Native tests verify UDP EMSGSIZE, received hop-limit ancillary data, explicit
+application overrides/reset and TCP MSS; stock networkd boot tests verify the
+effective route and connected socket values.
+
 Managed netlink control also implements the baseline nlctrl family catalogue,
 strict route query validation, kernel-peer connect, policy-rule queries and
 SO_PASSCRED/NETLINK_PKTINFO reply metadata. These are userspace protocol owners;

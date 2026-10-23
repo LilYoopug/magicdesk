@@ -45,9 +45,11 @@ public final class GuestEnvironmentMain {
 
                     Launch options: --bind HOST GUEST, --bind-ro HOST GUEST,
                       --user USER[:GROUP], --cwd /PATH, --env KEY=VALUE, --hostname NAME,
-                      --network host|none|bridge|routed, -p [IPv4:]HOST:GUEST[/tcp|/udp],
-                      --dns IPv4 (repeat up to three times), --magicdesk.
-                      Ports require bridge; DNS is per launch and does not modify the store.
+                      --network host|none|bridge|routed, -p [IPv4:|[IPv6]:]HOST:GUEST[/tcp|/udp],
+                      --subnet CIDR, --ip IPv4, --ip6 IPv6, --gateway IP,
+                      --dns IP (repeat up to three times), --magicdesk.
+                      Ports and addressing require bridge; subnet/gateway accept one value per family.
+                      Network options are per launch and do not modify the store or Android network.
                     --magicdesk grants this launch access to the MagicDesk CLI and Android commands.
                     run retains the image Entrypoint/Cmd; --entrypoint PROGRAM overrides it.
                     exec starts a new process in the selected store, not in an existing process tree.

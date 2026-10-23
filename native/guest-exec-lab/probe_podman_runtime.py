@@ -121,27 +121,32 @@ def guest(options):
         names = ('md-podman-first', 'md-podman-second')
         ports = []
         image = options['portsImage']
+        ipv6 = options['ipv6']
+        host = '[' + options['ipv6Host'] + ']' if ipv6 else '127.0.0.1'
+        family = ['--ipv6'] if ipv6 else []
+        def external(**request):
+            return observe(options['observer'], ipv6=ipv6, **request)
         if run(prefix + ['image', 'exists', image], required=False).get('exitCode') != 0:
             run(prefix + ['pull', image], timeout=180)
         if run(prefix + ['network', 'exists', network], required=False).get('exitCode') == 0:
             run(prefix + ['network', 'rm', '-f', network])
-        run(prefix + ['network', 'create', network])
+        run(prefix + ['network', 'create', *family, network])
         tracer = None
         try:
             for name in names:
-                port = observe(options['observer'], operation='allocate')['port']
+                port = external(operation='allocate')['port']
                 ports.append(port)
-                observe(options['observer'], operation='handoff', port=port)
+                external(operation='handoff', port=port)
                 run(prefix + ['run', '-d', '--name', name, '--log-driver', 'k8s-file', '--network', network, *limits,
-                              '-p', f'127.0.0.1:{port}:8080/tcp', '-p', f'127.0.0.1:{port}:8080/udp',
+                              '-p', f'{host}:{port}:8080/tcp', '-p', f'{host}:{port}:8080/udp',
                               '--mount', 'type=bind,src=' + str(Path(__file__).with_name('docker_network_fixture.py'))
-                              + ',dst=/fixture.py,readonly', image, 'python3', '/fixture.py', name])
+                              + ',dst=/fixture.py,readonly', image, 'python3', '/fixture.py', name, *family])
                 wait_service(prefix + ['logs', '-f', name])
                 if options['trace'] and tracer is None:
                     tracer = trace_dns()
-                report.setdefault('portChecks', []).append(observe(options['observer'], operation='exchange', port=port, token=name, repeats=20))
+                report.setdefault('portChecks', []).append(external(operation='exchange', port=port, token=name, repeats=20))
             for source, target in (names, tuple(reversed(names))):
-                run(prefix + ['exec', source, 'python3', '/fixture.py', '--client', target, '8080', target, '20'])
+                run(prefix + ['exec', source, 'python3', '/fixture.py', '--client', target, '8080', target, '20', *family])
             report['namedPeerExchangePassed'] = True
             outbound = observe(options['observer'], operation='outbound')['url']
             for _ in range(options['execRepeats']):
@@ -160,15 +165,19 @@ def guest(options):
                 assert tracer.returncode in (0, -signal.SIGINT), errors.decode(errors='replace')
                 report['traceDetachPassed'] = True
                 for source, target in (names, tuple(reversed(names))):
-                    run(prefix + ['exec', source, 'python3', '/fixture.py', '--client', target, '8080', target, '20'])
+                    run(prefix + ['exec', source, 'python3', '/fixture.py', '--client', target, '8080', target, '20', *family])
             conflict = run(prefix + ['run', '--rm', '--name', 'md-podman-conflict', '--network', network,
-                                    *limits, '-p', f'127.0.0.1:{ports[0]}:8080', image, '/bin/true'], required=False)
+                                    *limits, '-p', f'{host}:{ports[0]}:8080', image, '/bin/true'], required=False)
             assert conflict.get('exitCode') != 0 and ('already allocated' in conflict['output']
                     or 'address already in use' in conflict['output'].lower()), conflict
             if options['internet']:
                 report['internetResults'] = [run(prefix + ['exec', name, 'python3', '/fixture.py', '--internet'],
                                                    required=False) for name in names]
                 report['internetPassed'] = all(item.get('exitCode') == 0 for item in report['internetResults'])
+            if options['internetIpv6']:
+                report['internetIpv6Results'] = [run(prefix + ['exec', name, 'python3', '/fixture.py', '--internet-ipv6'])
+                                                for name in names]
+                report['internetIpv6Passed'] = True
         except Exception as error:
             report['portFailure'] = repr(error)
             run(['nft', 'list', 'ruleset'], required=False)
@@ -191,7 +200,7 @@ def guest(options):
                 assert removed.get('exitCode') == 0 and network_removed.get('exitCode') == 0, 'Network cleanup failed'
                 assert 'traceShutdownFailure' not in report, report['traceShutdownFailure']
         for port in ports:
-            report['portChecks'].append(observe(options['observer'], operation='released', port=port))
+            report['portChecks'].append(external(operation='released', port=port))
         report['portPublicationPassed'] = True
 
     try:
@@ -251,6 +260,9 @@ def main():
                         help='Repeat local outbound exec and complete process/output teardown')
     parser.add_argument('--deadline-seconds', type=int, help='Override the diagnostic runtime failure bound')
     parser.add_argument('--exercise-ports', action='store_true')
+    parser.add_argument('--ipv6', action='store_true', help='Exercise a dual-stack bridge, IPv6 publication and named IPv6 peers')
+    parser.add_argument('--ipv6-host', default='::1', help='Native Android IPv6 address for the external port observer')
+    parser.add_argument('--internet-ipv6', action='store_true', help='Require public IPv6 UDP/TCP DNS and verified HTTPS')
     parser.add_argument('--ports-image', default='docker.io/library/python:3.14-alpine')
     parser.add_argument('--internet', action='store_true', help='Also require external DNS and HTTP')
     parser.add_argument('--host-limits', action='store_true', help='Set nofile/nproc explicitly to inherited shell limits')
@@ -259,11 +271,15 @@ def main():
     args = parser.parse_args()
     if args.exercise_ports and args.network != 'bridge':
         parser.error('--exercise-ports requires bridge')
+    if args.ipv6 and not args.exercise_ports:
+        parser.error('--ipv6 requires --exercise-ports')
+    if (args.internet_ipv6 or args.ipv6_host != '::1') and not args.ipv6:
+        parser.error('--internet-ipv6 and --ipv6-host require --ipv6')
     if not 1 <= args.exec_repeats <= 50:
         parser.error('--exec-repeats must be between 1 and 50')
     suite = Suite(Path('build/podman-results'), args.build, machine_entry=args.machine_entry)
     from docker_network_fixture import Observer
-    observer = Observer() if args.exercise_ports else None
+    observer = Observer(args.ipv6_host) if args.exercise_ports else None
     target = '/tmp/md-podman-probe-' + suite.report['id']
     runner = suite.guest(args.store, '--user', '0:0', '--network', 'routed')
     if args.diagnostics:
@@ -284,6 +300,7 @@ def main():
                    'storage': args.storage, 'network': args.network, 'image': args.image,
                    'cgroups': args.cgroups,
                    'internet': args.internet, 'portsImage': args.ports_image,
+                   'ipv6': args.ipv6, 'ipv6Host': args.ipv6_host, 'internetIpv6': args.internet_ipv6,
                    'trace': args.trace, 'hostLimits': args.host_limits, 'unlimitedPids': args.unlimited_pids,
                    'execRepeats': args.exec_repeats,
                    'captureNft': args.capture_nft,

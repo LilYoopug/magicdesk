@@ -182,7 +182,7 @@ Devpts retains native PTY numbering, IO and lifetime. Its `max` option rejects
 indices outside the requested range before descriptor publication; host PTYs
 share that range and can reduce available capacity. It is not an independently
 numbered kernel devpts instance. O_PATH does not allocate a PTY or consume a slot.
-Ordinary networking remains native; routed IPv4 is explicit and has its own
+Ordinary networking remains native; routed IPv4/IPv6 is explicit and has its own
 port/endpoint ownership. Shared [launch profiles](networking.md#launch-profiles)
 prepare host, offline or bridge policy and optional TCP/UDP publications/DNS;
 the low-level routed mode remains available for guest-managed topology.

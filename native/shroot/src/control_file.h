@@ -9,6 +9,14 @@ struct md_task_resources;
 struct md_namespace_reference;
 struct md_fs_anchor;
 struct md_resource_wakeup;
+struct md_control_pending;
+struct md_fs_context;
+struct md_fs_continuation;
+struct md_control_fs_operation {
+    long (*run)(void *,struct md_fs_context *,struct md_fs_continuation **);
+    void (*destroy)(void *);
+    void *context;
+};
 struct md_control_actor {
     int pid;
     const struct md_identity *identity;
@@ -17,6 +25,11 @@ struct md_control_actor {
     struct md_resource_wakeup *wakeup;
     /* Current OFD status flags, captured when its ordered operation starts. */
     unsigned status_flags;
+    /* Optional filesystem admission. Submission captures the actor once and
+     * transfers operation ownership only on EINPROGRESS. */
+    void *filesystem;
+    long (*submit)(void *,const struct md_control_actor *,struct md_control_fs_operation,
+        struct md_control_pending **);
 };
 struct md_control_file {
     const struct md_control_file_ops *ops;

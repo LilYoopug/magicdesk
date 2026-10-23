@@ -1,6 +1,12 @@
 #define _GNU_SOURCE
 #include "network_route.h"
 #include "network_internal.h"
+#include "network_route_ip.h"
+#include "network_nexthop.h"
+#include "network_profile.h"
+#include "network_packet.h"
+#include "network_endpoint.h"
+#include "test_network_fixture.h"
 #include "guest_identity.h"
 #include "sysfs_view.h"
 #include <assert.h>
@@ -8,6 +14,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/fib_rules.h>
 #include <linux/veth.h>
+#include <linux/nexthop.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <linux/sockios.h>
@@ -56,7 +63,76 @@ static int resolve(void *context,struct md_network_target_reference ref,struct m
 static int reject_response(void *context,const void *data,size_t size) {
     (void)context; (void)data; assert(size); return -EAGAIN;
 }
+static int reject_after_notification(void *context,const void *data,size_t size) {
+    (void)data; assert(size);
+    unsigned char packet[2048];
+    int fd=*(int *)context;
+    ssize_t bytes=recv(fd,packet,sizeof(packet),MSG_DONTWAIT);
+    assert(bytes>(ssize_t)(sizeof(struct md_network_packet)+sizeof(struct nlmsghdr)));
+    struct md_network_packet envelope; memcpy(&envelope,packet,sizeof(envelope));
+    assert(envelope.group==RTNLGRP_IPV6_IFADDR);
+    struct nlmsghdr header; memcpy(&header,packet+sizeof(envelope),sizeof(header));
+    assert(header.nlmsg_type==RTM_NEWADDR && !header.nlmsg_seq);
+    return -EAGAIN;
+}
+static void route_metrics(void) {
+    struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
+    struct md_identity root=md_identity_new(0,0);
+    struct md_network_interface *link=md_network_interface_find(n,0,"eth0"); assert(link);
+    struct packet packet;
+    struct nlmsghdr *h=request(&packet,RTM_NEWROUTE,NLM_F_CREATE|NLM_F_EXCL);
+    h->nlmsg_len=NLMSG_LENGTH(sizeof(struct rtmsg));
+    struct rtmsg *m=NLMSG_DATA(h);
+    *m=(struct rtmsg){.rtm_family=AF_INET6,.rtm_dst_len=64,.rtm_table=RT_TABLE_MAIN,
+        .rtm_protocol=RTPROT_BOOT,.rtm_type=RTN_UNICAST};
+    struct md_ip_address destination;
+    assert(!md_network_profile_ip("2001:db8:42::",&destination));
+    attr(h,RTA_DST,destination.bytes,16); attr(h,RTA_OIF,&link->info.index,4);
+    struct rtattr *nested=attr(h,RTA_METRICS|NLA_F_NESTED,NULL,0);
+    unsigned mtu=1440,hops=37,quick=0;
+    struct rtattr *mtu_attribute=attr(h,RTAX_MTU,&mtu,4);
+    attr(h,RTAX_HOPLIMIT,&hops,4); struct rtattr *q=attr(h,RTAX_QUICKACK,&quick,4);
+    nested->rta_len=(char *)h+h->nlmsg_len-(char *)nested;
+    assert(!ack(n,&root,h,NULL));
+    struct md_network_route_entry route;
+    assert(md_network_route_find(n,destination,&route));
+    assert(route.metrics.mtu==mtu && route.metrics.hops==hops);
+    assert(route.metrics.present==((1U<<RTAX_MTU)|(1U<<RTAX_HOPLIMIT)|(1U<<RTAX_QUICKACK)));
+    struct packet reply;
+    struct md_network_message out={.data=reply.bytes,.capacity=sizeof(reply)};
+    assert(!md_network_route_reply(&out,h,91,1,link,&route,NULL));
+    struct nlmsghdr *rh=(void *)reply.bytes;
+    unsigned remaining=rh->nlmsg_len-NLMSG_LENGTH(sizeof(struct rtmsg));
+    struct rtattr *found=NULL;
+    for (struct rtattr *a=RTM_RTA((struct rtmsg *)NLMSG_DATA(rh));RTA_OK(a,remaining);a=RTA_NEXT(a,remaining))
+        if ((a->rta_type&NLA_TYPE_MASK)==RTA_METRICS) found=a;
+    assert(found && RTA_PAYLOAD(found)==RTA_PAYLOAD(nested));
+    assert(!memcmp(RTA_DATA(found),RTA_DATA(nested),RTA_PAYLOAD(found)));
+    h->nlmsg_flags=NLM_F_REQUEST|NLM_F_ACK|NLM_F_REPLACE;
+    struct md_fd_object *socket; int fd;
+    assert(!md_network_endpoint_open(n,0,AF_INET6,SOCK_DGRAM,0,&socket,&fd));
+    struct sockaddr_in6 address={.sin6_family=AF_INET6,.sin6_port=htons(12345)};
+    memcpy(&address.sin6_addr,destination.bytes,16);
+    assert(!md_network_endpoint_autobind(socket,fd,&root,(void *)&address,sizeof(address),0));
+    assert(!md_network_endpoint_connected(socket,fd,(void *)&address,sizeof(address)));
+    assert(!ack(n,&root,h,NULL));
+    mtu=1280; memcpy(RTA_DATA(mtu_attribute),&mtu,4);
+    assert(ack(n,&root,h,NULL)==-EBUSY);
+    assert(md_network_route_find(n,destination,&route) && route.metrics.mtu==1440);
+    close(fd); md_fd_object_release(socket);
+    assert(!ack(n,&root,h,NULL));
+    assert(md_network_route_find(n,destination,&route) && route.metrics.mtu==1280);
+    quick=1; memcpy(RTA_DATA(q),&quick,4);
+    assert(ack(n,&root,h,NULL)==-EOPNOTSUPP);
+    assert(md_network_route_find(n,destination,&route) && route.metrics.hops==37);
+    quick=0; memcpy(RTA_DATA(q),&quick,4);
+    attr(h,RTAX_MTU,&mtu,4); nested->rta_len=(char *)h+h->nlmsg_len-(char *)nested;
+    assert(ack(n,&root,h,NULL)==-EINVAL);
+    md_identity_release(&root); md_network_namespace_release(n);
+    puts("PASS IPv6 route metrics: parsing, dump, active connection rollback and unsupported/duplicate rejection");
+}
 void test_network_route(void) {
+    route_metrics();
     struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
     struct md_network_namespace *child=md_network_namespace_copy(n,NULL);
     struct md_identity root=md_identity_new(0,0),user=md_identity_new(1000,1000);
@@ -86,6 +162,9 @@ void test_network_route(void) {
     unsigned bridge=md_network_interface_find(n,0,"br-test")->info.index;
     struct md_sysfs *sysfs=md_sysfs_new(AT_FDCWD,n,&root); assert(sysfs);
     struct stat bridge_node;
+    assert(!fstatat(md_sysfs_root(sysfs),"firmware",&bridge_node,0) && S_ISDIR(bridge_node.st_mode));
+    assert(fstatat(md_sysfs_root(sysfs),"firmware/ibft",&bridge_node,0)==-1 && errno==ENOENT);
+    assert(!md_sysfs_host_visible("/firmware"));
     assert(!fstatat(md_sysfs_root(sysfs),"class/net/br-test/bridge",&bridge_node,0));
     assert(S_ISDIR(bridge_node.st_mode));
     assert(fstatat(md_sysfs_root(sysfs),"class/net/lo/bridge",&bridge_node,0)==-1 && errno==ENOENT);
@@ -232,7 +311,7 @@ void test_network_route(void) {
             }
         assert(!left && protocols==1); ++rules;
     }
-    assert(!length && rules==3);
+    assert(!length && rules==5);
     h=request(&p,RTM_GETNEXTHOP,NLM_F_DUMP);
     h->nlmsg_len=NLMSG_LENGTH(8); /* struct nhmsg */
     length=md_network_route(n,&user,h,h->nlmsg_len,91,MD_NETWORK_ROUTE_STRICT,NULL,reply.bytes,sizeof(reply),NULL);
@@ -240,7 +319,7 @@ void test_network_route(void) {
     assert(*(int *)NLMSG_DATA(&reply.align)==0);
     h=request(&p,RTM_NEWNEXTHOP,0);
     h->nlmsg_len=NLMSG_LENGTH(8);
-    assert(ack(n,&root,h,NULL)==-EOPNOTSUPP);
+    assert(ack(n,&root,h,NULL)==-EINVAL);
     for (unsigned bad=0;bad<4;++bad) {
         h=request(&p,RTM_GETLINK,NLM_F_DUMP);
         struct ifinfomsg *body=NLMSG_DATA(h);
@@ -261,10 +340,11 @@ void test_network_route(void) {
         if (item->nlmsg_type==RTM_NEWLINK) ++links; else ++done;
     }
     assert(!length && links==4 && done==1);
-    /* ip -4 addr first enumerates links with an AF_INET GETLINK dump. */
-    for (unsigned strict=0;strict<2;++strict) {
+    /* IPv4 queries and legacy generic link queries share the same catalogue. */
+    const unsigned link_families[]={AF_INET,AF_UNIX};
+    for (unsigned family=0;family<2;++family) for (unsigned strict=0;strict<2;++strict) {
         h=request(&p,RTM_GETLINK,NLM_F_DUMP);
-        ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_family=AF_INET;
+        ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_family=link_families[family];
         if (!strict) h->nlmsg_len=NLMSG_LENGTH(sizeof(struct rtgenmsg));
         length=md_network_route(n,&user,h,h->nlmsg_len,91,strict ? MD_NETWORK_ROUTE_STRICT : 0,
             NULL,reply.bytes,sizeof(reply),NULL);
@@ -281,14 +361,39 @@ void test_network_route(void) {
     length=md_network_route(n,&user,h,h->nlmsg_len,91,MD_NETWORK_ROUTE_STRICT,NULL,reply.bytes,sizeof(reply),NULL);
     assert(length>0 && reply.align.nlmsg_type==RTM_NEWLINK);
     assert(((struct ifinfomsg *)NLMSG_DATA(&reply.align))->ifi_index==1);
+    uint32_t extension_mask=0x109;
+    attr(h,IFLA_EXT_MASK,&extension_mask,sizeof(extension_mask));
+    length=md_network_route(n,&user,h,h->nlmsg_len,91,MD_NETWORK_ROUTE_STRICT,NULL,reply.bytes,sizeof(reply),NULL);
+    assert(length>0 && reply.align.nlmsg_type==RTM_NEWLINK);
+    for (unsigned family=0;family<2;++family) {
+        h=request(&p,RTM_GETADDR,NLM_F_DUMP);
+        h->nlmsg_len=NLMSG_LENGTH(sizeof(struct ifaddrmsg));
+        struct ifaddrmsg *body=NLMSG_DATA(h);
+        *body=(struct ifaddrmsg){.ifa_family=family ? AF_INET6 : AF_INET,.ifa_index=1};
+        length=md_network_route(n,&user,h,h->nlmsg_len,91,MD_NETWORK_ROUTE_STRICT,NULL,reply.bytes,sizeof(reply),NULL);
+        unsigned addresses=0; done=0;
+        for (struct nlmsghdr *item=&reply.align;NLMSG_OK(item,length);item=NLMSG_NEXT(item,length)) {
+            if (item->nlmsg_type==RTM_NEWADDR) {
+                const struct ifaddrmsg *a=NLMSG_DATA(item);
+                assert(a->ifa_index==1 && a->ifa_family==body->ifa_family); ++addresses;
+            } else { assert(item->nlmsg_type==NLMSG_DONE && !*(int *)NLMSG_DATA(item)); ++done; }
+        }
+        assert(!length && addresses==1 && done==1);
+    }
     for (unsigned strict=0;strict<2;++strict) {
         h=request(&p,RTM_GETLINK,NLM_F_DUMP);
         ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_family=AF_INET6;
         if (!strict) h->nlmsg_len=NLMSG_LENGTH(sizeof(struct rtgenmsg));
         length=md_network_route(n,&user,h,h->nlmsg_len,91,strict ? MD_NETWORK_ROUTE_STRICT : 0,
             NULL,reply.bytes,sizeof(reply),NULL);
-        assert(length==(long)NLMSG_LENGTH(sizeof(int)) && reply.align.nlmsg_type==NLMSG_DONE);
-        assert(*(int *)NLMSG_DATA(&reply.align)==0);
+        assert(length>0); links=done=0;
+        for (struct nlmsghdr *item=&reply.align;NLMSG_OK(item,length);item=NLMSG_NEXT(item,length)) {
+            if (item->nlmsg_type==RTM_NEWLINK) {
+                assert(((struct ifinfomsg *)NLMSG_DATA(item))->ifi_family==AF_INET6);
+                ++links;
+            } else { assert(item->nlmsg_type==NLMSG_DONE && !*(int *)NLMSG_DATA(item)); ++done; }
+        }
+        assert(!length && links==4 && done==1);
     }
     h=request(&p,RTM_NEWLINK,NLM_F_CREATE|NLM_F_EXCL);
     ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_family=AF_INET6;
@@ -320,7 +425,7 @@ void test_network_route(void) {
             }
         }
         assert(!length && done==1);
-        if (queries[q]==RTM_GETADDR) assert(addresses==2);
+        if (queries[q]==RTM_GETADDR) assert(addresses==5);
     }
     h=request(&p,RTM_NEWLINK,NLM_F_CREATE|NLM_F_EXCL);
     info=attr(h,IFLA_LINKINFO,NULL,0);
@@ -410,7 +515,7 @@ void test_network_route(void) {
     assert(ack(n,&root,h,NULL)==-EINVAL);
     assert(md_network_interface_find(n,generated_index,NULL)->isolated);
     direct=md_network_interface_find(child,0,"eth1"); assert(direct);
-    direct->ipv4=htonl(0x0a590002); direct->prefix=24; direct->info.flags|=IFF_UP;
+    test_network_v4(direct,htonl(0x0a590002),24); direct->info.flags|=IFF_UP;
     h=request(&p,RTM_NEWROUTE,NLM_F_CREATE|NLM_F_EXCL);
     h->nlmsg_len=NLMSG_LENGTH(sizeof(struct rtmsg));
     *(struct rtmsg *)NLMSG_DATA(h)=(struct rtmsg){.rtm_family=AF_INET,.rtm_table=RT_TABLE_MAIN,
@@ -419,11 +524,12 @@ void test_network_route(void) {
     attr(h,RTA_GATEWAY,&gateway,sizeof(gateway));
     struct rtattr *priority=attr(h,RTA_PRIORITY,&metric,sizeof(metric));
     assert(md_network_route(child,&root,h,h->nlmsg_len,91,0,NULL,rejected.bytes,sizeof(rejected),&refusal)==-EAGAIN);
-    assert(!child->default_interface && !child->default_metric);
-    assert(!ack(child,&root,h,NULL) && child->default_metric==100);
+    assert(!child->route_count);
+    assert(!ack(child,&root,h,NULL) && test_network_default(child,AF_INET)->metric==100);
     struct packet dump_packet;
     struct nlmsghdr *dump_header=request(&dump_packet,RTM_GETROUTE,NLM_F_DUMP);
     dump_header->nlmsg_len=NLMSG_LENGTH(sizeof(struct rtmsg));
+    ((struct rtmsg *)NLMSG_DATA(dump_header))->rtm_family=AF_INET;
     length=md_network_route(child,&root,dump_header,dump_header->nlmsg_len,91,0,NULL,reply.bytes,sizeof(reply),NULL);
     assert(length>0);
     unsigned metrics=0;
@@ -457,6 +563,7 @@ void test_network_route(void) {
     for (unsigned selection=0;selection<6;++selection) {
         dump_header=request(&dump_packet,RTM_GETROUTE,NLM_F_DUMP);
         dump_header->nlmsg_len=NLMSG_LENGTH(sizeof(struct rtmsg));
+        ((struct rtmsg *)NLMSG_DATA(dump_header))->rtm_family=AF_INET;
         uint32_t table=selection==1 ? 1234 : RT_TABLE_MAIN;
         struct rtattr *chosen=attr(dump_header,RTA_TABLE,&table,sizeof(table));
         if (selection==2) chosen->rta_len=RTA_LENGTH(1);
@@ -466,7 +573,7 @@ void test_network_route(void) {
         length=md_network_route(child,&root,dump_header,dump_header->nlmsg_len,91,MD_NETWORK_ROUTE_STRICT,
             NULL,reply.bytes,sizeof(reply),NULL);
         assert(length>0);
-        if (selection>=2 && selection<=4) {
+        if (selection==2 || selection==4) {
             assert(reply.align.nlmsg_type==NLMSG_ERROR);
             assert(((struct nlmsgerr *)NLMSG_DATA(&reply.align))->error==(selection==2 ? -EINVAL : -EOPNOTSUPP));
         } else {
@@ -475,15 +582,18 @@ void test_network_route(void) {
                 assert(item->nlmsg_type==RTM_NEWROUTE || item->nlmsg_type==NLMSG_DONE);
                 routes+=item->nlmsg_type==RTM_NEWROUTE;
             }
-            assert(selection==1 ? routes==0 : routes==2);
+            assert(selection==1 || selection==3 ? routes==0 : routes==2);
         }
     }
     uint32_t wrong_metric=99; memcpy(RTA_DATA(priority),&wrong_metric,4);
-    assert(ack(child,&root,h,NULL)==-EOPNOTSUPP && child->default_metric==100);
+    assert(!ack(child,&root,h,NULL) && child->route_count==2);
+    struct md_network_route_entry selected_route;
+    assert(md_network_route_find(child,md_ip_v4(htonl(0x01010101)),&selected_route) && selected_route.metric==99);
     h->nlmsg_type=RTM_DELROUTE;
-    assert(ack(child,&root,h,NULL)==-ESRCH && child->default_metric==100);
+    assert(!ack(child,&root,h,NULL) && child->route_count==1);
+    assert(ack(child,&root,h,NULL)==-ESRCH && test_network_default(child,AF_INET)->metric==100);
     memcpy(RTA_DATA(priority),&metric,4);
-    assert(!ack(child,&root,h,NULL) && !child->default_metric);
+    assert(!ack(child,&root,h,NULL) && !child->route_count);
     h=request(&p,RTM_DELLINK,0);
     ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_index=generated_index;
     assert(!ack(n,&root,h,NULL));
@@ -497,4 +607,94 @@ void test_network_route(void) {
     md_network_namespace_release(child); md_network_namespace_release(n);
     md_identity_release(&root); md_identity_release(&user);
     puts("PASS route netlink: permissions, bridge/veth, namespace handles, atomic rejection and multipart dumps");
+}
+
+void test_network_route_lifetimes(void) {
+    struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
+    struct md_identity root=md_identity_new(0,0);
+    struct packet p,reply;
+    unsigned index=md_network_interface_find(n,0,"eth0")->info.index;
+    struct md_ip_address address,gateway,destination;
+    assert(!md_network_profile_ip("fd92:10::1234",&address));
+    assert(!md_network_profile_ip("fe80::1234",&gateway));
+    assert(!md_network_profile_ip("fd93::",&destination));
+    struct nlmsghdr *h=request(&p,RTM_NEWADDR,NLM_F_CREATE|NLM_F_EXCL);
+    h->nlmsg_len=NLMSG_LENGTH(sizeof(struct ifaddrmsg));
+    *(struct ifaddrmsg *)NLMSG_DATA(h)=(struct ifaddrmsg){.ifa_family=AF_INET6,.ifa_prefixlen=64,.ifa_index=index};
+    attr(h,IFA_LOCAL,address.bytes,16);
+    const unsigned char zero[16]={0}; attr(h,IFA_ADDRESS,zero,16);
+    struct ifa_cacheinfo cache={.ifa_prefered=30,.ifa_valid=60};
+    struct rtattr *lifetimes=attr(h,IFA_CACHEINFO,&cache,sizeof(cache));
+    uint32_t flags=IFA_F_MANAGETEMPADDR|IFA_F_NOPREFIXROUTE,metric=512;
+    attr(h,IFA_FLAGS,&flags,4); attr(h,IFA_RT_PRIORITY,&metric,4);
+    cache.ifa_prefered=61; memcpy(RTA_DATA(lifetimes),&cache,sizeof(cache));
+    assert(ack(n,&root,h,NULL)==-EINVAL);
+    cache.ifa_prefered=30; memcpy(RTA_DATA(lifetimes),&cache,sizeof(cache));
+    struct md_network_publication refusal={.publish=reject_response};
+    assert(md_network_route(n,&root,h,h->nlmsg_len,91,0,NULL,reply.bytes,sizeof(reply),&refusal)==-EAGAIN);
+    assert(!md_network_interface_has(md_network_interface_find(n,index,NULL),address));
+    assert(!n->configuration_deadline);
+    assert(!ack(n,&root,h,NULL));
+
+    uint32_t id=123;
+    h=request(&p,RTM_NEWNEXTHOP,NLM_F_CREATE|NLM_F_EXCL);
+    h->nlmsg_len=NLMSG_LENGTH(sizeof(struct nhmsg));
+    *(struct nhmsg *)NLMSG_DATA(h)=(struct nhmsg){.nh_family=AF_INET6,.nh_protocol=RTPROT_RA};
+    attr(h,NHA_ID,&id,4); attr(h,NHA_OIF,&index,4); attr(h,NHA_GATEWAY,gateway.bytes,16);
+    assert(md_network_route(n,&root,h,h->nlmsg_len,91,0,NULL,reply.bytes,sizeof(reply),&refusal)==-EAGAIN);
+    assert(!n->nexthop_count);
+    assert(!ack(n,&root,h,NULL) && n->nexthop_count==1);
+    assert(ack(n,&root,h,NULL)==-EEXIST);
+    h=request(&p,RTM_NEWROUTE,NLM_F_CREATE|NLM_F_EXCL);
+    h->nlmsg_len=NLMSG_LENGTH(sizeof(struct rtmsg));
+    *(struct rtmsg *)NLMSG_DATA(h)=(struct rtmsg){.rtm_family=AF_INET6,.rtm_dst_len=64,
+        .rtm_table=RT_TABLE_MAIN,.rtm_type=RTN_UNICAST,.rtm_protocol=RTPROT_RA};
+    uint32_t seconds=45;
+    attr(h,RTA_DST,destination.bytes,16); attr(h,RTA_NH_ID,&id,4); attr(h,RTA_EXPIRES,&seconds,4);
+    assert(!ack(n,&root,h,NULL));
+    pthread_mutex_lock(&n->fabric->lock);
+    struct md_network_interface *link=md_network_interface_find(n,index,NULL);
+    struct md_network_ip_assignment *a=NULL;
+    for (unsigned i=0;i<link->address_count;++i) if (md_ip_equal(link->addresses[i].address,address)) a=&link->addresses[i];
+    assert(a && a->route_metric==512 && !(a->flags&IFA_F_PERMANENT));
+    int64_t preferred=a->preferred_until,valid=a->valid_until;
+    assert(n->configuration_deadline==preferred && md_network_lifetime_remaining(valid,preferred)==30);
+    md_network_route_expire(n->fabric,preferred);
+    assert(a->flags&IFA_F_DEPRECATED);
+    struct md_network_route_entry route;
+    assert(md_network_route_find(n,destination,&route) && route.nexthop==id);
+    md_network_route_expire(n->fabric,route.valid_until);
+    assert(md_network_route_find(n,destination,&route) && !route.nexthop);
+    md_network_route_expire(n->fabric,valid);
+    assert(!md_network_interface_has(link,address) && !n->configuration_deadline);
+    pthread_mutex_unlock(&n->fabric->lock);
+    h=request(&p,RTM_DELNEXTHOP,0); h->nlmsg_len=NLMSG_LENGTH(sizeof(struct nhmsg));
+    attr(h,NHA_ID,&id,4); assert(!ack(n,&root,h,NULL) && !n->nexthop_count);
+    assert(ack(n,&root,h,NULL)==-ENOENT);
+    int queue[2]; assert(!socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0,queue));
+    struct md_network_listener observer={.peer=queue[0],.protocol=NETLINK_ROUTE,.groups=RTMGRP_IPV6_IFADDR};
+    n->listeners=&observer;
+    h=request(&p,RTM_NEWADDR,NLM_F_CREATE|NLM_F_EXCL); h->nlmsg_len=NLMSG_LENGTH(sizeof(struct ifaddrmsg));
+    *(struct ifaddrmsg *)NLMSG_DATA(h)=(struct ifaddrmsg){.ifa_family=AF_INET6,.ifa_prefixlen=64,.ifa_index=index};
+    attr(h,IFA_ADDRESS,address.bytes,16);
+    struct md_network_publication lost_ack={.context=&queue[1],.publish=reject_after_notification};
+    assert(md_network_route(n,&root,h,h->nlmsg_len,91,0,NULL,reply.bytes,sizeof(reply),&lost_ack)==-EAGAIN);
+    assert(md_network_interface_has(md_network_interface_find(n,index,NULL),address));
+    observer.groups=RTMGRP_IPV6_ROUTE|RTMGRP_IPV6_IFADDR;
+    h->nlmsg_flags=NLM_F_REQUEST|NLM_F_ACK|NLM_F_REPLACE;
+    ((struct ifaddrmsg *)NLMSG_DATA(h))->ifa_prefixlen=80;
+    assert(!ack(n,&root,h,NULL));
+    unsigned added=0,removed=0,addresses=0;
+    unsigned char event[2048]; ssize_t bytes;
+    while ((bytes=recv(queue[1],event,sizeof(event),MSG_DONTWAIT))>0) {
+        assert(bytes>(ssize_t)(sizeof(struct md_network_packet)+sizeof(struct nlmsghdr)));
+        struct nlmsghdr header; memcpy(&header,event+sizeof(struct md_network_packet),sizeof(header));
+        added+=header.nlmsg_type==RTM_NEWROUTE; removed+=header.nlmsg_type==RTM_DELROUTE;
+        addresses+=header.nlmsg_type==RTM_NEWADDR;
+        assert(header.nlmsg_type!=RTM_DELADDR);
+    }
+    assert(errno==EAGAIN && added==1 && removed==1 && addresses==1);
+    n->listeners=NULL; close(queue[0]); close(queue[1]);
+    md_identity_release(&root); md_network_namespace_release(n);
+    puts("PASS route configuration: nexthops, rollback, lifetimes, expiry, notification-before-ACK and lost ACK custody");
 }

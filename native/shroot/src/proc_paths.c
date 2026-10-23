@@ -59,6 +59,10 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
         out.process=tgid;
         out.kind = MD_PROC_FD;
     } else if (word(&p, "proc")) {
+        if (word(&p,"filesystems")) {
+            out.kind=MD_PROC_FILESYSTEMS; out.process=tid;
+            out.tail=p; out.anchor_length=(size_t)(p-path); return out;
+        }
         if (word(&p,"devices")) {
             out.kind=MD_PROC_DEVICES; out.process=tid;
             out.tail=p; out.anchor_length=(size_t)(p-path); return out;
@@ -99,6 +103,28 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
             if (word(&p,"net")) {
                 if (word(&p,"bridge")) {
                     if (word(&p,"bridge-nf-call-iptables")) out.kind=MD_PROC_NET_BRIDGE_FILTER;
+                    else if (word(&p,"bridge-nf-call-ip6tables")) out.kind=MD_PROC_NET_BRIDGE_FILTER6;
+                    out.process=tid; out.tail=p; out.anchor_length=(size_t)(p-path); return out;
+                }
+                if (word(&p,"ipv6")) {
+                    if (word(&p,"bindv6only")) out.kind=MD_PROC_NET_IPV6_BINDONLY;
+                    else if (word(&p,"conf")) {
+                        const char *name=component(p);
+                        size_t length=0;
+                        while (name[length] && name[length]!='/') ++length;
+                        if (!length || length>=sizeof(out.interface)) return out;
+                        p=name+length;
+                        if (word(&p,"forwarding")) out.kind=MD_PROC_NET_IPV6_FORWARD;
+                        else if (word(&p,"disable_ipv6")) out.kind=MD_PROC_NET_IPV6_DISABLE;
+                        else if (word(&p,"accept_dad")) out.kind=MD_PROC_NET_IPV6_DAD;
+                        else if (word(&p,"accept_ra")) out.kind=MD_PROC_NET_IPV6_RA;
+                        else if (word(&p,"mtu")) out.kind=MD_PROC_NET_IPV6_MTU;
+                        else if (word(&p,"hop_limit")) out.kind=MD_PROC_NET_IPV6_HOPS;
+                        else if (word(&p,"addr_gen_mode")) out.kind=MD_PROC_NET_IPV6_ADDRGEN;
+                        else if (word(&p,"use_tempaddr")) out.kind=MD_PROC_NET_IPV6_PRIVACY;
+                        else return out;
+                        memcpy(out.interface,name,length);
+                    } else return out;
                     out.process=tid; out.tail=p; out.anchor_length=(size_t)(p-path); return out;
                 }
                 if (!word(&p,"ipv4")) return out;

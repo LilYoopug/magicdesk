@@ -4,6 +4,7 @@
 #include "procfs_view.h"
 #include "fuse_view.h"
 #include "render_device.h"
+#include "binfmt.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
@@ -66,6 +67,22 @@ static int mqueue_source(struct md_filesystem *fs,const struct md_fs_request *q,
 }
 int md_mount_source_create(struct md_filesystem *fs,const struct md_fs_request *q,
         struct md_mount_source *out) {
+    if (q->mode==MD_FS_MOUNT_BINFMT) {
+        if (q->flags&~MD_FS_MOUNT_FLAGS) return -EOPNOTSUPP;
+        if (q->value_size && (q->value_size!=1 || *(const char *)q->value)) return -EINVAL;
+        int parent=md_fs_private_mounts_parent(fs->store);
+        if (parent<0) return parent;
+        struct md_mount_source s={.fd=-1,.backing=MD_MOUNT_PROVIDER,
+            .policy=md_fs_mount_flags(q->flags)|MD_MOUNT_NOSUID|MD_MOUNT_NODEV|MD_MOUNT_NOEXEC};
+        int error=md_binfmt_mount(fs->binfmt,parent,fs->store->identity,&s.provider);
+        close(parent);
+        if (!error) {
+            s.fd=openat(md_provider_tree_root(s.provider),".",O_PATH|O_DIRECTORY|O_CLOEXEC);
+            if (s.fd<0) error=-errno;
+        }
+        if (error) md_mount_source_close(&s); else *out=s;
+        return error;
+    }
     if (q->mode==MD_FS_MOUNT_TMPFS) return md_fs_mount_temporary(fs,q,out);
     if (q->mode==MD_FS_MOUNT_OVERLAY) return md_fs_mount_overlay(fs,q,out);
     if (q->mode==MD_FS_MOUNT_SYSFS) return sysfs_source(fs,q,out);

@@ -92,7 +92,7 @@ The store needs Python 3 and an installed resolver; `--cli-only` needs only a
 shell and cat (also tested on Alpine). `--native-tests` includes the resource,
 mount and filesystem-worker suites, including partial port-reservation rollback.
 Traffic assertions use local native peers, independently of internet stability.
-`test_os_boot.py --network bridge --dns IPv4` applies the same profile to stock
+`test_os_boot.py --network bridge --dns IP` applies the same profile to stock
 init boot; its default remains routed. Reports identify the native binaries.
 
 Retained recipe-installed sessions can run `test_booted_containers.py --session
@@ -131,6 +131,26 @@ ordering failures independently of external connectivity. Podman's optional
 `--host-limits` is diagnostic: normal acceptance uses the common logical
 NOFILE/NPROC contract without explicit container limit overrides. The physical
 Android limits still apply.
+
+`--exercise-ports --ipv6` selects a dual-stack container bridge and checks IPv6
+TCP/UDP publication and named peers. `--ipv6-host ADDRESS` selects an address
+assigned to both the outer Shroot namespace and Android for publication and
+native observation; the default is `::1`. Test a non-loopback address separately: Netavark's IPv6
+localhost forwarding is not equivalent to its ordinary host-address path.
+The fixtures neither add Android addresses nor modify Android routing.
+
+`--internet-ipv6` additionally requires UDP DNS, TCP DNS and certificate-verified
+HTTPS from both containers to `2606:4700:4700::1111`. All sockets explicitly use
+AF_INET6, without IPv4 fallback; the HTTPS response must identify an IPv6 source.
+This opt-in public test needs a working Android IPv6 uplink, not just addresses
+inside Shroot. A VPN can reject IPv6 even when cellular service provides it.
+Any temporary host-routing exception belongs to an explicitly authorized lab
+setup, scoped to the test destination/UID and removed after the run; it is not a
+recipe prerequisite or a production VPN bypass.
+`test_network_ipv6.py --build BUILD --name NAME --internet` uses the same public
+assertions natively and in guest `routed`/`bridge` modes, in addition to its local
+address/route, ICMPv6, dual-stack socket, nftables and port-publication checks.
+Omit `--internet` for deterministic local coverage.
 `test_routed_network.py` adds libc interface lookup, IPv4 packet information
 with absent/truncated receive buffers, a datagram queued before sender close,
 and receiver-close/rebind without reusing stale reply mappings.

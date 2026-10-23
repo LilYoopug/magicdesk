@@ -3,6 +3,7 @@
 #include "network_internal.h"
 #include "network_forward.h"
 #include "network_proc.h"
+#include "test_network_fixture.h"
 #include "guest_identity.h"
 #include <assert.h>
 #include <errno.h>
@@ -22,8 +23,8 @@ static void device_binding(void) {
     assert(!md_network_interface_add(n,MD_LINK_BRIDGE,"device-b",&second));
     struct md_network_interface *a=md_network_interface_find(n,first,NULL);
     struct md_network_interface *b=md_network_interface_find(n,second,NULL);
-    a->info.flags|=IFF_UP; a->ipv4=htonl(0x0a010001); a->prefix=24;
-    b->info.flags|=IFF_UP; b->ipv4=htonl(0x0a020001); b->prefix=24;
+    a->info.flags|=IFF_UP; test_network_v4(a,htonl(0x0a010001),24);
+    b->info.flags|=IFF_UP; test_network_v4(b,htonl(0x0a020001),24);
     struct md_fd_object *late; int late_fd;
     assert(!md_network_endpoint_open(n,0,AF_INET,SOCK_DGRAM,0,&late,&late_fd));
     struct sockaddr_in wildcard={.sin_family=AF_INET};
@@ -57,8 +58,8 @@ static void device_binding(void) {
     assert(!md_network_endpoint_bind(one,f,&root,(void *)&any,sizeof(any)));
     assert(!md_network_endpoint_bind(two,s,&root,(void *)&any,sizeof(any)));
     struct md_network_flow_path path={.destination=n->inode,
-        .translated={.destination=a->ipv4,.destination_port=any.sin_port,.input=first}};
-    struct sockaddr_in native; const void *selected=NULL;
+        .translated={.destination=md_ip_v4(htonl(0x0a010001)),.destination_port=any.sin_port,.input=first}};
+    struct md_inet_address native; const void *selected=NULL;
     assert(!md_network_endpoint_resolve(n->fabric,&path,SOCK_DGRAM,&native,&selected));
     assert(selected==one && path.mediated);
     path.translated.input=second;
@@ -66,7 +67,7 @@ static void device_binding(void) {
     path.translated.input=1;
     assert(md_network_endpoint_resolve(n->fabric,&path,SOCK_DGRAM,&native,&selected)==-ECONNREFUSED);
     struct sockaddr_storage destination;
-    any.sin_addr.s_addr=b->ipv4;
+    any.sin_addr.s_addr=htonl(0x0a020001);
     assert(md_network_endpoint_destination(one,(void *)&any,sizeof(any),&destination,&length)==-ENETUNREACH);
     assert(!md_network_interface_move(n,first,n,"renamed"));
     length=sizeof(name);
@@ -138,7 +139,8 @@ void test_network_endpoint(void) {
     struct md_fd_object *first=NULL,*second=NULL,*conflict=NULL;
     int f=-1,s=-1,c=-1;
     assert(md_network_endpoint_open(offline,0,AF_INET,SOCK_STREAM,0,&first,&f)==-EOPNOTSUPP);
-    assert(md_network_endpoint_open(a,0,AF_INET6,SOCK_STREAM,0,&first,&f)==-EAFNOSUPPORT);
+    assert(!md_network_endpoint_open(a,0,AF_INET6,SOCK_STREAM,0,&first,&f));
+    close(f); md_fd_object_release(first);
     assert(!md_network_endpoint_open(a,1000,AF_INET,SOCK_STREAM,0,&first,&f));
     assert(!md_network_endpoint_open(b,0,AF_INET,SOCK_STREAM,0,&second,&s));
     assert(!md_network_endpoint_open(a,0,AF_INET,SOCK_STREAM,0,&conflict,&c));
@@ -158,7 +160,7 @@ void test_network_endpoint(void) {
     struct stat st,other;
     assert(!fstat(f,&st) && !fstat(s,&other));
     assert(count==1 && entries[0].inode==st.st_ino && entries[0].uid==1000
-        && entries[0].local.sin_port==htons(80));
+        && entries[0].local.port==htons(80));
     free(entries);
     struct md_control_file table=md_network_proc_new(a,MD_NET_TABLE_TCP);
     assert(table.ops);
@@ -198,10 +200,11 @@ void test_network_endpoint(void) {
     struct md_network_interface *in=md_network_interface_find(a,inside,NULL);
     struct md_network_interface *out=md_network_interface_find(root,outside,NULL);
     in->info.flags|=IFF_UP; out->info.flags|=IFF_UP;
-    in->ipv4=htonl(0x0a580002); in->prefix=16;
+    test_network_v4(in,htonl(0x0a580002),16);
     in->peer=outside; out->peer=inside; out->master=bridge;
     md_network_interface_find(root,bridge,NULL)->info.flags|=IFF_UP;
-    a->default_interface=inside;
+    a->routes[a->route_count++]=(struct md_network_route_entry){.destination=md_ip_any(AF_INET),
+        .gateway=md_ip_any(AF_INET),.interface=inside};
     assert(!md_network_endpoint_destination(first,(void *)&remote,sizeof(remote),&logical,&length));
     uint32_t filter[2]={1};
     uint64_t scope;
@@ -212,16 +215,16 @@ void test_network_endpoint(void) {
     assert(!md_network_parameter_write(root,MD_NET_RP_FILTER,scope,filter));
     assert(!md_network_endpoint_destination(first,(void *)&remote,sizeof(remote),&logical,&length));
     struct md_network_interface *gateway=md_network_interface_find(root,bridge,NULL);
-    gateway->ipv4=htonl(0x0a580001); gateway->prefix=16;
+    test_network_v4(gateway,htonl(0x0a580001),16);
     filter[0]=1;
     assert(!md_network_parameter_write(root,MD_NET_RP_FILTER,scope,filter));
     assert(!md_network_endpoint_destination(first,(void *)&remote,sizeof(remote),&logical,&length));
-    assert(md_network_ingress(root,gateway,htonl(INADDR_LOOPBACK),remote.sin_addr.s_addr)==-ENETUNREACH);
+    assert(md_network_ingress(root,gateway,md_ip_v4(htonl(INADDR_LOOPBACK)),md_ip_v4(remote.sin_addr.s_addr))==-ENETUNREACH);
     filter[0]=2;
     assert(!md_network_parameter_write(root,MD_NET_RP_FILTER,scope,filter));
     uint32_t localnet[2]={1};
     assert(!md_network_parameter_write(root,MD_NET_ROUTE_LOCALNET,scope,localnet));
-    assert(!md_network_ingress(root,gateway,htonl(INADDR_LOOPBACK),remote.sin_addr.s_addr));
+    assert(!md_network_ingress(root,gateway,md_ip_v4(htonl(INADDR_LOOPBACK)),md_ip_v4(remote.sin_addr.s_addr)));
     uint32_t forward[2]={0};
     assert(!md_network_parameter_write(root,MD_NET_IPV4_FORWARD,0,forward));
     assert(md_network_endpoint_destination(first,(void *)&remote,sizeof(remote),&logical,&length)==-ENETUNREACH);

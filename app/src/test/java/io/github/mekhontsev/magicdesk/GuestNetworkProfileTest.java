@@ -37,4 +37,23 @@ public class GuestNetworkProfileTest {
         assertThrows(IllegalArgumentException.class, () -> new GuestNetworkProfile(GuestNetworkProfile.Mode.NONE, List.of(), List.of("192.0.2.1")));
         assertThrows(IllegalArgumentException.class, () -> new GuestNetworkProfile(GuestNetworkProfile.Mode.BRIDGE, List.of("x\0"), List.of()));
     }
+
+    @Test public void addressingIsForwardedWithoutAnotherIpParser() {
+        var subnets = new ArrayList<>(List.of("172.23.8.0/24", "fd42:1234::/64"));
+        var addressing = new GuestNetworkProfile.Addressing(subnets, "172.23.8.42", "fd42:1234::42",
+                List.of("172.23.8.7", "fd42:1234::7"));
+        subnets.clear();
+        var profile = new GuestNetworkProfile(GuestNetworkProfile.Mode.BRIDGE, List.of(), List.of(), addressing);
+        var expected = List.of("--network", "bridge", "--subnet", "172.23.8.0/24", "--subnet", "fd42:1234::/64",
+                "--ip", "172.23.8.42", "--ip6", "fd42:1234::42", "--gateway", "172.23.8.7", "--gateway", "fd42:1234::7");
+        assertEquals(expected, profile.arguments());
+        for (boolean image : List.of(false, true)) {
+            var plan = new GuestLaunchPlan(new GuestEnvironment("/store", "/tmp", "", image),
+                    "/", List.of("/bin/sh"), false, profile);
+            var args = plan.arguments();
+            assertEquals(expected, args.subList(args.indexOf("--network"), args.indexOf("--")));
+        }
+        assertThrows(IllegalArgumentException.class, () -> new GuestNetworkProfile(
+                GuestNetworkProfile.Mode.HOST, List.of(), List.of(), addressing));
+    }
 }

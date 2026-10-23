@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "exec_prepare.h"
+#include "binfmt.h"
 #include "fs_engine.h"
 #include "fs_continuation.h"
 #include "elf_admission.h"
@@ -122,6 +123,13 @@ static int acquire_fd(struct md_fs_context *context,int fd,const struct md_fs_an
 struct md_exec_preparation {
     struct md_fs_continuation *pending;
     struct md_fs_anchor *origin;
+    struct md_fs_anchor *credential_origin;
+    struct md_fs_anchor *binary_origin;
+    struct md_binfmt_entry *format;
+    struct md_binfmt_registry *formats;
+    const struct md_user_namespace *user_namespace;
+    unsigned credential_flags;
+    int credential_binary, inaccessible;
     struct md_command_recipe recipe;
     struct md_command_images images;
     struct md_exec_image *setid;
@@ -136,14 +144,18 @@ struct md_exec_preparation {
 static void preparation_clear(struct md_exec_preparation *p) {
     if (p->pending) p->pending->destroy(p->pending);
     md_fs_anchor_release(p->origin);
+    md_fs_anchor_release(p->credential_origin);
+    md_fs_anchor_release(p->binary_origin);
+    md_binfmt_entry_release(p->format);
     md_command_images_close(&p->images);
     md_exec_image_release(p->setid);
 }
 static int prepare_identity(struct md_exec_preparation *p, struct md_fs_context *context, unsigned mode) {
     /* Only the provider can authorize stored identity. Anonymous/host-only
      * images and nosuid/traced execs retain their ordinary loading path. */
-    if (!p->origin
-            || (mode&MD_EXEC_TRACED) || (p->images.mount_flags&MD_MOUNT_NOSUID)) return 0;
+    struct md_fs_anchor *origin=p->credential_binary ? p->credential_origin : p->origin;
+    unsigned flags=p->credential_binary ? p->credential_flags : p->images.mount_flags;
+    if (!origin || (mode&MD_EXEC_TRACED) || (flags&MD_MOUNT_NOSUID)) return 0;
     /* Providers may materialize a separate loader image. Stored authority
      * belongs to the retained source object, never that image's backing FD. */
     while (p->identity_step<4) {
@@ -151,7 +163,7 @@ static int prepare_identity(struct md_exec_preparation *p, struct md_fs_context 
         unsigned char value[MD_FILE_CAPABILITY_MAX]={0};
         struct md_fs_request q={.actor=context->actor,.peer=context->peer,
             .operation=capability ? MD_FS_XATTR : MD_FS_FSTAT,
-            .directory={md_fs_anchor_fd(p->origin),-1},.origin={p->origin,NULL},
+            .directory={md_fs_anchor_fd(origin),-1},.origin={origin,NULL},
             .mode=capability ? MD_FS_XATTR_GET : MD_FS_STAT_CANONICAL,
             .path={NULL,capability ? MD_FILE_CAPABILITY_NAME : NULL},
             .capacity=capability ? sizeof(value) : 0};
@@ -172,8 +184,8 @@ static int prepare_identity(struct md_exec_preparation *p, struct md_fs_context 
             if (!setid && !caps.present) return 0;
             p->capability_size=result.size;
             memcpy(p->capability,value,sizeof(value));
-            int error=md_exec_image_snapshot(p->images.program,before->uid,before->gid,
-                before->mode,&caps,&p->setid);
+            int error=md_exec_image_snapshot(p->credential_binary ? p->images.execfd : p->images.program,before->uid,before->gid,
+                before->mode,&caps,!p->credential_binary,&p->setid);
             if (error) return error;
         } else if (p->identity_step==2) {
             if (result.size!=p->capability_size || memcmp(value,p->capability,result.size)) return -ESTALE;
@@ -191,7 +203,8 @@ static int prepare_identity(struct md_exec_preparation *p, struct md_fs_context 
     if (error) return error;
     int fd=md_exec_image_dup(p->setid);
     if (fd<0) return fd;
-    close(p->images.program); p->images.program=fd;
+    int *target=p->credential_binary ? &p->images.execfd : &p->images.program;
+    close(*target); *target=fd;
     return 0;
 }
 void md_exec_preparation_destroy(struct md_exec_preparation *p) {
@@ -202,6 +215,18 @@ int md_exec_preparation_ready(struct md_exec_preparation *p) {
 }
 static long acquire(struct md_exec_preparation *p,struct md_fs_context *context,
         struct md_program *program,struct md_fs_anchor **image_origin,unsigned mode) {
+    if (p->format) {
+        const struct md_program *fixed=md_binfmt_entry_program(p->format);
+        if (fixed) {
+            *program=*fixed;
+            program->fd=fcntl(fixed->fd,F_DUPFD_CLOEXEC,3);
+            if (program->fd<0) return -errno;
+            *image_origin=md_fs_anchor_retain(fixed->origin);
+            md_binfmt_entry_release(p->format); p->format=NULL;
+            return 0;
+        }
+        md_binfmt_entry_release(p->format); p->format=NULL;
+    }
     const char *path=p->path;
     const struct md_fs_anchor *cwd=context->task.cwd;
     if (*path!='/' && !cwd) return -ENODATA;
@@ -256,11 +281,42 @@ static int acquire_first(struct md_exec_preparation *p,struct md_fs_context *con
     }
     return error;
 }
+struct format_selection { struct md_exec_preparation *preparation; const char *path; };
+static int select_format(void *data,const struct md_program *program,const void *header,size_t size,char *next) {
+    const struct format_selection *selection=data;
+    struct md_exec_preparation *p=selection->preparation;
+    struct md_binfmt_entry *entry=md_binfmt_match(p->formats,p->user_namespace,selection->path,header,size);
+    if (!entry) return 0;
+    int error=p->inaccessible ? -ENOENT : p->recipe.redirects==MD_SCRIPT_DEPTH ? -ELOOP : 0;
+    const struct md_binfmt_rule *rule=md_binfmt_entry_rule(entry);
+    if (!error && (rule->flags&MD_BINFMT_OPEN)) {
+        if (p->images.execfd>=0) error=-ENOEXEC;
+        else {
+            p->images.execfd=fcntl(p->images.program,F_DUPFD_CLOEXEC,3);
+            if (p->images.execfd<0) error=-errno;
+            else { p->recipe.execfd=1; p->binary_origin=md_fs_anchor_retain(p->origin); }
+        }
+    }
+    if (!error) error=md_copy(next,MD_INTERPRETER_MAX,rule->interpreter);
+    if (error) { md_binfmt_entry_release(entry); return error; }
+    if (rule->flags&MD_BINFMT_CREDENTIALS) {
+        p->credential_binary=1; p->credential_origin=md_fs_anchor_retain(p->origin);
+        p->credential_flags=program->mount_flags;
+    }
+    struct md_command_redirect *redirect=&p->recipe.redirect[p->recipe.redirects++];
+    redirect->kind=rule->flags&MD_BINFMT_PRESERVE ? MD_REDIRECT_PRESERVE : MD_REDIRECT_BINARY;
+    memcpy(redirect->text,rule->interpreter,sizeof(redirect->text));
+    p->format=entry; return 1;
+}
 int md_fs_command_prepare(struct md_fs_context *context, const struct md_fs_request *q,
         struct md_program **proc_image,struct md_command_recipe *recipe,struct md_command_images *images,
-        struct md_fs_anchor **image_origin,struct md_exec_image **setid,struct md_exec_preparation **owner) {
-    struct md_exec_preparation local={.first=1,.images={.program=-1,.loader=-1}};
+        struct md_fs_anchor **image_origin,struct md_fs_anchor **binary_origin,
+        struct md_exec_image **setid,struct md_exec_preparation **owner) {
+    struct md_exec_preparation local={.first=1,.images=MD_COMMAND_IMAGES_EMPTY};
     struct md_exec_preparation *p=*owner ? *owner : &local;
+    p->formats=context->filesystem->binfmt;
+    p->user_namespace=context->task.identity.user_namespace;
+    p->inaccessible=!!(q->mode&MD_EXEC_INACCESSIBLE);
     int error=0;
     while (!p->prepared) {
         struct md_program current={.fd=-1};
@@ -271,9 +327,14 @@ int md_fs_command_prepare(struct md_fs_context *context, const struct md_fs_requ
             if (p->kind==MD_COMMAND_EXECUTABLE) {
                 md_fs_anchor_release(p->origin); p->origin=origin; origin=NULL;
             }
+            char descriptor_path[64];
+            snprintf(descriptor_path,sizeof(descriptor_path),"/dev/fd/%lld",(long long)q->offset);
+            const char *name=p->first ? (q->mode&MD_EXEC_OBJECT ? current.identity.path
+                : *q->path[0] ? q->path[0] : descriptor_path) : p->path;
+            struct format_selection selection={p,name};
             p->first=0;
             error=md_command_images_step(&p->recipe,&p->images,&current,p->kind,
-                q->mode&MD_EXEC_INACCESSIBLE,p->path);
+                q->mode&MD_EXEC_INACCESSIBLE,p->path,select_format,&selection);
         }
         md_fs_anchor_release(origin);
         if (current.fd>=0) close(current.fd);
@@ -291,8 +352,11 @@ int md_fs_command_prepare(struct md_fs_context *context, const struct md_fs_requ
     }
     if (!error) {
         *recipe=p->recipe; *images=p->images;
-        p->images=(struct md_command_images){.program=-1,.loader=-1};
+        if (p->credential_binary) images->mount_flags=(images->mount_flags&~MD_MOUNT_NOSUID)
+            |(p->credential_flags&MD_MOUNT_NOSUID);
+        p->images=(struct md_command_images)MD_COMMAND_IMAGES_EMPTY;
         *image_origin=p->origin; p->origin=NULL;
+        *binary_origin=p->binary_origin; p->binary_origin=NULL;
         *setid=p->setid; p->setid=NULL;
     }
     if (p==&local) preparation_clear(p); else md_exec_preparation_destroy(p);

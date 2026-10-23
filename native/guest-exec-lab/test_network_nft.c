@@ -71,14 +71,14 @@ static void reverse_policy(void) {
     struct md_filter_chain chain={.table=1,.handle=2,.hook=NF_INET_LOCAL_IN,.policy=NF_DROP};
     struct md_network_filter filter={.tables=&table,.count=1,.chains=&chain,.chain_count=1};
     n->filter=&filter;
-    struct md_filter_packet packet={.destination=htonl(0xc0000201),.destination_port=htons(53),
+    struct md_filter_packet packet={.destination=md_ip_v4(htonl(0xc0000201)),.destination_port=htons(53),
         .source_port=htons(32800),.protocol=IPPROTO_UDP,.state=8};
     struct md_network_flow_path path;
-    assert(!md_network_flow_route(n,&packet,0,&path) && path.mediated);
+    assert(!md_network_flow_route(n,&packet,0,0,&path) && path.mediated);
     assert(!md_network_flow_check(n->fabric,&path,0));
     assert(md_network_flow_check(n->fabric,&path,1)==-EACCES);
     chain.policy=NF_ACCEPT;
-    assert(!md_network_flow_route(n,&packet,0,&path) && !path.mediated);
+    assert(!md_network_flow_route(n,&packet,0,0,&path) && !path.mediated);
     assert(!md_network_flow_check(n->fabric,&path,1));
     n->filter=NULL;
     md_network_namespace_release(n);
@@ -103,13 +103,14 @@ static void nat_hook_order(void) {
         memcpy(rules[i].expressions[1].value,i==3 ? &uplink : &private,4);
         rules[i].expressions[2]=(struct md_filter_expression){.code=MD_FILTER_VERDICT,.operation=i==1 ? NF_DROP : NF_ACCEPT};
     }
-    struct md_network_filter f={.chains=chains,.chain_count=4,.rules=rules,.rule_count=4};
+    struct md_network_filter_table table={.handle=1,.family=NFPROTO_IPV4};
+    struct md_network_filter f={.tables=&table,.count=1,.chains=chains,.chain_count=4,.rules=rules,.rule_count=4};
     n->filter=&f;
     for (unsigned transport=0;transport<2;++transport) {
-        struct md_filter_packet p={.source=private,.destination=htonl(0xc0000201),.source_port=htons(32000),
+        struct md_filter_packet p={.source=md_ip_v4(private),.destination=md_ip_v4(htonl(0xc0000201)),.source_port=htons(32000),
             .destination_port=htons(80),.protocol=transport ? IPPROTO_UDP : IPPROTO_TCP,.state=8};
         struct md_network_flow_path path;
-        assert(!md_network_flow_route(n,&p,0,&path) && p.snat && p.source==uplink);
+        assert(!md_network_flow_route(n,&p,0,0,&path) && p.snat && p.source.v4==uplink);
         assert(!md_network_flow_check(n->fabric,&path,0));
         assert(!md_network_flow_check(n->fabric,&path,1));
         /* Raw rules must see the real incoming tuple and remain enforceable. */
@@ -127,10 +128,10 @@ static void nat_hook_order(void) {
         chains[0].hook=NF_INET_POST_ROUTING;
         /* Adding NAT after admission cannot retarget the first payload either. */
         chains[0].hook=chains[3].hook=-1;
-        p=(struct md_filter_packet){.source=private,.destination=htonl(0xc0000201),
+        p=(struct md_filter_packet){.source=md_ip_v4(private),.destination=md_ip_v4(htonl(0xc0000201)),
             .source_port=htons(32000),.destination_port=htons(80),
             .protocol=transport ? IPPROTO_UDP : IPPROTO_TCP,.state=8};
-        assert(!md_network_flow_route(n,&p,0,&path) && !p.snat);
+        assert(!md_network_flow_route(n,&p,0,0,&path) && !p.snat);
         chains[0].hook=chains[3].hook=NF_INET_POST_ROUTING;
         memcpy(rules[3].expressions[1].value,&private,4);
         ++n->fabric->policy_generation;
@@ -147,10 +148,10 @@ static void native_nat_update(void) {
     assert(n);
     const int hooks[]={NF_INET_PRE_ROUTING,NF_INET_LOCAL_OUT,NF_INET_POST_ROUTING};
     for (unsigned transport=0;transport<2;++transport) for (unsigned h=0;h<3;++h) {
-        struct md_filter_packet packet={.destination=htonl(0xc0000201),.destination_port=htons(80),
+        struct md_filter_packet packet={.destination=md_ip_v4(htonl(0xc0000201)),.destination_port=htons(80),
             .source_port=htons(32800),.protocol=transport ? IPPROTO_UDP : IPPROTO_TCP,.state=8};
         struct md_network_flow_path path;
-        assert(!md_network_flow_route(n,&packet,0,&path) && !path.mediated);
+        assert(!md_network_flow_route(n,&packet,0,0,&path) && !path.mediated);
         struct md_filter_chain chains[]={
             {.handle=1,.hook=hooks[h],.nat=1,.policy=NF_ACCEPT,.counters=1},
             {.handle=2,.hook=-1,.policy=NF_ACCEPT},
@@ -159,7 +160,8 @@ static void native_nat_update(void) {
             {.chain=1,.count=1,.expressions={{.code=MD_FILTER_VERDICT,.operation=NFT_JUMP,.target=2}}},
             {.chain=2,.count=1,.expressions={{.code=MD_FILTER_COUNTER}}},
             {.chain=3,.count=1,.expressions={{.code=MD_FILTER_VERDICT,.operation=NFT_JUMP,.target=2}}}};
-        struct md_network_filter filter={.chains=chains,.chain_count=2,.rules=rules,.rule_count=2};
+        struct md_network_filter_table table={.family=NFPROTO_IPV4};
+        struct md_network_filter filter={.tables=&table,.count=1,.chains=chains,.chain_count=2,.rules=rules,.rule_count=2};
         /* Newly installed NAT counters do not require moving already native
          * streams into a relay; their admitted tuple must not be rewritten. */
         assert(!md_network_flow_admits(n,&filter,&path));
@@ -186,16 +188,17 @@ static void native_disjoint_update(void) {
     struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
     assert(n);
     for (unsigned transport=0;transport<2;++transport) {
-        struct md_filter_packet packet={.destination=htonl(0xc0000201),.destination_port=htons(443),
+        struct md_filter_packet packet={.destination=md_ip_v4(htonl(0xc0000201)),.destination_port=htons(443),
             .source_port=htons(32800),.protocol=transport ? IPPROTO_UDP : IPPROTO_TCP,.state=8};
         struct md_network_flow_path path;
-        assert(!md_network_flow_route(n,&packet,0,&path) && !path.mediated);
+        assert(!md_network_flow_route(n,&packet,0,0,&path) && !path.mediated);
         struct md_filter_chain chain={.handle=1,.hook=NF_INET_LOCAL_OUT,.policy=NF_ACCEPT};
         struct md_filter_rule rule={.chain=1,.count=2,.expressions={
             {.code=MD_FILTER_TRANSPORT,.transport={.protocol=packet.protocol,
                 .source={0,65535},.destination={53,53}}},
             {.code=MD_FILTER_COUNTER}}};
-        struct md_network_filter filter={.chains=&chain,.chain_count=1,.rules=&rule,.rule_count=1};
+        struct md_network_filter_table table={.family=NFPROTO_IPV4};
+        struct md_network_filter filter={.tables=&table,.count=1,.chains=&chain,.chain_count=1,.rules=&rule,.rule_count=1};
         for (unsigned reverse=0;reverse<2;++reverse) {
             chain.hook=reverse ? NF_INET_LOCAL_IN : NF_INET_LOCAL_OUT;
             const enum md_filter_opcode effects[]={MD_FILTER_COUNTER,MD_FILTER_META_SET,MD_FILTER_CT_SET,MD_FILTER_VERDICT};
@@ -242,25 +245,25 @@ static void program(void) {
     e[6]=(struct md_filter_expression){.code=MD_FILTER_NAT,.operation=NFT_NAT_DNAT,.key=1,.aux=1,.src=8,.dst=4};
     assert(!md_filter_validate(&f));
     struct md_filter_port ports[4]; size_t count=0;
-    assert(!md_filter_ports(&f,htonl(0x0a000264),ports,4,&count) && count==2);
-    assert(!ports[0].address && ports[0].port==port && !ports[1].address && ports[1].port==port);
+    assert(!md_filter_ports(&f,md_ip_v4(htonl(0x0a000264)),ports,4,&count) && count==2);
+    assert(!ports[0].address.v4 && ports[0].port==port && !ports[1].address.v4 && ports[1].port==port);
     chains[0].hook=NF_INET_LOCAL_OUT;
     assert(!md_filter_validate(&f));
-    assert(!md_filter_ports(&f,htonl(0x0a000264),ports,4,&count) && count==2);
-    assert(!ports[0].address && ports[0].port==port && !ports[1].address && ports[1].port==port);
+    assert(!md_filter_ports(&f,md_ip_v4(htonl(0x0a000264)),ports,4,&count) && count==2);
+    assert(!ports[0].address.v4 && ports[0].port==port && !ports[1].address.v4 && ports[1].port==port);
     chains[0].hook=NF_INET_PRE_ROUTING;
-    struct md_filter_packet packet={.source=source,.destination=htonl(0x0a000264),.destination_port=port,
+    struct md_filter_packet packet={.source=md_ip_v4(source),.destination=md_ip_v4(htonl(0x0a000264)),.destination_port=port,
         .protocol=IPPROTO_TCP,.state=8};
     assert(!md_filter_evaluate(&f,NF_INET_PRE_ROUTING,&packet));
-    assert(packet.dnat && packet.destination==destination && packet.destination_port==translated);
-    packet.source=htonl(0x7f000001); packet.dnat=0; packet.destination_port=port;
+    assert(packet.dnat && packet.destination.v4==destination && packet.destination_port==translated);
+    packet.source=md_ip_v4(htonl(0x7f000001)); packet.dnat=0; packet.destination_port=port;
     assert(!md_filter_evaluate(&f,NF_INET_PRE_ROUTING,&packet) && !packet.dnat);
     chains[0].nat=0; assert(md_filter_validate(&f)==-EOPNOTSUPP);
     chains[0].nat=1; chains[0].hook=NF_INET_POST_ROUTING;
     assert(md_filter_validate(&f)==-EOPNOTSUPP);
     chains[0].hook=NF_INET_PRE_ROUTING;
     e[3].code=MD_FILTER_IMMEDIATE;
-    assert(md_filter_ports(&f,0,ports,4,&count)==-EOPNOTSUPP);
+    assert(md_filter_ports(&f,md_ip_any(AF_INET),ports,4,&count)==-EOPNOTSUPP);
     rules[1].expressions[0]=(struct md_filter_expression){.code=MD_FILTER_VERDICT,.operation=NFT_JUMP,.target=3};
     assert(md_filter_validate(&f)==-ELOOP);
     rules[1].count=0;
@@ -296,7 +299,7 @@ static void verdict_maps(void) {
         .rules=rules,.rule_count=2,.sets=&set,.set_count=1};
     assert(!md_filter_validate(&f));
     struct md_filter_accounting accounting={0};
-    struct md_filter_packet p={.input_name="lo",.state=8,.accounting=&accounting};
+    struct md_filter_packet p={.destination=md_ip_any(AF_INET),.input_name="lo",.state=8,.accounting=&accounting};
     assert(!md_filter_evaluate(&f,NF_INET_LOCAL_IN,&p) && accounting.count==1);
     assert(!rules[1].expressions[0].counter.packets);
     md_filter_account(&accounting,123);
@@ -317,9 +320,10 @@ static void policy_counters(void) {
         {.table=1,.handle=3,.hook=-1}};
     struct md_filter_rule rule={.chain=2,.count=1,.expressions={
         {.code=MD_FILTER_VERDICT,.operation=NFT_GOTO,.target=3}}};
-    struct md_network_filter f={.chains=chains,.chain_count=2,.rules=&rule,.rule_count=1};
+    struct md_network_filter_table table={.handle=1,.family=NFPROTO_IPV4};
+    struct md_network_filter f={.tables=&table,.count=1,.chains=chains,.chain_count=2,.rules=&rule,.rule_count=1};
     struct md_filter_accounting a={0};
-    struct md_filter_packet p={.state=8,.accounting=&a};
+    struct md_filter_packet p={.destination=md_ip_any(AF_INET),.state=8,.accounting=&a};
     assert(!md_filter_evaluate(&f,NF_INET_LOCAL_OUT,&p) && a.count==1);
     md_filter_account(&a,123);
     assert(chains[0].counter.packets==1 && chains[0].counter.bytes==123);
@@ -378,10 +382,10 @@ static void compat_transport(void) {
         assert(out.size==start+NLA_HDRLEN+rule.wire_size && !memcmp(dump.data+start+NLA_HDRLEN,rule.wire,rule.wire_size));
         free(rule.wire); rule.wire=NULL;
         rule.expressions[1]=(struct md_filter_expression){.code=MD_FILTER_NAT,.operation=NFT_NAT_DNAT,
-            .constant=1,.aux=1,.value={0,0,0,0,0x13,0x88}};
+            .constant=1,.family=AF_INET,.aux=1,.nat_port=htons(5000)};
         rule.count=2;
         for (unsigned src=0;src<2;++src) for (unsigned dst=0;dst<2;++dst) {
-            struct md_filter_packet p={.protocol=tcp ? IPPROTO_TCP : IPPROTO_UDP,.state=8,
+            struct md_filter_packet p={.destination=md_ip_any(AF_INET),.protocol=tcp ? IPPROTO_TCP : IPPROTO_UDP,.state=8,
                 .source_port=htons(src ? 1500 : 999),.destination_port=htons(dst ? 4000 : 4002)};
             unsigned match=(src!=!!(invert&1)) && (dst!=!!(invert&2));
             assert(!md_filter_evaluate(&f,NF_INET_PRE_ROUTING,&p) && p.dnat==match);
@@ -390,7 +394,7 @@ static void compat_transport(void) {
             assert(!md_filter_evaluate(&f,NF_INET_PRE_ROUTING,&p) && !p.dnat);
         }
         struct md_filter_port ports[4]; size_t count=0;
-        int error=md_filter_ports(&f,0,ports,4,&count);
+        int error=md_filter_ports(&f,md_ip_any(AF_INET),ports,4,&count);
         if (invert&2) assert(error==-EOPNOTSUPP);
         else {
             assert(!error && count==2);
@@ -401,7 +405,7 @@ static void compat_transport(void) {
     }
     assert(parse_transport(&f,&rule,1,0,2)==-EOPNOTSUPP);
     assert(parse_transport(&f,&rule,0,4,0)==-EOPNOTSUPP);
-    assert(!md_nft_compat_supported(NFPROTO_IPV6,"tcp",0,0));
+    assert(md_nft_compat_supported(NFPROTO_IPV6,"tcp",0,0));
     assert(!md_nft_compat_supported(NFPROTO_IPV4,"udp",1,0));
     assert(!md_nft_compat_supported(NFPROTO_IPV4,"udp",0,1));
     puts("PASS xt TCP/UDP: raw ABI, dump roundtrip, source/destination ranges and inversion, NAT publication and explicit feature rejection");
@@ -452,11 +456,11 @@ static void compat_nat(void) {
             f.rules=&rule; f.rule_count=1;
             for (unsigned udp=0;udp<2;++udp) {
                 struct md_filter_packet flow={.protocol=udp ? IPPROTO_UDP : IPPROTO_TCP,.state=8,
-                    .source=htonl(0xc0000201),.destination=htonl(0xc0000202),
+                    .source=md_ip_v4(htonl(0xc0000201)),.destination=md_ip_v4(htonl(0xc0000202)),
                     .source_port=htons(40000),.destination_port=htons(443)};
                 assert(!md_filter_evaluate(&f,chain.hook,&flow));
                 assert(snat ? flow.snat : flow.dnat);
-                assert((snat ? flow.source : flow.destination)==(variant==2 ? htonl(snat ? 0xc0000201 : 0xc0000202) : r.min_addr.ip));
+                assert((snat ? flow.source.v4 : flow.destination.v4)==(variant==2 ? htonl(snat ? 0xc0000201 : 0xc0000202) : r.min_addr.ip));
                 assert((snat ? flow.source_port : flow.destination_port)==(variant==1 ? htons(snat ? 40000 : 443) : r.min_proto.all));
             }
             o.size=NLMSG_HDRLEN; o.message=(void *)p.data;
@@ -476,7 +480,7 @@ static void compat_masquerade(void) {
     struct md_network_filter f={.tables=&table,.count=1,.chains=&chain,.chain_count=1};
     assert(md_nft_compat_supported(NFPROTO_IPV4,"MASQUERADE",0,1));
     assert(!md_nft_compat_supported(NFPROTO_IPV4,"MASQUERADE",1,1));
-    assert(!md_nft_compat_supported(NFPROTO_IPV6,"MASQUERADE",0,1));
+    assert(md_nft_compat_supported(NFPROTO_IPV6,"MASQUERADE",0,1));
     assert(!md_nft_compat_supported(NFPROTO_IPV4,"MASQUERADE",0,0));
     for (unsigned variant=0;variant<4;++variant) {
         struct packet p;
@@ -503,10 +507,10 @@ static void compat_masquerade(void) {
         assert(!error && rule.count==1 && rule.expressions[0].code==MD_FILTER_MASQUERADE);
         f.rules=&rule; f.rule_count=1;
         struct md_filter_packet flow={.protocol=IPPROTO_TCP,.state=8,
-            .source=htonl(0x0a580002),.destination=htonl(0x08080808),
-            .masquerade_address=htonl(0x0a580001)};
+            .source=md_ip_v4(htonl(0x0a580002)),.destination=md_ip_v4(htonl(0x08080808)),
+            .masquerade_address=md_ip_v4(htonl(0x0a580001))};
         assert(!md_filter_evaluate(&f,NF_INET_POST_ROUTING,&flow));
-        assert(flow.masquerade && flow.snat && flow.source==flow.masquerade_address);
+        assert(flow.masquerade && flow.snat && md_ip_equal(flow.source,flow.masquerade_address));
         free(rule.wire); f.rules=NULL; f.rule_count=0;
     }
     puts("PASS xt MASQUERADE: shared NAT expression and explicit unsupported range/flag rejection");
@@ -577,7 +581,7 @@ static void compat_conntrack(void) {
         rule.expressions[rule.count++]=(struct md_filter_expression){.code=MD_FILTER_VERDICT,.operation=NF_ACCEPT};
         f.rules=&rule; f.rule_count=1;
         for (unsigned state=1;state<=8;state<<=1) {
-            struct md_filter_packet flow={.state=state};
+            struct md_filter_packet flow={.destination=md_ip_any(AF_INET),.state=state};
             int accepted=!!(state&6)!=!!variant;
             assert(md_filter_evaluate(&f,NF_INET_FORWARD,&flow)==(accepted ? 0 : -EACCES));
         }
@@ -621,7 +625,7 @@ static void compat_mark(void) {
         rule.expressions[rule.count++]=(struct md_filter_expression){.code=MD_FILTER_VERDICT,.operation=NF_ACCEPT};
         f.rules=&rule; f.rule_count=1;
         for (unsigned bit=0;bit<2;++bit) {
-            struct md_filter_packet flow={.mark=0x4001|(bit ? 0x2000 : 0)};
+            struct md_filter_packet flow={.destination=md_ip_any(AF_INET),.mark=0x4001|(bit ? 0x2000 : 0)};
             int accepted=!variant || (bit!=(variant==2));
             assert(md_filter_evaluate(&f,NF_INET_FORWARD,&flow)==(accepted ? 0 : -EACCES));
             if (!variant) assert(flow.mark==0x6000);
@@ -662,7 +666,7 @@ static void compat_addrtype(void) {
         f.rules=&rule; f.rule_count=1;
         for (unsigned source=RTN_UNICAST;source<=RTN_LOCAL;++source)
             for (unsigned dest=RTN_UNICAST;dest<=RTN_LOCAL;++dest) {
-                struct md_filter_packet flow={.source_fib_type=source,.fib_type=dest};
+                struct md_filter_packet flow={.destination=md_ip_any(AF_INET),.source_fib_type=source,.fib_type=dest};
                 int accepted=source==RTN_UNICAST && ((dest==RTN_LOCAL)!=!!variant);
                 assert(md_filter_evaluate(&f,NF_INET_FORWARD,&flow)==(accepted ? 0 : -EACCES));
             }
@@ -686,7 +690,8 @@ static void compat_revisions(void) {
         assert(!md_network_message_attribute(&o,NFTA_COMPAT_NAME,name,strlen(name)+1));
         assert(!md_network_message_attribute(&o,NFTA_COMPAT_REV,&revision,4));
         assert(!md_network_message_attribute(&o,NFTA_COMPAT_TYPE,&target,4));
-        if (variant) assert(result(n,&root,&o)==(variant==1 ? -EPROTONOSUPPORT : -ENOENT));
+        if (variant==1 || variant==2 || (variant==3 && i<2))
+            assert(result(n,&root,&o)==(variant==2 ? -ENOENT : -EPROTONOSUPPORT));
         else {
             long size=run(n,&root,&o,&reply,NULL);
             struct nlmsghdr *h=(void *)reply.data;

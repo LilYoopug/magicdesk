@@ -1,6 +1,7 @@
 """External port observer and a tiny container service for Docker networking tests."""
 import http.client
 import errno
+import ipaddress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -8,6 +9,7 @@ import queue
 import secrets
 import socket
 import socketserver
+import ssl
 import struct
 import subprocess
 import sys
@@ -40,24 +42,24 @@ def wait_service(command):
         assert not waiter.is_alive()
 
 
-def exchange(host, port, token, repeats=1):
+def exchange(host, port, token, repeats=1, family=socket.AF_INET):
     if repeats > 1:
         for _ in range(repeats):
-            exchange(host, port, token)
+            exchange(host, port, token, family=family)
         return
-    host = socket.gethostbyname(host)
+    host = socket.getaddrinfo(host, port, family, socket.SOCK_STREAM)[0][4][0]
     with socket.create_connection((host, port), timeout=10) as connection:
         connection.sendall(b'PING')
         data = connection.recv(100).decode()
         assert data == token, ('TCP reply', host, port, data, token)
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+    with socket.socket(family, socket.SOCK_DGRAM) as connection:
         connection.settimeout(10)
         connection.sendto(b'PING', (host, port))
         data, peer = connection.recvfrom(100)
-        assert data.decode() == token and peer == (host, port), (data, peer)
+        assert data.decode() == token and peer[:2] == (host, port), (data, peer)
 
 
-def container_service(token):
+def container_service(token, family=socket.AF_INET):
     class TCP(socketserver.BaseRequestHandler):
         def handle(self):
             self.request.settimeout(10)
@@ -70,8 +72,14 @@ def container_service(token):
             if data == b'PING':
                 connection.sendto(token.encode(), self.client_address)
 
-    with socketserver.ThreadingTCPServer(('0.0.0.0', 8080), TCP) as tcp, \
-            socketserver.ThreadingUDPServer(('0.0.0.0', 8080), UDP) as udp:
+    class TCPServer(socketserver.ThreadingTCPServer):
+        address_family = family
+
+    class UDPServer(socketserver.ThreadingUDPServer):
+        address_family = family
+
+    host = '::' if family == socket.AF_INET6 else '0.0.0.0'
+    with TCPServer((host, 8080), TCP) as tcp, UDPServer((host, 8080), UDP) as udp:
         worker = threading.Thread(target=udp.serve_forever, daemon=True)
         worker.start()
         print('DOCKER_PORTS_READY', flush=True)
@@ -89,7 +97,7 @@ def diagnose_dns():
             query += b'\x07example\x03com\0' + struct.pack('!2H', kind, 1)
             start = time.monotonic()
             try:
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+                with socket.socket(socket.AF_INET6 if ':' in server else socket.AF_INET, socket.SOCK_DGRAM) as connection:
                     connection.settimeout(5)
                     connection.sendto(query, (server, 53))
                     data, peer = connection.recvfrom(4096)
@@ -121,9 +129,59 @@ def internet():
     print('CONTAINER_INTERNET_OK', json.dumps({'dnsSeconds': timings, 'httpBytes': size}), flush=True)
 
 
+def internet_ipv6():
+    """One public endpoint, literal IPv6 only: no IPv4 or resolver fallback."""
+    host = '2606:4700:4700::1111'
+    query_id = secrets.randbelow(65536)
+    query = struct.pack('!6H', query_id, 0x100, 1, 0, 0, 0)
+    query += b'\x07example\x03com\0' + struct.pack('!2H', 28, 1)
+    results = []
+    for kind in (socket.SOCK_DGRAM, socket.SOCK_STREAM):
+        start = time.monotonic()
+        with socket.socket(socket.AF_INET6, kind) as connection:
+            connection.settimeout(15)
+            connection.connect((host, 53))
+            local = connection.getsockname()
+            if kind == socket.SOCK_DGRAM:
+                connection.send(query)
+                data = connection.recv(4096)
+            else:
+                connection.sendall(struct.pack('!H', len(query)) + query)
+                with connection.makefile('rb') as stream:
+                    size = stream.read(2)
+                    assert len(size) == 2, ('DNS TCP header', size)
+                    size = struct.unpack('!H', size)[0]
+                    data = stream.read(size)
+                    assert len(data) == size, ('DNS TCP truncated', len(data), size)
+            ident, flags, questions, answers, _, _ = struct.unpack('!6H', data[:12])
+            assert ident == query_id and flags & 0x8000 and not flags & 0x20f, (ident, flags)
+            assert questions == 1 and answers > 0, (questions, answers)
+            results.append({'protocol': 'udp-dns' if kind == socket.SOCK_DGRAM else 'tcp-dns',
+                            'local': local, 'peer': connection.getpeername(),
+                            'bytes': len(data), 'seconds': time.monotonic() - start})
+    start = time.monotonic()
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as connection:
+        connection.settimeout(15)
+        connection.connect((host, 443))
+        with ssl.create_default_context().wrap_socket(connection, server_hostname='one.one.one.one') as tls:
+            tls.sendall(b'GET /cdn-cgi/trace HTTP/1.1\r\nHost: one.one.one.one\r\nConnection: close\r\n\r\n')
+            response = http.client.HTTPResponse(tls)
+            response.begin()
+            assert response.status == 200, response.status
+            body = response.read(4097)
+            assert len(body) <= 4096, 'Unexpectedly large HTTPS response'
+            fields = dict(line.split('=', 1) for line in body.decode().splitlines() if '=' in line)
+            assert ipaddress.ip_address(fields['ip']).version == 6, fields
+            results.append({'protocol': 'https', 'peer': tls.getpeername(), 'tls': tls.version(),
+                            'observedAddress': fields['ip'], 'bytes': len(body),
+                            'seconds': time.monotonic() - start})
+    print('CONTAINER_IPV6_INTERNET_OK', json.dumps(results), flush=True)
+
+
 class Observer:
     """Runs as Termux's own UID, outside the guest and its namespace fabric."""
-    def __init__(self):
+    def __init__(self, ipv6_host='::1'):
+        self.ipv6_host = str(ipaddress.IPv6Address(ipv6_host))
         self.token = secrets.token_hex(24)
         self.records = []
         self.reservations = []
@@ -156,8 +214,11 @@ class Observer:
                 result = {'request': item, 'uid': os.getuid()}
                 try:
                     port = int(item.get('port', 0))
+                    family = socket.AF_INET6 if item.get('ipv6') else socket.AF_INET
+                    host = owner.ipv6_host if item.get('ipv6') else '127.0.0.1'
+                    result['host'] = host
                     if item['operation'] == 'allocate':
-                        result['port'] = owner.allocate_port()
+                        result['port'] = owner.allocate_port(family)
                     elif item['operation'] == 'outbound':
                         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
                             route.connect(('192.0.2.1', 9))
@@ -170,28 +231,28 @@ class Observer:
                             owner.reservations.remove(connection)
                             connection.close()
                     elif item['operation'] == 'occupy':
-                        connection = socket.socket()
-                        connection.bind(('127.0.0.1', port))
+                        connection = socket.socket(family)
+                        connection.bind((host, port))
                         connection.listen()
                         owner.reservations.append(connection)
                     elif item['operation'] == 'released':
                         for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
-                            with socket.socket(socket.AF_INET, kind) as connection:
+                            with socket.socket(family, kind) as connection:
                                 connection.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                                connection.bind(('127.0.0.1', port))
+                                connection.bind((host, port))
                     elif item['operation'] == 'denied':
                         for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
-                            with socket.socket(socket.AF_INET, kind) as connection:
+                            with socket.socket(family, kind) as connection:
                                 connection.settimeout(0.5)
                                 try:
-                                    connection.connect(('127.0.0.1', port))
+                                    connection.connect((host, port))
                                     connection.send(b'PING')
                                     data = connection.recv(100)
                                     assert not data, ('denied payload received', data)
                                 except (TimeoutError, ConnectionRefusedError, ConnectionResetError):
                                     pass
                     elif item['operation'] == 'exchange':
-                        exchange('127.0.0.1', port, item['token'], item.get('repeats', 1))
+                        exchange(host, port, item['token'], item.get('repeats', 1), family)
                     else:
                         raise ValueError('Unknown observer operation')
                     result['passed'] = True
@@ -211,16 +272,17 @@ class Observer:
         self.thread.start()
         self.address = f"{self.server.server_port}/{self.token}"
 
-    def allocate_port(self):
+    def allocate_port(self, family=socket.AF_INET):
         # Reserve both protocols outside Shroot; release just before publication.
         # Only allocation races are retried, never a failed container publication.
         for _ in range(32):
-            tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            tcp = socket.socket(family, socket.SOCK_STREAM)
+            udp = socket.socket(family, socket.SOCK_DGRAM)
             try:
-                tcp.bind(('127.0.0.1', 0))
+                host = self.ipv6_host if family == socket.AF_INET6 else '127.0.0.1'
+                tcp.bind((host, 0))
                 port = tcp.getsockname()[1]
-                udp.bind(('127.0.0.1', port))
+                udp.bind((host, port))
                 tcp.listen()
             except OSError as error:
                 tcp.close()
@@ -263,8 +325,11 @@ if __name__ == '__main__':
         print('CONTAINER_OUTBOUND_OK', flush=True)
     elif sys.argv[1] == '--internet':
         internet()
+    elif sys.argv[1] == '--internet-ipv6':
+        internet_ipv6()
     elif sys.argv[1] == '--client':
-        exchange(sys.argv[2], int(sys.argv[3]), sys.argv[4], int(sys.argv[5]) if len(sys.argv)>5 else 1)
+        exchange(sys.argv[2], int(sys.argv[3]), sys.argv[4], int(sys.argv[5]) if len(sys.argv)>5 else 1,
+                 socket.AF_INET6 if '--ipv6' in sys.argv[6:] else socket.AF_INET)
         print('DOCKER_PEER_EXCHANGE_OK', flush=True)
     else:
-        container_service(sys.argv[1])
+        container_service(sys.argv[1], socket.AF_INET6 if '--ipv6' in sys.argv[2:] else socket.AF_INET)

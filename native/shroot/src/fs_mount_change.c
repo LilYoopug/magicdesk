@@ -745,7 +745,7 @@ static int mount_change(struct md_filesystem *fs, struct md_guest_domain *contex
             r=md_view_require_root(fs,&target);
             if (!r) r=policy_check(fs,mount,md_fs_mount_flags(q->flags));
             unsigned long type=mount->provider ? md_provider_tree_filesystem(mount->provider) : 0;
-            if (!r && !(q->flags&MS_BIND) && (type==SYSFS_MAGIC || type==PROC_SUPER_MAGIC
+            if (!r && !(q->flags&MS_BIND) && (type==SYSFS_MAGIC || type==PROC_SUPER_MAGIC || type==BINFMTFS_MAGIC
                     || mount->devpts
                     || (mount->storage && mount->storage->filesystem_kind==MD_FILESYSTEM_TMPFS)))
                 r=md_fs_super_reconfigure(fs,mount,!!(q->flags&MS_RDONLY),q->value_size ? q->value : NULL);
@@ -760,7 +760,7 @@ static int mount_change(struct md_filesystem *fs, struct md_guest_domain *contex
         else r=md_view_mount_propagation(fs,target.mount,kind,!!(q->flags&MS_REC));
         break;
     }
-    case MD_FS_MOUNT_TMPFS: case MD_FS_MOUNT_OVERLAY: case MD_FS_MOUNT_FUSE:
+    case MD_FS_MOUNT_TMPFS: case MD_FS_MOUNT_OVERLAY: case MD_FS_MOUNT_FUSE: case MD_FS_MOUNT_BINFMT:
     case MD_FS_MOUNT_PROC: case MD_FS_MOUNT_DEVPTS: case MD_FS_MOUNT_CGROUP: case MD_FS_MOUNT_CGROUP2: case MD_FS_MOUNT_SYSFS: case MD_FS_MOUNT_MQUEUE: {
         struct stat st;
         r=fstat(target.fd,&st) ? -errno : !S_ISDIR(st.st_mode) ? -ENOTDIR : 0;

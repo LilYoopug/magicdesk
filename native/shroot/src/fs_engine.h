@@ -8,6 +8,7 @@ struct md_image_catalogue;
 struct md_fd_exchanges;
 struct md_ofd_orders;
 struct md_fs_storage_cache;
+struct md_binfmt_registry;
 struct md_fs_statistics {
     struct md_cost operation[MD_FS_LAST + 1];
     struct md_cost mount_reconcile, mount_attach;
@@ -20,6 +21,7 @@ struct md_filesystem {
     struct md_fs_storage_cache *storage;
     struct md_inode_store *selected_store;
     struct md_image_catalogue *images;
+    struct md_binfmt_registry *binfmt;
     struct md_mount_namespace *mounts;
     struct md_view_object *native_root;
     struct md_view_mount *inode_mount;

@@ -11,6 +11,11 @@ static int unique(uint32_t *values,size_t *count,size_t limit,uint32_t value) {
     if (*count==limit) return -ENOSPC;
     values[(*count)++]=value; return 0;
 }
+static int unique_address(struct md_ip_address *values,size_t *count,size_t limit,struct md_ip_address value) {
+    for (size_t i=0;i<*count;++i) if (md_ip_equal(values[i],value)) return 0;
+    if (*count==limit) return -ENOSPC;
+    values[(*count)++]=value; return 0;
+}
 enum { ADDRESS=1, PORT=2 };
 static int all(const unsigned char *bytes,unsigned size,unsigned value) {
     for (unsigned i=0;i<size;++i) if (bytes[i]!=value) return 0;
@@ -21,8 +26,9 @@ static int all(const unsigned char *bytes,unsigned size,unsigned value) {
  * packet: that would omit valid source-restricted forwards. Actual admission
  * always runs the full evaluator with the real connection coordinates. */
 static int may_translate(struct md_network_filter *f,const struct md_filter_chain *chain,
-        uint32_t address,uint16_t port,unsigned protocol,int unknown_port,unsigned *budget,unsigned depth) {
+        struct md_ip_address address,uint16_t port,unsigned protocol,int unknown_port,unsigned *budget,unsigned depth) {
     if (depth>16) return -ELOOP;
+    unsigned address_size=md_ip_size(address),destination_offset=address.family==AF_INET6 ? 24 : 16;
     for (size_t i=0;i<f->rule_count;++i) {
         const struct md_filter_rule *r=&f->rules[i];
         if (r->chain!=chain->handle) continue;
@@ -52,7 +58,7 @@ static int may_translate(struct md_network_filter *f,const struct md_filter_chai
             case MD_FILTER_IMMEDIATE: memcpy(value,e->value,size); memset(k,1,size); break;
             case MD_FILTER_META:
                 if (e->key==NFT_META_NFPROTO || e->key==NFT_META_L4PROTO) {
-                    number=e->key==NFT_META_NFPROTO ? NFPROTO_IPV4 : protocol;
+                    number=e->key==NFT_META_NFPROTO ? (address.family==AF_INET6 ? NFPROTO_IPV6 : NFPROTO_IPV4) : protocol;
                     memcpy(value,&number,4); memset(k,1,4);
                 }
                 break;
@@ -71,9 +77,9 @@ static int may_translate(struct md_network_filter *f,const struct md_filter_chai
             case MD_FILTER_PAYLOAD:
                 for (unsigned b=0;b<size;++b) {
                     unsigned offset=e->aux+b;
-                    if (e->key==NFT_PAYLOAD_NETWORK_HEADER && offset==9) { value[b]=protocol; k[b]=1; }
-                    else if (e->key==NFT_PAYLOAD_NETWORK_HEADER && offset>=16 && offset<20) {
-                        if (address) { value[b]=((unsigned char *)&address)[offset-16]; k[b]=1; }
+                    if (e->key==NFT_PAYLOAD_NETWORK_HEADER && offset==(address.family==AF_INET6 ? 6U : 9U)) { value[b]=protocol; k[b]=1; }
+                    else if (e->key==NFT_PAYLOAD_NETWORK_HEADER && offset>=destination_offset && offset<destination_offset+address_size) {
+                        if (!md_ip_unspecified(address)) { value[b]=address.bytes[offset-destination_offset]; k[b]=1; }
                         else tag[b]=ADDRESS;
                     } else if (e->key==NFT_PAYLOAD_TRANSPORT_HEADER && offset>=2 && offset<4) {
                         if (!unknown_port) { value[b]=((unsigned char *)&port)[offset-2]; k[b]=1; }
@@ -94,7 +100,7 @@ static int may_translate(struct md_network_filter *f,const struct md_filter_chai
             case MD_FILTER_COMPARE: {
                 int mismatch=0;
                 for (unsigned b=0;b<size;++b) if (known[e->src+b] && values[e->src+b]!=e->value[b]) mismatch=1;
-                int excluded=(size==4 && all(tags+e->src,size,ADDRESS)) || (size==2 && all(tags+e->src,size,PORT));
+                int excluded=(size==address_size && all(tags+e->src,size,ADDRESS)) || (size==2 && all(tags+e->src,size,PORT));
                 if (mismatch || excluded) possible=e->operation==NFT_CMP_NEQ;
                 else if (all(known+e->src,size,1)) possible=e->operation==NFT_CMP_EQ;
                 else uncertain=1;
@@ -108,7 +114,7 @@ static int may_translate(struct md_network_filter *f,const struct md_filter_chai
                 } else uncertain=1;
                 break;
             case MD_FILTER_LOOKUP:
-                if ((size==2 && all(tags+e->src,size,PORT)) || (size==4 && all(tags+e->src,size,ADDRESS))) possible=!!e->operation;
+                if ((size==2 && all(tags+e->src,size,PORT)) || (size==address_size && all(tags+e->src,size,ADDRESS))) possible=!!e->operation;
                 else if (all(known+e->src,size,1)) {
                     struct md_filter_set *set=md_filter_set_find(f,0,NULL,e->target,0);
                     if (!set) return -ENOENT;
@@ -117,7 +123,10 @@ static int may_translate(struct md_network_filter *f,const struct md_filter_chai
                     possible=e->operation ? !found : found;
                 } else uncertain=1;
                 break;
-            case MD_FILTER_NAT: if (e->operation==NFT_NAT_DNAT) return 1; possible=0; break;
+            case MD_FILTER_NAT:
+                if (e->family && e->family!=address.family) { possible=0; break; }
+                if (e->operation==NFT_NAT_DNAT) return 1;
+                possible=0; break;
             case MD_FILTER_MASQUERADE: possible=0; break;
             case MD_FILTER_VERDICT_MAP: {
                 struct md_filter_set *s=md_filter_set_find(f,chain->table,NULL,e->target,0);
@@ -154,17 +163,19 @@ static int may_translate(struct md_network_filter *f,const struct md_filter_chai
     }
     return 0;
 }
-static int publication(struct md_network_filter *f,uint32_t address,uint16_t port,unsigned protocol,
+static int publication(struct md_network_filter *f,struct md_ip_address address,uint16_t port,unsigned protocol,
         int unknown_port,unsigned *budget) {
-    for (size_t i=0;i<f->chain_count;++i) if (f->chains[i].nat
+    for (size_t i=0;i<f->chain_count;++i) if (f->chains[i].nat && md_filter_chain_applies(f,&f->chains[i],address.family)
             && (f->chains[i].hook==NF_INET_PRE_ROUTING || f->chains[i].hook==NF_INET_LOCAL_OUT)) {
         int found=may_translate(f,&f->chains[i],address,port,protocol,unknown_port,budget,0);
         if (found) return found;
     }
     return 0;
 }
-int md_filter_ports(struct md_network_filter *f,uint32_t uplink,struct md_filter_port *ports,size_t limit,size_t *count) {
-    uint32_t candidates[1024],addresses[256]={0,htonl(INADDR_LOOPBACK)};
+int md_filter_ports(struct md_network_filter *f,struct md_ip_address uplink,struct md_filter_port *ports,size_t limit,size_t *count) {
+    uint32_t candidates[1024];
+    struct md_ip_address addresses[256]={md_ip_any(uplink.family),md_ip_loopback(uplink.family)};
+    unsigned address_size=md_ip_size(uplink),destination_offset=uplink.family==AF_INET6 ? 24 : 16;
     size_t nc=0,na=2; int dnat=0;
     *count=0;
     if (!f) return 0;
@@ -175,6 +186,8 @@ int md_filter_ports(struct md_network_filter *f,uint32_t uplink,struct md_filter
     if (!dnat) return 0;
     for (size_t i=0;i<f->rule_count;++i) {
         const struct md_filter_rule *r=&f->rules[i];
+        struct md_filter_chain *chain=md_filter_chain_find(f,0,NULL,r->chain,0);
+        if (!chain || !md_filter_chain_applies(f,chain,uplink.family)) continue;
         unsigned char tags[64]={0};
         for (unsigned j=0;j<r->count;++j) {
             const struct md_filter_expression *e=&r->expressions[j];
@@ -188,10 +201,11 @@ int md_filter_ports(struct md_network_filter *f,uint32_t uplink,struct md_filter
                 memset(tags+e->dst,0,size);
                 if (e->key==NFT_PAYLOAD_TRANSPORT_HEADER && e->aux<=2 && e->aux+size>=4) {
                     tags[e->dst+2-e->aux]=1; tags[e->dst+3-e->aux]=1;
-                } else if (e->key==NFT_PAYLOAD_NETWORK_HEADER && e->aux==16 && size==4) memset(tags+e->dst,2,4);
-            } else if (e->code==MD_FILTER_COMPARE && e->operation==NFT_CMP_EQ && tags[e->src]==2 && size==4) {
-                uint32_t address; memcpy(&address,e->value,4);
-                int error=unique(addresses,&na,256,address); if (error) return error;
+                } else if (e->key==NFT_PAYLOAD_NETWORK_HEADER && e->aux==destination_offset && size==address_size)
+                    memset(tags+e->dst,2,address_size);
+            } else if (e->code==MD_FILTER_COMPARE && e->operation==NFT_CMP_EQ && tags[e->src]==2 && size==address_size) {
+                struct md_ip_address address=md_ip_load(uplink.family,e->value);
+                int error=unique_address(addresses,&na,256,address); if (error) return error;
             } else if ((e->code==MD_FILTER_COMPARE && e->operation==NFT_CMP_EQ)
                     || (e->code==MD_FILTER_RANGE && e->operation==NFT_RANGE_EQ)) {
                 if (size!=2 || tags[e->src]!=1 || tags[e->src+1]!=1) continue;
@@ -201,12 +215,13 @@ int md_filter_ports(struct md_network_filter *f,uint32_t uplink,struct md_filter
                     int error=unique(candidates,&nc,1024,htons((uint16_t)p)); if (error) return error;
                 }
             } else if (e->code==MD_FILTER_LOOKUP && !e->operation && ((size==2 && tags[e->src]==1 && tags[e->src+1]==1)
-                    || (size==4 && tags[e->src]==2))) {
+                    || (size==address_size && tags[e->src]==2))) {
                 struct md_filter_set *s=md_filter_set_find(f,0,NULL,e->target,0);
                 if (!s) return -ENOENT;
                 for (size_t k=0;k<s->count;++k) {
-                    uint32_t item=0; memcpy(&item,s->elements[k].key,size);
-                    int error=size==2 ? unique(candidates,&nc,1024,item) : unique(addresses,&na,256,item);
+                    uint16_t item=0; memcpy(&item,s->elements[k].key,sizeof(item));
+                    int error=size==2 ? unique(candidates,&nc,1024,item)
+                        : unique_address(addresses,&na,256,md_ip_load(uplink.family,s->elements[k].key));
                     if (error) return error;
                 }
             } else if (e->code==MD_FILTER_IMMEDIATE || e->code==MD_FILTER_META || e->code==MD_FILTER_CT
@@ -223,7 +238,7 @@ int md_filter_ports(struct md_network_filter *f,uint32_t uplink,struct md_filter
     for (size_t i=0;i<nc;++i) for (unsigned protocol=0;protocol<2;++protocol) {
         int wildcard=0;
         for (size_t a=0;a<na && !wildcard;++a) {
-            if (addresses[a] && addresses[a]!=uplink && (ntohl(addresses[a])>>24)!=127) continue;
+            if (!md_ip_unspecified(addresses[a]) && !md_ip_equal(addresses[a],uplink) && !md_ip_is_loopback(addresses[a])) continue;
             unsigned transport=protocol ? IPPROTO_UDP : IPPROTO_TCP;
             int found=publication(f,addresses[a],(uint16_t)candidates[i],transport,0,&budget);
             if (found<0) return found;
@@ -231,7 +246,7 @@ int md_filter_ports(struct md_network_filter *f,uint32_t uplink,struct md_filter
             if (!candidates[i]) return -EOPNOTSUPP;
             if (*count==limit) return -ENOSPC;
             ports[(*count)++]=(struct md_filter_port){.address=addresses[a],.port=(uint16_t)candidates[i],.protocol=transport};
-            wildcard=!addresses[a];
+            wildcard=md_ip_unspecified(addresses[a]);
         }
     }
     return 0;

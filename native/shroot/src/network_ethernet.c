@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "network_ethernet.h"
 #include "network_internal.h"
+#include "network_icmp6.h"
 #include <errno.h>
 #include <limits.h>
 #include <linux/if_ether.h>
@@ -84,24 +85,28 @@ static void enqueue(struct hop *queue,size_t *count,struct md_network_namespace 
     for (size_t i=0;i<*count;++i) if (queue[i].space==n && queue[i].link==link && queue[i].outgoing==outgoing) return;
     queue[(*count)++]=(struct hop){n,link,outgoing};
 }
-static int forward(struct md_network_ethernet *s,struct md_network_interface *source,const struct ethhdr *frame,size_t size) {
+int md_network_ethernet_transmit(struct md_network_namespace *space,struct md_network_interface *source,
+        const struct md_network_ethernet *s,const void *data,size_t size) {
+    const struct ethhdr *frame=data;
     /* Every interface can be visited once in each direction. Allocate before
      * publication, then walk iteratively so bridge/veth cycles cannot recurse. */
     size_t capacity=0;
-    for (struct md_network_namespace *n=s->space->fabric->spaces;n;n=n->next) {
+    for (struct md_network_namespace *n=space->fabric->spaces;n;n=n->next) {
         if (n->count>(SIZE_MAX/sizeof(struct hop)-capacity)/2) return -EOVERFLOW;
         capacity+=2*n->count;
     }
     struct hop *queue=calloc(capacity,sizeof(*queue));
     if (!queue) return -ENOMEM;
     size_t count=0;
-    enqueue(queue,&count,s->space,source,1);
+    enqueue(queue,&count,space,source,1);
     static const unsigned char reserved[5]={1,0x80,0xc2,0,0};
     int link_local=!memcmp(frame->h_dest,reserved,sizeof(reserved)) && frame->h_dest[5]<=15;
     for (size_t at=0;at<count;++at) {
         struct hop hop=queue[at];
         struct md_network_interface *link=hop.link;
         deliver(hop.space,link,s,frame,size,hop.outgoing);
+        if (!hop.outgoing && frame->h_proto==htons(ETH_P_IPV6))
+            md_network_icmp6_receive(hop.space,link,frame,size);
         if (hop.outgoing && link->kind==MD_LINK_LOOPBACK) enqueue(queue,&count,hop.space,link,0);
         else if (hop.outgoing && link->kind==MD_LINK_VETH) {
             struct md_network_namespace *peer=md_network_interface_owner(hop.space->fabric,link->peer);
@@ -110,7 +115,10 @@ static int forward(struct md_network_ethernet *s,struct md_network_interface *so
             unsigned bridge=link->kind==MD_LINK_BRIDGE ? link->info.index : link->master;
             if (link->master) {
                 struct md_network_interface *master=md_network_interface_find(hop.space,bridge,NULL);
-                if (master && (master->info.flags&IFF_UP)) deliver(hop.space,master,s,frame,size,0);
+                if (master && (master->info.flags&IFF_UP)) {
+                    deliver(hop.space,master,s,frame,size,0);
+                    if (frame->h_proto==htons(ETH_P_IPV6)) md_network_icmp6_receive(hop.space,master,frame,size);
+                }
             }
             if (!link_local || hop.outgoing) for (unsigned i=0;i<hop.space->count;++i) {
                 struct md_network_interface *port=&hop.space->links[i];
@@ -146,7 +154,7 @@ static long send_frame(struct md_network_ethernet *s,const void *data,size_t siz
         memcpy(allocation,&header,sizeof(header)); memcpy((char *)allocation+ETH_HLEN,data,size);
         frame=allocation; length+=ETH_HLEN;
     }
-    int error=forward(s,link,frame,length);
+    int error=md_network_ethernet_transmit(s->space,link,s,frame,length);
     free(allocation); return error ? error : (long)size;
 }
 long md_network_ethernet_call(struct md_network_ethernet *s,long nr,const unsigned long *a,void *data,size_t capacity,size_t size,

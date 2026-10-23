@@ -90,7 +90,7 @@ void md_boot(uintptr_t *kernel_stack) {
     int inherited = argc > 1 && md_equal(argv[1], "--resume");
     unsigned root_arg = inherited ? 2 : 1;
     int program_fd = -1, interpreter_fd = -1;
-    int retained=0, retained_loader=0;
+    int retained=0, retained_loader=0, retained_execfd=0;
     const char *execfn = NULL;
     const char *object = "";
     if (inherited && root_arg<argc && md_equal(argv[root_arg],"--retained-images")) {
@@ -114,6 +114,9 @@ void md_boot(uintptr_t *kernel_stack) {
     }
     if (retained && root_arg<argc && md_equal(argv[root_arg],"--retained-loader")) {
         retained_loader=1; ++root_arg;
+    }
+    if (retained && root_arg<argc && md_equal(argv[root_arg],"--retained-execfd")) {
+        retained_execfd=1; ++root_arg;
     }
     if (inherited && root_arg + 1 < argc && md_equal(argv[root_arg], "--execfn")) {
         execfn = argv[root_arg + 1];
@@ -181,6 +184,11 @@ void md_boot(uintptr_t *kernel_stack) {
         memset(command.object, 0, sizeof(command.object));
         md_copy(command.object, sizeof(command.object), object);
         command.fd = program_fd; command.interpreter_fd = interpreter_fd;
+        if (retained_execfd) {
+            long binary=RAW3(prctl,MD_GUEST_MAP_IMAGE,0,MD_IMAGE_TAKE_EXECFD);
+            if (binary<0) md_die("receive binary descriptor",binary);
+            command.execfd=(int)binary;
+        }
     } else if (namespace) r=md_command_initial(&md_files,&command,argv[root_arg+1],argv+root_arg+1);
     else r = md_command_prepare(&md_files, &command, argv[root_arg + 1], argv + root_arg + 1, NULL, 0);
     if (r < 0) md_die("prepare guest program", r);
@@ -244,7 +252,7 @@ void md_boot(uintptr_t *kernel_stack) {
         if (bytes>MD_EXEC_BYTES-environment_bytes) md_die("guest environment",-E2BIG);
         environment_bytes+=bytes;
     }
-    size_t words = 1 + guest_argc + 1 + envc + 1 + 2 * (auxc + 2);
+    size_t words = 1 + guest_argc + 1 + envc + 1 + 2 * (auxc + 3);
     size_t strings=argument_bytes+environment_bytes+invocation_bytes;
     if (words*sizeof(uintptr_t)+strings+md_page_size>stack_size) md_die("guest arguments",-E2BIG);
     /* Linux lays out argv strings, env strings, then the exec invocation.
@@ -274,6 +282,7 @@ void md_boot(uintptr_t *kernel_stack) {
     Elf64_auxv_t *guest_aux = (Elf64_auxv_t *)p;
     memcpy(guest_aux, aux, (auxc + 1) * sizeof(*aux));
     guest_aux[auxc++]=(Elf64_auxv_t){.a_type=MD_AT_COOPERATIVE,.a_un.a_val=(uintptr_t)&md_cooperative_entry};
+    if (command.execfd>=0) guest_aux[auxc++]=(Elf64_auxv_t){.a_type=AT_EXECFD,.a_un.a_val=(unsigned)command.execfd};
     guest_aux[auxc]=(Elf64_auxv_t){0};
     for (size_t i = 0; i < auxc; ++i) {
         switch (guest_aux[i].a_type) {
@@ -289,6 +298,7 @@ void md_boot(uintptr_t *kernel_stack) {
     r = md_interception_enter_image(guest_aux, (unsigned)auxc);
     if (r < 0) md_die("enter guest image", r);
     md_proc_image_init(&process_image, arguments, argument_bytes, environment_bytes, guest_aux, (auxc + 1) * sizeof(*guest_aux));
+    command.execfd=-1; /* AT_EXECFD transfers ownership to the interpreter. */
     md_command_close(&command);
     md_enter(image.entry, (uintptr_t)sp, &process_image);
 }

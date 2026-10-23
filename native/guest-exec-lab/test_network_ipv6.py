@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+"""IPv6 socket, rtnetlink, nftables, DNS and publication paths in a recipe guest."""
+import argparse
+import ctypes
+import errno
+import json
+from pathlib import Path
+import socket
+import struct
+import subprocess
+import sys
+
+
+def router_discovery():
+    command('ip', 'link', 'add', 'mdrd0', 'type', 'veth', 'peer', 'name', 'mdrd1')
+    try:
+        links = []
+        for name in ('mdrd0', 'mdrd1'):
+            command('ip', 'link', 'set', name, 'up')
+            link = json.loads(command('ip', '-j', '-6', 'address', 'show', 'dev', name))[0]
+            links.append((link['ifindex'], next(a['local'] for a in link['addr_info'] if a['scope'] == 'link')))
+
+        def allow(stream, kind):
+            mask = [0xffffffff] * 8
+            mask[kind // 32] &= ~(1 << (kind % 32))
+            stream.setsockopt(socket.IPPROTO_ICMPV6, 1, struct.pack('=8I', *mask))
+
+        with socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6) as client, \
+                socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6) as router, \
+                socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM, socket.htons(0x86dd)) as capture:
+            capture.bind(('mdrd1', 0))
+            capture.settimeout(5)
+            for stream, name, group, (index, _) in zip((client, router), ('mdrd0', 'mdrd1'),
+                                                       ('ff02::1', 'ff02::2'), links):
+                stream.settimeout(5)
+                stream.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, name.encode() + b'\0')
+                stream.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP,
+                                  socket.inet_pton(socket.AF_INET6, group) + struct.pack('=I', index))
+                for option, value in ((socket.IPV6_MULTICAST_IF, index), (socket.IPV6_MULTICAST_LOOP, 0),
+                                      (socket.IPV6_MULTICAST_HOPS, 255), (socket.IPV6_UNICAST_HOPS, 255),
+                                      (socket.IPV6_RECVHOPLIMIT, 1), (socket.IPV6_RECVPKTINFO, 1)):
+                    stream.setsockopt(socket.IPPROTO_IPV6, option, value)
+                stream.setsockopt(socket.SOL_SOCKET, 29, 1)  # Linux SO_TIMESTAMP
+            allow(client, 134)
+            allow(router, 133)
+            client.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_TCLASS, 192)
+            assert client.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_TCLASS) == 192
+            client.sendmsg([struct.pack('!BBHI', 133, 0, 0, 0)], [], 0, ('ff02::2', 0))
+            packet = capture.recv(256)
+            assert len(packet) == 48 and (struct.unpack('!I', packet[:4])[0] >> 20) & 255 == 192, packet
+            client.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_TCLASS, -1)
+            assert client.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_TCLASS) == 0
+            data, control, flags, source = router.recvmsg(64, 256)
+            assert len(data) == 8 and data[0] == 133 and not flags, (data, flags)
+            assert source[0] == links[0][1] and source[3] == links[1][0], source
+            ancillary = {(level, kind): value for level, kind, value in control}
+            assert struct.unpack('=i', ancillary[(socket.IPPROTO_IPV6, socket.IPV6_HOPLIMIT)])[0] == 255
+            assert struct.unpack('=I', ancillary[(socket.IPPROTO_IPV6, socket.IPV6_PKTINFO)][16:])[0] == links[1][0]
+            assert struct.unpack('=qq', ancillary[(socket.SOL_SOCKET, 29)])[0] > 0
+            advertisement = struct.pack('!BBHBBHII', 134, 0, 0, 64, 0, 1800, 0, 0)
+            router.sendmsg([advertisement], [], 0, ('ff02::1', 0))
+            peek = client.recvmsg(64, 256, socket.MSG_PEEK)
+            received = client.recvmsg(64, 256)
+            assert peek == received and received[0][0] == 134 and len(received[0]) == 16, received
+            assert received[3][0] == links[1][1] and received[3][3] == links[0][0], received
+            allow(client, 129)
+            client.sendto(struct.pack('!BBHHH', 128, 0, 0, 123, 1) + b'echo',
+                          (links[1][1], 0, 0, links[0][0]))
+            data, source = client.recvfrom(64)
+            assert data[0] == 129 and data[4:] == struct.pack('!HH', 123, 1) + b'echo', data
+            allow(client, 136)
+            target = socket.inet_pton(socket.AF_INET6, links[1][1])
+            solicited = socket.inet_ntop(socket.AF_INET6, bytes.fromhex('ff0200000000000000000001ff') + target[-3:])
+            client.sendto(struct.pack('!BBHI', 135, 0, 0, 0) + target, (solicited, 0, 0, links[0][0]))
+            data, source = client.recvfrom(64)
+            assert data[0] == 136 and data[8:24] == target and data[4] & 0x40, data
+    finally:
+        command('ip', 'link', 'del', 'mdrd0')
+    print('PASS ICMPv6: RS/RA, interface-scoped multicast, hop limit, timestamps, echo and neighbor discovery', flush=True)
+
+
+def udp_reconnect():
+    libc = ctypes.CDLL(None, use_errno=True)
+    with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as ipv6, \
+            socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as ipv4:
+        ipv6.bind(('::1', 0))
+        ipv4.bind(('127.0.0.1', 0))
+        for explicit in (False, True):
+            with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as client:
+                if explicit:
+                    client.bind(('::', 0))
+                # Linux retains the assigned source without AF_UNSPEC; a
+                # cross-family reconnect needs disconnect even natively.
+                for mapped, disconnect in ((False, False), (False, False), (True, True), (False, True), (True, True)):
+                    if disconnect:
+                        address = struct.pack('=H14x', socket.AF_UNSPEC)
+                        assert libc.connect(client.fileno(), address, len(address)) == 0, ctypes.get_errno()
+                        try:
+                            client.getpeername()
+                        except OSError as error:
+                            assert error.errno == errno.ENOTCONN, error
+                        else:
+                            raise AssertionError('AF_UNSPEC retained the previous peer')
+                    server = ipv4 if mapped else ipv6
+                    peer = server.getsockname()
+                    client.connect(('::ffff:' + peer[0] if mapped else peer[0], peer[1]))
+                    assert client.getsockname()[0] == ('::ffff:127.0.0.1' if mapped else '::1')
+                    client.send(b'reconnect')
+                    server.settimeout(5)
+                    data, sender = server.recvfrom(64)
+                    assert data == b'reconnect'
+                    server.sendto(b'reply', sender)
+                    client.settimeout(5)
+                    assert client.recv(64) == b'reply'
+    # glibc sorts wildcard listeners with the same dual-stack UDP socket.
+    assert socket.getaddrinfo(None, 22, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_PASSIVE)
+    print('PASS UDP reconnect: dual-stack source selection, AF_UNSPEC, explicit/implicit binding and getaddrinfo', flush=True)
+
+
+def command(*argv, data=None):
+    result = subprocess.run(argv, input=data, text=True, capture_output=True, timeout=15)
+    assert result.returncode == 0, (argv, result.stdout, result.stderr)
+    assert 'Dump terminated' not in result.stderr, (argv, result.stderr)
+    return result.stdout
+
+
+def guest():
+    router_discovery()
+    udp_reconnect()
+    addresses = json.loads(command('ip', '-j', '-6', 'address'))
+    assert any(a['local'] == '::1' for link in addresses for a in link['addr_info'])
+    assert any(a['local'] == 'fd6d:6473:1::2' for link in addresses for a in link['addr_info'])
+    route = json.loads(command('ip', '-j', '-6', 'route', 'get', '2001:db8::1'))
+    assert route[0]['dev'] == 'eth0' and route[0]['gateway'] == 'fd6d:6473:1::1', route
+    command('ip', '-6', 'address', 'add', 'fd12:3456:789a::42/128', 'dev', 'lo')
+    shown = command('ip', '-6', 'address', 'show', 'dev', 'lo')
+    assert 'fd12:3456:789a::42' in shown, shown
+    command('ip', '-6', 'address', 'del', 'fd12:3456:789a::42/128', 'dev', 'lo')
+    print('PASS IPv6 address and route mutation/query through iproute2', flush=True)
+    command('ip', 'link', 'add', 'mdv6', 'type', 'bridge')
+    command('ip', 'link', 'set', 'mdv6', 'up')
+    try:
+        link = json.loads(command('ip', '-j', '-6', 'address', 'show', 'dev', 'mdv6'))[0]
+        index = link['ifindex']
+        local = next(a['local'] for a in link['addr_info'] if a['scope'] == 'link')
+        route = json.loads(command('ip', '-j', '-6', 'route', 'get', 'fe80::1234', 'oif', 'mdv6'))
+        assert route[0]['dev'] == 'mdv6', route
+        with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as server, socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as client:
+            server.bind((local, 0, 0, index)); server.settimeout(5); client.settimeout(5)
+            client.sendto(b'scope', server.getsockname())
+            data, peer = server.recvfrom(32)
+            assert data == b'scope' and peer[3] == index, peer
+            server.sendto(b'reply', peer)
+            assert client.recv(32) == b'reply'
+        with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as invalid:
+            try:
+                invalid.bind((local, 0, 0, 1))
+            except OSError as error:
+                assert error.errno == errno.EADDRNOTAVAIL, error
+            else:
+                raise AssertionError('link-local address accepted on the wrong interface')
+        command('ip', '-6', 'address', 'del', local + '/64', 'dev', 'mdv6')
+        command('ip', 'link', 'set', 'mdv6', 'txqueuelen', '100')
+        assert local not in command('ip', '-6', 'address', 'show', 'dev', 'mdv6')
+        command('ip', 'link', 'set', 'mdv6', 'down')
+        command('ip', 'link', 'set', 'mdv6', 'up')
+        assert local in command('ip', '-6', 'address', 'show', 'dev', 'mdv6')
+        command('ip', 'link', 'set', 'mdv6', 'mtu', '1200')
+        assert local not in command('ip', '-6', 'address', 'show', 'dev', 'mdv6')
+        command('ip', 'link', 'set', 'mdv6', 'mtu', '1500')
+        assert local in command('ip', '-6', 'address', 'show', 'dev', 'mdv6')
+    finally:
+        command('ip', 'link', 'del', 'mdv6')
+    print('PASS scoped link-local route and UDP peer identity', flush=True)
+    command('ip', 'link', 'add', 'dad0', 'type', 'veth', 'peer', 'name', 'dad1')
+    try:
+        for name in ('dad0', 'dad1'):
+            command('ip', 'link', 'set', name, 'up')
+            command('ip', '-6', 'address', 'add', 'fdab::5/64', 'dev', name)
+        assert 'dadfailed' in command('ip', '-6', 'address', 'show', 'dev', 'dad1')
+        command('ip', '-6', 'address', 'del', 'fdab::5/64', 'dev', 'dad1')
+        Path('/proc/sys/net/ipv6/conf/all/accept_dad').write_text('0')
+        Path('/proc/sys/net/ipv6/conf/dad1/accept_dad').write_text('0')
+        command('ip', '-6', 'address', 'add', 'fdab::5/64', 'dev', 'dad1')
+        assert 'dadfailed' not in command('ip', '-6', 'address', 'show', 'dev', 'dad1')
+    finally:
+        Path('/proc/sys/net/ipv6/conf/all/accept_dad').write_text('1')
+        command('ip', 'link', 'del', 'dad0')
+    print('PASS IPv6 address lifecycle and duplicate detection on the shared link', flush=True)
+    for family in (socket.AF_INET, socket.AF_INET6):
+        address = '::1' if family == socket.AF_INET6 else '127.0.0.1'
+        for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+            with socket.socket(socket.AF_INET6, kind) as server, socket.socket(family, kind) as client:
+                server.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                server.bind(('::', 0))
+                for stream in (server, client):
+                    stream.settimeout(5)
+                if kind == socket.SOCK_STREAM:
+                    server.listen()
+                client.connect((address, server.getsockname()[1]))
+                client.sendall(b'ping')
+                if kind == socket.SOCK_STREAM:
+                    accepted, peer = server.accept()
+                    with accepted:
+                        assert accepted.getsockname()[0] in ('::1', '::ffff:127.0.0.1')
+                        assert accepted.recv(4) == b'ping'
+                        accepted.sendall(b'pong')
+                else:
+                    data, peer = server.recvfrom(32)
+                    assert data == b'ping'
+                    server.sendto(b'pong', peer)
+                assert client.recv(4) == b'pong'
+    print('PASS guest dual-stack TCP/UDP and accepted address identity', flush=True)
+    with socket.socket(socket.AF_INET6) as server:
+        server.bind(('::1', 0)); server.listen()
+        port = server.getsockname()[1]
+        command('nft', '-f', '-', data=f'''
+table ip6 md_ipv6_test {{
+ chain output {{ type filter hook output priority 0; policy accept;
+  ip6 daddr ::1 tcp dport {port} counter drop
+ }}
+}}
+''')
+        try:
+            with socket.socket(socket.AF_INET6) as client:
+                client.settimeout(5)
+                try:
+                    client.connect(('::1', port))
+                except OSError as error:
+                    assert error.errno == errno.EACCES, error
+                else:
+                    raise AssertionError('IPv6 drop rule was bypassed')
+            rules = command('nft', 'list', 'table', 'ip6', 'md_ipv6_test')
+            assert 'packets 0 bytes 0' in rules, rules
+        finally:
+            command('nft', 'delete', 'table', 'ip6', 'md_ipv6_test')
+        with socket.create_connection(('::1', port), timeout=5) as client:
+            accepted, _ = server.accept()
+            accepted.close()
+    with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as server:
+        server.bind(('::1', 0)); server.settimeout(5)
+        port = server.getsockname()[1]
+        command('nft', '-f', '-', data=f'''
+table inet md_ipv6_test {{
+ chain output {{ type filter hook output priority 0; policy accept;
+  ip6 daddr ::1 udp dport {port} counter accept
+ }}
+}}
+''')
+        try:
+            with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as client:
+                client.sendto(b'count', ('::1', port))
+                assert server.recv(32) == b'count'
+            rules = command('nft', 'list', 'table', 'inet', 'md_ipv6_test')
+            assert 'packets 1 bytes 5' in rules, rules
+        finally:
+            command('nft', 'delete', 'table', 'inet', 'md_ipv6_test')
+    print('PASS nft ip6/inet filter, payload counters and rule removal', flush=True)
+    conf = Path('/proc/sys/net/ipv6')
+    assert '::1' in command('ip', '-6', 'address', 'show', 'dev', 'lo')
+    (conf / 'conf/lo/disable_ipv6').write_text('1')
+    assert '::1' not in command('ip', '-6', 'address', 'show', 'dev', 'lo')
+    assert '127.0.0.1' in command('ip', '-4', 'address', 'show', 'dev', 'lo')
+    (conf / 'conf/lo/disable_ipv6').write_text('0')
+    assert '::1' in command('ip', '-6', 'address', 'show', 'dev', 'lo')
+    (conf / 'bindv6only').write_text('1')
+    with socket.socket(socket.AF_INET6) as stream:
+        assert stream.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) == 1
+    (conf / 'bindv6only').write_text('0')
+    print('PASS IPv6 sysctl changes without modifying IPv4', flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--build', type=Path, required=True)
+    parser.add_argument('--name', default='arch-turnip')
+    parser.add_argument('--entry', choices=('base', 'lazy'), default='lazy')
+    parser.add_argument('--internet', action='store_true', help='Also require native and guest IPv6 UDP/TCP DNS and verified HTTPS')
+    args = parser.parse_args()
+    from test_oci_services import Suite, Server
+    from test_launch_network import SERVER, exchange, reserve_pair, released
+    suite = Suite(args.build, args.build)
+    suite.entry_options = ['--env', 'SHROOT_MACHINE_ENTRY=' + ('1' if args.entry == 'lazy' else '0')]
+    suite.report['entryMode'] = args.entry
+    target = '/tmp/md-ipv6-' + suite.report['id']
+    info = suite.installed_environment(args.name)
+    try:
+        suite.transport.upload(suite.client, Path(__file__), suite.base + '/ipv6.py')
+        suite.command(suite.guest(info['store'], '--user', '0:0', '--', '/bin/mkdir', target))
+        suite.command(suite.guest(info['store'], '--user', '0:0', '--network', 'bridge',
+            '--dns', '2001:db8::53', '--bind-ro', suite.base, target, '--deadline-seconds', '90',
+            '--', '/usr/bin/python3', target + '/ipv6.py', '--guest'), timeout=100)
+        port, tcp, udp = reserve_pair(socket.AF_INET6)
+        tcp.close(); udp.close()
+        options = ['--network', 'bridge', '-p', f'[::1]:{port}:18080/tcp',
+                   '-p', f'[::1]:{port}:18080/udp']
+        server = Server(suite, suite.guest(info['store'], *options, '--deadline-seconds', '45',
+            '--', '/usr/bin/python3', '-u', '-c', SERVER, 'ipv6-', '6'))
+        try:
+            server.ready('NETWORK_READY')
+            exchange(port, b'ipv6-', socket.AF_INET6)
+            with socket.create_connection(('::1', port), timeout=5) as stream:
+                stream.sendall(b'stop'); assert stream.recv(64) == b'ipv6-stop'
+            server.completed()
+        finally:
+            server.close()
+        released(port, socket.AF_INET6)
+        if args.internet:
+            from docker_network_fixture import internet_ipv6
+            internet_ipv6()
+            suite.transport.upload(suite.client, Path(__file__).with_name('docker_network_fixture.py'),
+                                   suite.base + '/uplink.py')
+            for mode in ('routed', 'bridge'):
+                suite.command(suite.guest(info['store'], '--user', '0:0', '--network', mode,
+                    '--bind-ro', suite.base, target, '--deadline-seconds', '60',
+                    '--', '/usr/bin/python3', target + '/uplink.py', '--internet-ipv6'), timeout=75)
+            suite.report['ipv6InternetModes'] = ['native', 'routed', 'bridge']
+        suite.report['passed'] = True
+    finally:
+        try:
+            suite.command(suite.guest(info['store'], '--user', '0:0', '--', '/bin/rmdir', target))
+        finally:
+            suite.finish()
+
+
+if __name__ == '__main__':
+    guest() if sys.argv[1:] == ['--guest'] else main()

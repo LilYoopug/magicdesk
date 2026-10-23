@@ -63,6 +63,7 @@ static unsigned filesystem_type(const char *name) {
         {"tmpfs",MD_FS_MOUNT_TMPFS},{"overlay",MD_FS_MOUNT_OVERLAY},{"proc",MD_FS_MOUNT_PROC},
         {"devpts",MD_FS_MOUNT_DEVPTS},{"sysfs",MD_FS_MOUNT_SYSFS},
         {"mqueue",MD_FS_MOUNT_MQUEUE},
+        {"binfmt_misc",MD_FS_MOUNT_BINFMT},
         {"cgroup",MD_FS_MOUNT_CGROUP},{"cgroup2",MD_FS_MOUNT_CGROUP2}};
     for (unsigned i=0;i<sizeof(types)/sizeof(*types);++i) if (!strcmp(name,types[i].name)) return types[i].type;
     return 0;
@@ -112,7 +113,8 @@ static unsigned mounted_type(const struct md_view_mount *mount) {
     if (md_view_inode(mount)) return mount && mount->storage
         && mount->storage->filesystem_kind==MD_FILESYSTEM_TMPFS ? MD_FS_MOUNT_TMPFS : MOUNTED_INODE;
     unsigned long magic=mount && mount->provider ? md_provider_tree_filesystem(mount->provider) : 0;
-    return magic==SYSFS_MAGIC ? MD_FS_MOUNT_SYSFS : magic==PROC_SUPER_MAGIC ? MD_FS_MOUNT_PROC : 0;
+    return magic==SYSFS_MAGIC ? MD_FS_MOUNT_SYSFS : magic==PROC_SUPER_MAGIC ? MD_FS_MOUNT_PROC
+        : magic==BINFMTFS_MAGIC ? MD_FS_MOUNT_BINFMT : 0;
 }
 static int pick_context(struct md_filesystem *fs,const struct md_fs_request *q,
         struct md_fs_result *result,const struct md_fs_output *out) {

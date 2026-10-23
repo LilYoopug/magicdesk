@@ -71,6 +71,10 @@ int md_command_initial(const struct md_fs *fs, struct md_command *c, const char 
         long fd=RAW3(prctl,MD_GUEST_MAP_IMAGE,0,MD_IMAGE_TAKE_LOADER);
         if (fd<0) error=(int)fd; else c->interpreter_fd=(int)fd;
     }
+    if (!error && recipe.execfd) {
+        long fd=RAW3(prctl,MD_GUEST_MAP_IMAGE,0,MD_IMAGE_TAKE_EXECFD);
+        if (fd<0) error=(int)fd; else c->execfd=(int)fd;
+    }
     if (error) { md_fs_buffer_exec_cancel(); md_command_close(c); }
     return error;
 }
@@ -97,13 +101,13 @@ long md_guest_execat(const struct md_fs *fs, int base, const char *program, char
      * canonical name which could reopen a replaced entry after exec. */
     const char *invocation = *path && (*path == '/' || base == AT_FDCWD) ? path : identity;
     struct md_command c;
-    int retained=!!fs->endpoint[0], loader=0;
+    int retained=!!fs->endpoint[0], loader=0, execfd=0;
     if (retained) {
         r=md_command_arguments(&c,invocation,argv);
         if (r<0) return r;
         struct md_command_recipe recipe;
         r=prepare_retained(fs,base,path,flags,inaccessible,&recipe);
-        if (!r) { loader=recipe.loader; r=md_command_apply_recipe(&c,&recipe); }
+        if (!r) { loader=recipe.loader; execfd=recipe.execfd; r=md_command_apply_recipe(&c,&recipe); }
         if (r<0) { md_fs_buffer_exec_cancel(); md_command_close(&c); return r; }
     } else {
         struct md_program input;
@@ -135,6 +139,7 @@ long md_guest_execat(const struct md_fs *fs, int base, const char *program, char
             next[n++] = interpreter_number;
         }
     }
+    if (execfd) next[n++]="--retained-execfd";
     // AT_EXECFN is the caller's spelling, not the canonical executable or the
     // final shebang interpreter. Linux uses /dev/fd/N for descriptor exec.
     next[n++] = "--execfn";

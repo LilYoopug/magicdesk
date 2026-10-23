@@ -122,14 +122,15 @@ struct md_provider_tree *md_procfs_new(int parent,const char *text,const struct 
     if (!tree) { free(p); errno=error; return NULL; }
     int root=md_provider_tree_root(tree);
     if (mkdirat(root,"sys",0755) || mkdirat(root,"sys/kernel",0755)
-            || mkdirat(root,"sys/fs",0755) || mkdirat(root,"sys/fs/inotify",0755)) error=errno;
+            || mkdirat(root,"sys/fs",0755) || mkdirat(root,"sys/fs/inotify",0755)
+            || mkdirat(root,"sys/fs/binfmt_misc",0755)) error=errno;
     for (unsigned i=MD_PROC_FILE_HOSTNAME;!error && i<=MD_PROC_FILE_INOTIFY_QUEUE;++i) {
         char path[64]; snprintf(path,sizeof(path),"%s/%s",md_proc_sysctl_directory(i),md_proc_sysctl_name(i));
         int fd=openat(root,path,O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600);
         if (fd<0) error=errno; else close(fd);
     }
     if (!error && mkdirat(root,"sys/user",0755)) error=errno;
-    const char *files[]={"sys/user/max_user_namespaces","devices","cmdline"};
+    const char *files[]={"sys/user/max_user_namespaces","devices","cmdline","filesystems"};
     for (size_t i=0;!error && i<sizeof(files)/sizeof(*files);++i) {
         int fd=openat(root,files[i],O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600);
         if (fd<0) error=errno; else close(fd);
@@ -224,8 +225,6 @@ static int permitted(struct md_filesystem *fs,const struct proc_policy *p,pid_t 
     return inspect(fs,native);
 }
 int md_procfs_check(struct md_filesystem *fs,const struct md_view_mount *mount,const char *path,unsigned minimum) {
-    if (fs->actor && md_network_namespace_managed(fs->actor->network)
-            && !strncmp(path,"/proc/sys/net/ipv6",18) && (!path[18] || path[18]=='/')) return -ENOENT;
     const struct proc_policy *p=policy(mount);
     if (!p || !p->hidepid || strncmp(path,"/proc/",6)) return 0;
     const char *end;
@@ -319,46 +318,37 @@ static int omitted(const struct md_view_mount *mount,const struct proc_policy *p
         && strcmp(name,".") && strcmp(name,"..") && strcmp(name,"self") && strcmp(name,"thread-self"));
 }
 static const char network_conf[]="/proc/sys/net/ipv4/conf";
+static const char network_conf6[]="/proc/sys/net/ipv6/conf";
+static const char *const network_conf4_names[]={"route_localnet","rp_filter","arp_notify"};
+static const char *const network_conf6_names[]={"forwarding","disable_ipv6","accept_dad","accept_ra",
+    "mtu","hop_limit","addr_gen_mode","use_tempaddr"};
 static int network_directory(struct md_filesystem *fs,const char *path) {
-    const char *last=strrchr(path,'/');
-    if (last && !strcmp(last,"/net") && fs->actor) {
-        char table[PATH_MAX];
-        int size=snprintf(table,sizeof(table),"%s/if_inet6",path);
-        if (size>0 && (size_t)size<sizeof(table)) {
-            struct md_proc_path ref=md_proc_path_for(table,fs->actor->tid,fs->actor->tgid);
-            enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
-            if (kind==MD_PROC_NET_IF_INET6) {
-                if (ref.process==fs->actor->tid || ref.process==fs->actor->tgid)
-                    return md_network_namespace_managed(fs->actor->network) ? 4 : 0;
-                struct md_task_snapshot target;
-                if (!md_task_registry_read(fs->tasks,ref.process,0,&target)) {
-                    int managed=md_network_namespace_managed(target.network);
-                    md_task_snapshot_release(&target);
-                    return managed ? 4 : 0;
-                }
-            }
-        }
-    }
     if (!fs->actor || !md_network_namespace_managed(fs->actor->network)) return 0;
     if (!strcmp(path,"/proc/sys/net")) return 5;
     if (!strcmp(path,"/proc/sys/net/bridge")) return 3;
+    if (!strcmp(path,"/proc/sys/net/ipv6")) return 8;
     size_t length=sizeof(network_conf)-1;
+    if (!strcmp(path,network_conf6)) return 6;
+    if (!strncmp(path,network_conf6,length) && path[length]=='/') return 7;
     return !strcmp(path,network_conf) ? 1 : !strncmp(path,network_conf,length) && path[length]=='/' ? 2 : 0;
 }
 static int network_entry(struct md_filesystem *fs,const char *path,const char *name) {
     if (!strcmp(name,".") || !strcmp(name,"..")) return 1;
     int directory=network_directory(fs,path);
     if (!directory) return 1;
-    /* The managed fabric has no IPv6 stack. Do not expose host controls
-     * which advertise one, independently of the selected proc mount. */
-    if (directory==5) return strcmp(name,"ipv6")!=0;
-    if (directory==4) return strcmp(name,"if_inet6")!=0;
-    if (directory==3) return !strcmp(name,"bridge-nf-call-iptables");
+    if (directory==5) return 1;
+    if (directory==8) return !strcmp(name,"conf") || !strcmp(name,"bindv6only");
+    if (directory==3) return !strcmp(name,"bridge-nf-call-iptables") || !strcmp(name,"bridge-nf-call-ip6tables");
     uint64_t scope;
-    const char *interface=directory==1 ? name : path+sizeof(network_conf);
-    int r=md_network_parameter_scope(fs->actor->network,MD_NET_ROUTE_LOCALNET,interface,&scope);
-    return r==-ENOENT ? 0 : r ? r : directory==1 || !strcmp(name,"route_localnet")
-        || !strcmp(name,"rp_filter") || !strcmp(name,"arp_notify");
+    int ipv6=directory==6 || directory==7;
+    const char *interface=directory==1 || directory==6 ? name : path+sizeof(network_conf);
+    int r=md_network_parameter_scope(fs->actor->network,ipv6 ? MD_NET_IPV6_FORWARD : MD_NET_ROUTE_LOCALNET,interface,&scope);
+    if (r) return r==-ENOENT ? 0 : r;
+    if (directory==1 || directory==6) return 1;
+    const char *const *names=ipv6 ? network_conf6_names : network_conf4_names;
+    size_t count=ipv6 ? sizeof(network_conf6_names)/sizeof(*names) : sizeof(network_conf4_names)/sizeof(*names);
+    for (size_t i=0;i<count;++i) if (!strcmp(name,names[i])) return 1;
+    return 0;
 }
 static int network_file(int root,const char *path) {
     int fd=openat(root,path,O_CREAT|O_EXCL|O_WRONLY|O_CLOEXEC,0600);
@@ -370,21 +360,28 @@ static int network_bridge_nodes(const struct md_view_mount *mount) {
     if (!mount->provider) return 0;
     int root=md_provider_tree_root(mount->provider);
     if (mkdirat(root,"sys/net/bridge",0755) && errno!=EEXIST) return -errno;
-    return network_file(root,"sys/net/bridge/bridge-nf-call-iptables");
+    int error=network_file(root,"sys/net/bridge/bridge-nf-call-iptables");
+    return error ? error : network_file(root,"sys/net/bridge/bridge-nf-call-ip6tables");
 }
-static int network_nodes(const struct md_view_mount *mount,const char *interface) {
+static int network_nodes(const struct md_view_mount *mount,const char *interface,int ipv6) {
     if (!mount->provider) return -EOPNOTSUPP;
     int root=md_provider_tree_root(mount->provider);
-    const char *dirs[]={"sys/net","sys/net/ipv4","sys/net/ipv4/conf"};
+    const char *dirs[]={"sys/net",ipv6 ? "sys/net/ipv6" : "sys/net/ipv4",
+        ipv6 ? "sys/net/ipv6/conf" : "sys/net/ipv4/conf"};
     for (unsigned i=0;i<sizeof(dirs)/sizeof(*dirs);++i)
         if (mkdirat(root,dirs[i],0755) && errno!=EEXIST) return -errno;
+    if (ipv6) {
+        int error=network_file(root,"sys/net/ipv6/bindv6only");
+        if (error) return error;
+    }
     if (!interface) return 0;
     char path[96];
-    snprintf(path,sizeof(path),"sys/net/ipv4/conf/%s",interface);
+    snprintf(path,sizeof(path),"sys/net/ipv%d/conf/%s",ipv6 ? 6 : 4,interface);
     if (mkdirat(root,path,0755) && errno!=EEXIST) return -errno;
-    const char *names[]={"route_localnet","rp_filter","arp_notify"};
-    for (unsigned i=0;i<sizeof(names)/sizeof(*names);++i) {
-        snprintf(path,sizeof(path),"sys/net/ipv4/conf/%s/%s",interface,names[i]);
+    const char *const *names=ipv6 ? network_conf6_names : network_conf4_names;
+    size_t count=ipv6 ? sizeof(network_conf6_names)/sizeof(*names) : sizeof(network_conf4_names)/sizeof(*names);
+    for (size_t i=0;i<count;++i) {
+        snprintf(path,sizeof(path),"sys/net/ipv%d/conf/%s/%s",ipv6 ? 6 : 4,interface,names[i]);
         int error=network_file(root,path);
         if (error) return error;
     }
@@ -403,16 +400,20 @@ int md_procfs_step(struct md_filesystem *fs,struct md_mount_namespace *view,stru
     if (network_directory(fs,path)) {
         r=network_entry(fs,path,name);
         if (r<=0) return r ? r : -ENOENT;
-        if (network_directory(fs,path)==1 && strcmp(name,".") && strcmp(name,"..")) {
-            r=network_nodes(mount,name);
+        int directory=network_directory(fs,path);
+        if ((directory==1 || directory==6) && strcmp(name,".") && strcmp(name,"..")) {
+            r=network_nodes(mount,name,directory==6);
             if (r) return r;
         } else if (network_directory(fs,path)==5 && !strcmp(name,"bridge")) {
             r=network_bridge_nodes(mount);
             if (r) return r;
+        } else if (directory==5 && !strcmp(name,"ipv6")) {
+            r=network_nodes(mount,NULL,1);
+            if (r) return r;
         }
     } else if (!strcmp(path,"/proc/sys/net/ipv4") && !strcmp(name,"conf")
             && fs->actor && md_network_namespace_managed(fs->actor->network)) {
-        r=network_nodes(mount,NULL);
+        r=network_nodes(mount,NULL,0);
         if (r) return r;
     }
     r=md_procfs_check(fs,mount,path,1);
@@ -542,18 +543,19 @@ ssize_t md_procfs_getdents(struct md_filesystem *fs,const struct md_view_mount *
     int net=network_directory(fs,path);
     if (!strcmp(path,"/proc/sys/net") && fs->actor && md_network_namespace_managed(fs->actor->network)) {
         if (mount->provider) {
-            error=network_nodes(mount,NULL);
+            error=network_nodes(mount,NULL,0);
+            if (!error) error=network_nodes(mount,NULL,1);
             if (error) return error;
         }
         error=network_bridge_nodes(mount);
         if (error) return error;
     }
-    if (net==1) {
+    if (net==1 || net==6) {
         struct md_network_link links[256];
         int count=md_network_link_list(fs->actor->network,links,256);
         if (count<0) return count;
         for (int i=-2;i<count;++i) {
-            error=network_nodes(mount,i==-2 ? "all" : i==-1 ? "default" : links[i].name);
+            error=network_nodes(mount,i==-2 ? "all" : i==-1 ? "default" : links[i].name,net==6);
             if (error) return error;
         }
     }

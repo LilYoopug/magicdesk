@@ -69,7 +69,7 @@ stop another launch. Persistent stores outlive those processes.
 | Processes | Nested PID views, proc visibility, translated waits/signals and guest PID 1 lifetime | Not a host kernel PID namespace |
 | Credentials | Guest users, groups, capabilities, drops and namespace ownership | Guest root never grants Android root or kernel capabilities |
 | IPC and terminals | Separate SysV IPC owners, store-scoped pathname sockets, private devpts views | Inherited connections retain authority; explicit abstract Unix sockets share the host namespace |
-| Network | Offline child namespaces or routed IPv4, private ports, supported nftables flow filtering and NAT | Native backing ports remain reachable; not a host firewall or full Linux network isolation |
+| Network | Offline child namespaces or routed IPv4/IPv6, private ports, supported nftables flow filtering and NAT | Native backing ports remain reachable; not a host firewall or full Linux network isolation |
 | Resource controls | Launch-local real-UID `RLIMIT_NPROC`; logical `RLIMIT_NOFILE` backed by native FD allocation; logical cgroup membership, controller settings and device-filter bookkeeping | Android's physical FD/task budgets still apply; cgroup CPU, memory, pids and device limits are not enforced; other resource limits remain native |
 | Application filters | Installed seccomp filters and their denial actions remain active | The filesystem broker is not itself confined by every caller's filter domain |
 
@@ -706,7 +706,8 @@ environment; without `--replace` the preservation rule applies. The installer
 uses replacement for a new environment with system/explicit DNS, while resume
 retains existing DNS. Restore preserves the backed-up configuration.
 
-Launch-time `--dns IPv4` is a different, temporary policy: repeat it for up to
+Launch-time `--dns ADDRESS` accepts an IPv4 or IPv6 literal and is a different,
+temporary policy: repeat it for up to
 three servers. It mounts a read-only `/etc/resolv.conf` for that launch only;
 other launches and the stored configuration are unchanged. The file must already
 exist (a symlink to an existing regular file is accepted). Missing or dangling
@@ -811,8 +812,10 @@ and exact assertions. The recipe adds `ConditionVirtualization=!container` to
 systemd's module-loading units: they do not modify the host kernel in a container,
 but remain available for a native boot of an exported rootfs. This is applied
 after package setup, including `--resume`. A systemd generator additionally
-masks host binfmt registration and the recovery image's physical Deckard/SteamVR
-services and partition-set mounts for container boots only. Its runtime output
+replaces binfmt automount with an eager guest-local binfmt mount, and masks the
+recovery image's physical Deckard/SteamVR services and partition-set mounts for
+container boots only. Binfmt registration belongs to Shroot's guest namespace,
+not Android's kernel registry. Its runtime output
 does not change packaged units or administrator overrides; native boots retain
 them. Ordinary service failures remain visible. Older Debian/openKylin checks explicitly dropped
 `CAP_SYS_MODULE`. Unavailable hardware still needs appropriate configuration.
@@ -829,7 +832,7 @@ The same store can have independent simultaneous launches with different policie
 | --- | --- |
 | Omitted or `--network host` | Native Android networking; no virtual network or relay is allocated |
 | `--network none` | Private network with working loopback and no external route |
-| `--network bridge` | Prepared private IPv4 network, bridge/uplink, outbound access and optional published ports |
+| `--network bridge` | Prepared private IPv4/IPv6 network, bridge/uplink, outbound access and optional published ports |
 | `--network routed` | Low-level routed backend for guests such as Docker/Podman that configure their own network topology |
 
 `routed` remains supported, not deprecated or an alias for `bridge`.
@@ -839,31 +842,56 @@ external connectivity, even when its parent has a prepared network.
 ```sh
 shroot exec work --network bridge -p 127.0.0.1:8080:80 -- /usr/sbin/nginx -g 'daemon off;'
 shroot exec work --network bridge -p 127.0.0.1:5353:53/udp -- /path/to/dns-server
+shroot exec work --network bridge -p '[::1]:8080:80' -- /usr/sbin/nginx -g 'daemon off;'
 shroot login work --network none
 ```
 
-Repeated `-p` / `--publish` accepts `[IPv4:]HOST:GUEST[/tcp|/udp]`, with TCP as
-the default. Omitted IPv4 binds all host IPv4 addresses; use `127.0.0.1` for local
-access only. Ports must be 1-65535; ranges and automatic port selection are not
+Repeated `-p` / `--publish` accepts `[IPv4:]HOST:GUEST[/tcp|/udp]` or
+`[IPv6]:HOST:GUEST[/tcp|/udp]`, with TCP as the default. Omitted address binds all
+host IPv4 addresses; use `127.0.0.1` or `[::1]` for local access only. IPv6 literals
+require brackets. Ports must be 1-65535; ranges and automatic port selection are not
 supported. At most 128 publications are accepted. Publication requires `bridge`;
 host, none and routed reject it. OCI EXPOSE never publishes a port automatically.
 Port reservation and rules commit before guest execution. Conflicts or any
 preparation error roll back the entire setup, including earlier reservations.
 Cancellation, ordinary exit and abnormal guest exit release the launch's ports.
 
-Bridge DNS defaults to the installed resolver's usable non-loopback IPv4
+Bridge addressing is also per launch. Repeat `--subnet CIDR` and `--gateway IP`
+once per family; `--ip IPv4` and `--ip6 IPv6` select the guest's addresses:
+
+```sh
+shroot login work --network bridge \
+  --subnet 172.23.8.0/24 --ip 172.23.8.42 --gateway 172.23.8.7 \
+  --subnet fd42:1234::/64 --ip6 fd42:1234::42 --gateway fd42:1234::7
+```
+
+Omitted families retain `10.88.0.0/24` and `fd6d:6473:1::/64`. Within each
+subnet the default gateway and guest use the first two usable addresses,
+skipping an explicitly selected endpoint. CIDRs must specify the network
+address; endpoints must be distinct unicast addresses inside it. The private
+subnets cannot overlap the gateway's uplinks (`10.0.2.0/24`, `fd6d:6473::/64`).
+Invalid topology fails before guest execution or port reservation. NAT uses
+the selected guest address. These options require `bridge`, do not edit the
+installed OS, and do not join independent launches into a shared named network.
+
+Bridge DNS defaults to the installed resolver's usable non-loopback IPv4/IPv6
 servers, retaining search/options lines in a private read-only view. Loopback
 stubs in another launch are not reachable. With no usable server, startup fails
-explicitly; use repeated `--dns IPv4` or prepare the stored resolver first.
+explicitly; use repeated `--dns ADDRESS` or prepare the stored resolver first.
 No public resolver is silently substituted. Explicit launch DNS also works with
 host/routed; none rejects it. This snapshot is not an Android Private DNS/VPN
 proxy. See [DNS](#dns) for its distinction from persistent installation policy.
+
+Guest IPv6 connectivity does not create an Android IPv6 uplink. External traffic
+uses the selected executor's Android network, including its VPN policy. A VPN
+may reject IPv6 even when the cellular network has an IPv6 address and route;
+Shroot does not bypass it or change Android routes.
 
 Bridge and routed use the same backend for logical bridges, veth pairs, addresses and routes.
 Private TCP/UDP ports map to native ephemeral ports, so containers can reuse the
 same internal port. Root-fabric binds can publish real ports. Android interfaces,
 routes and firewall rules are not changed. Supported nftables chains apply
-IPv4 TCP/UDP filtering, DNAT, SNAT and masquerading to logical flows. Rules and
+IPv4/IPv6 TCP/UDP filtering, DNAT, SNAT and masquerading to logical flows. Rules and
 published ports commit atomically; unsupported expressions fail explicitly.
 Unfiltered internal/outbound streams retain native data IO. Filtered/NAT flows
 use an event-driven relay with cached decisions, not syscall-by-syscall packet
@@ -882,10 +910,12 @@ installing the restrictive policy. Addressed UDP retains its mapping until
 socket closure or relay idle expiry.
 
 This is not full network isolation. Backing ports remain reachable, inherited
-native descriptors retain access, and IPv6, raw IP sockets,
-multicast/broadcast and device-bound sockets are unsupported. Routed `recvmmsg`
-and ancillary types other than supported IPv4 packet information/TTL/TOS also
-have explicit limits. Anonymous nftables counters count logical data transfers
+native descriptors retain access. Logical ICMPv6 supports link-local router and
+neighbor discovery, not arbitrary raw-IP internet access. TCP/UDP multicast and
+broadcast, routed `recvmmsg` and unsupported ancillary types fail explicitly.
+Packet information and supported TTL/hop-limit/TOS/traffic-class controls are
+family-aware; device-bound sockets retain logical interface ownership.
+Anonymous nftables counters count logical data transfers
 and payload bytes, not physical network packets. See
 [network contracts](../native/shroot/networking.md#network-namespaces).
 
@@ -900,7 +930,6 @@ without a userland proxy:
 
 ```text
 --firewall-backend=nftables
---ip6tables=false
 --userland-proxy=false
 ```
 
@@ -1229,7 +1258,7 @@ application, init or isolation test.
 | Systemd managers | Debian 257, Ubuntu 255, Fedora 259, Arch 262 and SteamOS; system/user managers and service activation | Focused targets are distinct from default-target boot |
 | Distribution boot | Ubuntu, Fedora, Arch, openSUSE, Deepin and Manjaro default targets; Debian/openKylin with explicit module-capability drop | [Init matrix](../native/guest-exec-lab/init-matrix.md); SteamOS hardware units remain degraded |
 | OpenRC and runit | Alpine PID 1, default runlevel and restart/stop; Void/Armtix stock stages and supervised services | Userspace service lifecycle, not complete hardware initialization |
-| Docker Engine | Docker 29.9.1, containerd 2.4.2, runc 1.5.2; overlay2, nftables bridge and TCP/UDP publication without userland proxy; older VFS/proxy profile retained | [Explicit daemon configuration](#docker-engine), logical IPv4 flow filtering, not Android firewall management |
+| Docker Engine | Docker 29.9.1, containerd 2.4.2, runc 1.5.2; overlay2, nftables bridge and TCP/UDP publication without userland proxy; older VFS/proxy profile retained | [Explicit daemon configuration](#docker-engine), logical IPv4/IPv6 flow filtering, not Android firewall management; per-family results are recorded separately |
 | Podman | Podman 5.8.7, crun 1.28, conmon 2.2.1; overlay, nftables bridge, TCP/UDP publication, DNS/HTTP, named peers and cleanup | [Routed launch and inherited limits](#podman); cgroups and application seccomp enabled |
 | Browser sandboxes | Stock Chromium JavaScript/DOM/PNG with installed filters, Firefox screenshot, Electron/VS Code workflow | [Browser contract](#application-filters-and-browsers), not complete security isolation |
 | Landlock and Bubblewrap | Positive/negative filesystem access, stacked domains and inheritance; pacman, Glycin and stock Bubblewrap workflows | [Filesystem policy](#filesystem-restrictions) and [namespace fixtures](../native/guest-exec-lab/namespaces.md#namespace-clients) |

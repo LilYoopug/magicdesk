@@ -12,7 +12,7 @@
     X(fd_control,md_guest_fd_control_checkpoint) X(buffer_control,md_guest_buffer_control_checkpoint) \
     X(task_control,md_guest_task_control_checkpoint) X(task_return,md_guest_task_return) \
     X(task_collected,md_guest_task_collected) X(watch_return,md_guest_watch_return) X(enter,md_enter_checkpoint)
-enum { MD_IMAGE_PROGRAM=0, MD_IMAGE_LOADER=1, MD_IMAGE_TAKE_PROGRAM=2, MD_IMAGE_TAKE_LOADER=3 };
+enum { MD_IMAGE_PROGRAM=0, MD_IMAGE_LOADER=1, MD_IMAGE_TAKE_PROGRAM=2, MD_IMAGE_TAKE_LOADER=3, MD_IMAGE_TAKE_EXECFD=4 };
 #define MD_GUEST_ENTER_IMAGE 0x4d440102
 #define MD_GUEST_SHM 0x4d440104
 #define MD_GUEST_SHM_FILTER 0x4d440105

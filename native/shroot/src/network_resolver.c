@@ -46,14 +46,12 @@ int md_network_resolver_prepare(struct md_filesystem *fs,const struct md_network
             if (!strncmp(word,"nameserver",10) && (word[10]==' ' || word[10]=='\t')) {
                 word+=10;
                 while (*word==' ' || *word=='\t') ++word;
-                char ip[16]; size_t count=strcspn(word," \t\r\n#;");
-                uint32_t address=0;
+                char ip[46]; size_t count=strcspn(word," \t\r\n#;");
                 keep=count && count<sizeof(ip);
                 if (keep) {
                     memcpy(ip,word,count); ip[count]=0;
-                    keep=!md_network_profile_ipv4(ip,&address);
-                    unsigned first=((unsigned char *)&address)[0];
-                    keep=keep && first && first!=127 && first<224;
+                    struct md_network_profile check={0};
+                    keep=!md_network_profile_add(&check,"--dns",ip);
                 }
                 if (keep) ++servers;
             }

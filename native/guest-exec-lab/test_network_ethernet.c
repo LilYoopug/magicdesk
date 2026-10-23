@@ -3,6 +3,7 @@
 #include "network_endpoint.h"
 #include "network_flow.h"
 #include "network_route.h"
+#include "test_network_fixture.h"
 #include "guest_identity.h"
 #include <assert.h>
 #include <errno.h>
@@ -48,14 +49,14 @@ static void isolated_bridge(void) {
     assert(!md_network_interface_add(host,MD_LINK_VETH,"left",&ports[0]));
     assert(!md_network_interface_add(host,MD_LINK_VETH,"right",&ports[1]));
     struct md_network_interface *master=md_network_interface_find(host,bridge,NULL);
-    master->info.flags|=IFF_UP; master->ipv4=htonl(0x0a070001); master->prefix=24;
+    master->info.flags|=IFF_UP; test_network_v4(master,htonl(0x0a070001),24);
     struct md_network_namespace *children[]={a,b};
     for (unsigned i=0;i<2;++i) {
         assert(!md_network_interface_add(children[i],MD_LINK_VETH,"eth0",&peers[i]));
         struct md_network_interface *port=md_network_interface_find(host,ports[i],NULL);
         struct md_network_interface *peer=md_network_interface_find(children[i],peers[i],NULL);
         port->info.flags|=IFF_UP; port->peer=peers[i]; port->master=bridge;
-        peer->info.flags|=IFF_UP; peer->peer=ports[i]; peer->ipv4=htonl(0x0a070002+i); peer->prefix=24;
+        peer->info.flags|=IFF_UP; peer->peer=ports[i]; test_network_v4(peer,htonl(0x0a070002+i),24);
     }
     struct md_fd_object *client=NULL,*server=NULL;
     int clientfd,serverfd;
@@ -66,9 +67,9 @@ static void isolated_bridge(void) {
     assert(!md_network_endpoint_listen(server,serverfd,1));
     struct sockaddr_storage destination; socklen_t length;
     assert(!md_network_endpoint_destination(client,(void *)&address,sizeof(address),&destination,&length));
-    struct md_filter_packet packet={.source=htonl(0x0a070002),.destination=address.sin_addr.s_addr,.protocol=IPPROTO_TCP};
+    struct md_filter_packet packet={.source=md_ip_v4(htonl(0x0a070002)),.destination=md_ip_v4(address.sin_addr.s_addr),.protocol=IPPROTO_TCP};
     struct md_network_flow_path path;
-    assert(!md_network_flow_route(a,&packet,0,&path) && !path.mediated && path.destination==b->inode);
+    assert(!md_network_flow_route(a,&packet,0,0,&path) && !path.mediated && path.destination==b->inode);
     assert(!isolated(host,&root,ports[0],1));
     assert(isolated(host,&root,ports[1],1)==-EBUSY);
     assert(!md_network_interface_find(host,ports[1],NULL)->isolated);
@@ -76,9 +77,9 @@ static void isolated_bridge(void) {
     assert(!isolated(host,&root,ports[1],1));
     assert(md_network_flow_check(host->fabric,&path,0)==-EACCES);
     assert(md_network_flow_check(host->fabric,&path,1)==-EACCES);
-    assert(md_network_flow_route(a,&packet,0,&path)==-EACCES);
-    packet=(struct md_filter_packet){.source=htonl(0x0a070002),.destination=master->ipv4,.protocol=IPPROTO_TCP};
-    assert(!md_network_flow_route(a,&packet,0,&path) && path.destination==host->inode);
+    assert(md_network_flow_route(a,&packet,0,0,&path)==-EACCES);
+    packet=(struct md_filter_packet){.source=md_ip_v4(htonl(0x0a070002)),.destination=md_ip_v4(htonl(0x0a070001)),.protocol=IPPROTO_TCP};
+    assert(!md_network_flow_route(a,&packet,0,0,&path) && path.destination==host->inode);
     struct md_fd_object *sender=NULL,*receiver=NULL;
     int sendfd,receivefd;
     assert(!md_network_socket_open(a,&root,AF_PACKET,SOCK_RAW,htons(ETH_P_ALL),&sender,&sendfd));
@@ -92,8 +93,8 @@ static void isolated_bridge(void) {
     assert(md_network_socket_call(sender,&root,SYS_write,args,frame,sizeof(frame),sizeof(frame),1,NULL,NULL,NULL)==sizeof(frame));
     assert(recv(receivefd,received,sizeof(received),MSG_DONTWAIT)==sizeof(struct md_network_packet)+sizeof(frame));
     assert(!memcmp(received+sizeof(struct md_network_packet),frame,sizeof(frame)));
-    packet=(struct md_filter_packet){.source=htonl(0x0a070002),.destination=address.sin_addr.s_addr,.protocol=IPPROTO_TCP};
-    assert(!md_network_flow_route(a,&packet,0,&path) && path.mediated && path.destination==b->inode);
+    packet=(struct md_filter_packet){.source=md_ip_v4(htonl(0x0a070002)),.destination=md_ip_v4(address.sin_addr.s_addr),.protocol=IPPROTO_TCP};
+    assert(!md_network_flow_route(a,&packet,0,0,&path) && path.mediated && path.destination==b->inode);
     assert(!md_network_flow_check(host->fabric,&path,1));
     assert(!isolated(host,&root,ports[1],1));
     assert(md_network_flow_check(host->fabric,&path,0)==-EACCES);

@@ -25,6 +25,8 @@ date +%s > "$1/started"
 if test "$2" = diagnostic; then
     mkdir -p /run/systemd/system/systemd-journald.service.d
     printf '[Service]\nStandardOutput=append:%s/journald.log\nStandardError=inherit\n' "$1" > /run/systemd/system/systemd-journald.service.d/diagnostics.conf
+    mkdir -p /run/systemd/system.conf.d
+    printf '[Manager]\nDefaultEnvironment=SNAPD_DEBUG=1 MD_NETWORKD_TRACE=1\n' > /run/systemd/system.conf.d/md-diagnostic.conf
 fi
 cat > /run/systemd/system/md-boot-observer.service <<EOF
 [Unit]
@@ -47,6 +49,9 @@ systemctl --failed --no-pager
 systemctl list-jobs --no-pager
 systemctl status --no-pager
 journalctl -b --since="@$(cat "$1/started")" -p warning --no-pager > "$1/journal.log"
+systemctl --failed --plain --no-legend | while read -r unit rest; do
+    journalctl -b --since="@$(cat "$1/started")" -u "$unit" --no-pager >> "$1/journal.log"
+done
 systemctl show -p ActiveState -p SubState systemd-journald.service dbus.service systemd-logind.service
 # Check real service IO, not merely an ActiveState reported by the manager.
 if test "$code" = 0; then
@@ -218,7 +223,9 @@ def main():
     parser.add_argument('--rtkit', action='store_true', help='Verify packaged RTKit unit, D-Bus and restart; requires RTKit')
     parser.add_argument('--init', choices=('systemd', 'openrc', 'runit'), default='systemd')
     parser.add_argument('--network', choices=('host', 'none', 'bridge', 'routed'), default='routed')
-    parser.add_argument('--dns', action='append', default=[], help='Per-launch resolver IPv4 address')
+    parser.add_argument('--dns', action='append', default=[], help='Per-launch resolver IPv4 or IPv6 address')
+    parser.add_argument('--binfmt', action='store_true', help='Require the stock binfmt mount/service and registration across restart')
+    parser.add_argument('--networkd-ipv6', action='store_true', help='Require stock networkd to configure IPv6 from a router advertisement')
     parser.add_argument('--drop-capability', action='append', default=[],
                         help='Explicit container capability policy, applied by stock setpriv before PID1')
     parser.add_argument('--output', type=Path, default=Path('build/os-boot-results'))
@@ -229,6 +236,10 @@ def main():
         parser.error('--trace is currently a systemd diagnostic')
     if args.rtkit and args.init != 'systemd':
         parser.error('--rtkit requires systemd')
+    if args.binfmt and args.init != 'systemd':
+        parser.error('--binfmt requires systemd')
+    if args.networkd_ipv6 and args.init != 'systemd':
+        parser.error('--networkd-ipv6 requires systemd')
     suite = Suite(args.output, args.build)
     suite.report['store'] = args.store
     suite.report['bootPolicy'] = {'init': args.init, 'dropCapabilities': args.drop_capability,
@@ -249,6 +260,32 @@ def main():
             suite.transport.upload(suite.client, Path(__file__).with_name('init_fixture.py'),
                                    suite.base + '/init_fixture.py')
         program = {'systemd': SYSTEMD, 'openrc': OPENRC, 'runit': RUNIT}[args.init]
+        if args.networkd_ipv6:
+            suite.transport.upload(suite.client, Path(__file__).with_name('networkd_ipv6_fixture.py'),
+                                   suite.base + '/networkd_ipv6_fixture.py')
+            program = program.replace('        systemctl restart systemd-logind.service',
+                                      '        python3 "$1/networkd_ipv6_fixture.py"\n'
+                                      '        systemctl restart systemd-logind.service')
+        if args.binfmt:
+            # Runtime configuration only; systemd itself orders and starts the
+            # stock mount and service. No manual mount can hide a boot failure.
+            program = '''mkdir -p /run/binfmt.d
+printf ':md-boot:E::mdboot::/bin/true:P\\n' > /run/binfmt.d/md-boot.conf
+''' + program
+            checks = '''
+        systemctl is-active proc-sys-fs-binfmt_misc.mount systemd-binfmt.service
+        grep -Fx enabled /proc/sys/fs/binfmt_misc/md-boot
+        printf 'not an executable\\n' > /tmp/fixture.mdboot
+        chmod 755 /tmp/fixture.mdboot
+        /tmp/fixture.mdboot
+        systemctl stop systemd-binfmt.service
+        test ! -e /proc/sys/fs/binfmt_misc/md-boot
+        systemctl start systemd-binfmt.service
+        /tmp/fixture.mdboot
+        echo 'PASS binfmt boot registration, execution and service lifecycle'
+'''
+            program = program.replace('        systemctl restart systemd-logind.service',
+                                      checks + '        systemctl restart systemd-logind.service')
         if args.rtkit:
             checks = '''
         systemctl start rtkit-daemon.service

@@ -6,9 +6,9 @@
 struct md_command {
     char path[PATH_MAX], object[33];
     char scripts[MD_SCRIPT_DEPTH][PATH_MAX];
-    char lines[MD_SCRIPT_DEPTH][MD_SCRIPT_HEADER];
+    char lines[MD_SCRIPT_DEPTH][MD_BINFMT_REGISTER_MAX];
     struct md_arguments args;
-    int fd, interpreter_fd;
+    int fd, interpreter_fd, execfd;
 };
 int md_command_arguments(struct md_command *, const char *, char *const []);
 int md_command_apply_recipe(struct md_command *, const struct md_command_recipe *);

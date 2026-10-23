@@ -6,6 +6,8 @@
 #include <errno.h>
 #include <limits.h>
 #include <linux/netlink.h>
+#include <netinet/in.h>
+#include <sys/time.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -26,16 +28,21 @@ static long receive_credentials(struct md_network_packet *packet) {
     long released=md_adapter_buffer_release();
     return result ? result : released;
 }
-static long address(void *target,socklen_t capacity,void *length,const struct md_network_packet *packet,int ethernet) {
+static long address(void *target,socklen_t capacity,void *length,const struct md_network_packet *packet,int options) {
     struct sockaddr_nl source={.nl_family=AF_NETLINK,.nl_pid=packet->port,
         .nl_groups=packet->group ? 1U<<(packet->group-1) : 0};
-    const void *value=ethernet ? (const void *)&packet->ethernet : (const void *)&source;
-    socklen_t size=ethernet ? sizeof(packet->ethernet) : sizeof(source);
+    struct sockaddr_in6 ipv6={.sin6_family=AF_INET6};
+    memcpy(&ipv6.sin6_addr,packet->ipv6.source,16);
+    if (IN6_IS_ADDR_LINKLOCAL(&ipv6.sin6_addr)) ipv6.sin6_scope_id=packet->ipv6.interface;
+    const void *value=options&MD_NETWORK_PACKET_IPV6 ? (const void *)&ipv6
+        : options&MD_NETWORK_PACKET_ETHERNET ? (const void *)&packet->ethernet : (const void *)&source;
+    socklen_t size=options&MD_NETWORK_PACKET_IPV6 ? sizeof(ipv6)
+        : options&MD_NETWORK_PACKET_ETHERNET ? sizeof(packet->ethernet) : sizeof(source);
     long error=md_write_memory(target,value,capacity<size ? capacity : size);
     return error ? error : md_write_memory(length,&size,sizeof(size));
 }
 static long control_item(struct msghdr *message,size_t *used,int level,int type,const void *data,size_t length) {
-    union { struct cmsghdr alignment; unsigned char bytes[CMSG_SPACE(sizeof(struct ucred))]; } packet={0};
+    union { struct cmsghdr alignment; unsigned char bytes[CMSG_SPACE(sizeof(struct in6_pktinfo))]; } packet={0};
     struct cmsghdr *h=&packet.alignment;
     size_t capacity=message->msg_control ? message->msg_controllen-*used : 0;
     size_t size=CMSG_LEN(length),space=CMSG_SPACE(length);
@@ -117,11 +124,22 @@ long md_network_packet_receive(long nr,const unsigned long *a) {
     result-=sizeof(packet);
     if (original.msg_name) {
         void *length=nr==SYS_recvmsg ? (char *)a[1]+offsetof(struct msghdr,msg_namelen) : (void *)a[5];
-        error=address(original.msg_name,original.msg_namelen,length,&packet,options&MD_NETWORK_PACKET_ETHERNET);
+        error=address(original.msg_name,original.msg_namelen,length,&packet,(int)options);
     }
     if (!error && nr==SYS_recvmsg) {
         original.msg_flags=native.msg_flags;
         size_t used=0;
+        if (options&MD_NETWORK_PACKET_IPV6_INFO) {
+            struct in6_pktinfo info={.ipi6_ifindex=packet.ipv6.interface};
+            memcpy(&info.ipi6_addr,packet.ipv6.destination,16);
+            error=control_item(&original,&used,IPPROTO_IPV6,IPV6_PKTINFO,&info,sizeof(info));
+        }
+        if (!error && (options&MD_NETWORK_PACKET_IPV6_HOPS))
+            error=control_item(&original,&used,IPPROTO_IPV6,IPV6_HOPLIMIT,&packet.ipv6.hops,sizeof(packet.ipv6.hops));
+        if (!error && (options&MD_NETWORK_PACKET_TIMESTAMP)) {
+            struct timeval timestamp={.tv_sec=packet.ipv6.seconds,.tv_usec=packet.ipv6.microseconds};
+            error=control_item(&original,&used,SOL_SOCKET,SO_TIMESTAMP,&timestamp,sizeof(timestamp));
+        }
         if (options&MD_NETWORK_PACKET_INFO) {
             struct nl_pktinfo info={.group=packet.group};
             error=control_item(&original,&used,SOL_NETLINK,NETLINK_PKTINFO,&info,sizeof(info));

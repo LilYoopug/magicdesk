@@ -143,7 +143,7 @@ static int chains(struct md_network_filter *f,const struct nlmsghdr *h,uint32_t 
         if (!error) error=string(&a[NFTA_CHAIN_TYPE],&type);
         if (error) return error;
         if (!type || (strcmp(type,"filter") && strcmp(type,"nat")) || hook>=NF_INET_NUMHOOKS
-                || (t->family!=NFPROTO_INET && t->family!=NFPROTO_IPV4)) return -EOPNOTSUPP;
+                || (t->family!=NFPROTO_INET && t->family!=NFPROTO_IPV4 && t->family!=NFPROTO_IPV6)) return -EOPNOTSUPP;
         c.nat=!strcmp(type,"nat"); c.hook=(int)hook; c.priority=(int32_t)priority;
         if (c.nat && hook==NF_INET_FORWARD) return -EOPNOTSUPP;
         if (existing && (c.hook!=existing->hook || c.nat!=existing->nat || c.priority!=existing->priority)) return -EOPNOTSUPP;

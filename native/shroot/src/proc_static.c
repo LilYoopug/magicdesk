@@ -20,12 +20,17 @@ static const char devices[]=
     "136 pts\n"
     "226 drm\n"
     "\nBlock devices:\n";
+static const char filesystems[]=
+    "nodev\ttmpfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevpts\n"
+    "nodev\tcgroup\nnodev\tcgroup2\nnodev\tmqueue\nnodev\tbinfmt_misc\n"
+    "nodev\toverlay\nnodev\tfuse\n";
 static const struct static_entry {
     enum md_proc_kind kind;
     const char *name,*text;
     size_t size;
 } entries[]={
     {MD_PROC_DEVICES,"devices",devices,sizeof(devices)-1},
+    {MD_PROC_FILESYSTEMS,"filesystems",filesystems,sizeof(filesystems)-1},
     /* A userspace guest does not boot its own kernel. */
     {MD_PROC_KERNEL_CMDLINE,"cmdline","\n",1}
 };

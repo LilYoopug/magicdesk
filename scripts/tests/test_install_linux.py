@@ -687,6 +687,16 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
         subprocess.run(['sh', str(generator), str(output)], check=True,
                        env={**env, 'TEST_NATIVE': '0'}, timeout=5)
         self.assertFalse((output / 'home.mount').is_symlink())
+        (units / 'proc-sys-fs-binfmt_misc.mount').write_text('[Mount]\nType=binfmt_misc\n')
+        (units / 'systemd-binfmt.service').write_text('[Service]\nType=oneshot\n')
+        for _ in range(2):
+            subprocess.run(['sh', str(generator), str(output)], check=True,
+                           env={**env, 'TEST_NATIVE': '0'}, timeout=5)
+        self.assertEqual(str(units / 'proc-sys-fs-binfmt_misc.mount'),
+                         os.readlink(output / 'sysinit.target.wants/proc-sys-fs-binfmt_misc.mount'))
+        self.assertEqual('/dev/null', os.readlink(output / 'proc-sys-fs-binfmt_misc.automount'))
+        self.assertFalse((output / 'systemd-binfmt.service').exists())
+        self.assertFalse((output / 'proc-sys-fs-binfmt_misc.mount').exists())
 
     def test_pacman_keeps_installed_dependency_providers(self):
         setup = self.run_script('--print-system-setup').stdout

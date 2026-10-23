@@ -13,6 +13,7 @@
 #include "device_events.h"
 #include "device_tree.h"
 #include "network_resolver.h"
+#include "fs_continuation.h"
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -161,7 +162,7 @@ static void *run(void *context) {
     if (!error) error = md_fs_mounts_open(&fs, w->attachments, w->attachment_count);
     if (!error) {
         error=md_network_resolver_prepare(&fs,w->network);
-        if (error) fprintf(stderr,"Shroot resolver: %s; supply --dns IPv4 or prepare /etc/resolv.conf\n",strerror(-error));
+        if (error) fprintf(stderr,"Shroot resolver: %s; supply --dns IP or prepare /etc/resolv.conf\n",strerror(-error));
     }
     w->network=NULL;
     struct md_input_session *input=NULL;
@@ -429,6 +430,11 @@ int md_fs_worker_stop(struct md_fs_worker *w) {
     }
     if (!error && w->error != -ESHUTDOWN) error = -w->error;
     if (w->pause) *w->pause=(struct md_fs_worker_pause){0};
+    while (w->completed) {
+        struct md_fs_work *work=w->completed;
+        w->completed=work->next;
+        if (work->discard) work->discard(work);
+    }
     md_resource_wakeup_release(w->wakeup);
     md_queue_signal_close(&w->wake); md_queue_signal_close(&w->done);
     close(w->stop); close(w->ready);
@@ -437,4 +443,82 @@ int md_fs_worker_stop(struct md_fs_worker *w) {
     md_ofd_orders_release(w->cursors);
     pthread_mutex_destroy(&w->lock); free(w);
     return -error;
+}
+
+struct control_work {
+    struct md_fs_work work;
+    struct md_control_pending pending;
+    struct md_fs_context context;
+    struct md_control_fs_operation operation;
+    struct md_fs_continuation *continuation;
+    struct md_resource_wakeup *wakeup;
+    struct md_resource_wakeup *worker_wakeup;
+    atomic_uint refs;
+    atomic_int done, cancelled;
+    long result;
+};
+static void control_release(struct control_work *w) {
+    if (atomic_fetch_sub_explicit(&w->refs,1,memory_order_acq_rel)!=1) return;
+    if (w->continuation) w->continuation->destroy(w->continuation);
+    w->operation.destroy(w->operation.context);
+    md_fs_context_end(&w->context);
+    md_resource_wakeup_release(w->wakeup);
+    md_resource_wakeup_release(w->worker_wakeup);
+    free(w);
+}
+static void control_dispose(struct md_control_pending *pending) {
+    struct control_work *w=(void *)((char *)pending - offsetof(struct control_work,pending));
+    if (!atomic_load_explicit(&w->done,memory_order_acquire)) {
+        atomic_store_explicit(&w->cancelled,1,memory_order_release);
+        md_resource_wakeup_signal(w->worker_wakeup);
+    }
+    control_release(w);
+}
+static long control_resume(struct md_control_pending *pending,void *data,size_t size) {
+    (void)data; (void)size;
+    struct control_work *w=(void *)((char *)pending - offsetof(struct control_work,pending));
+    return atomic_load_explicit(&w->done,memory_order_acquire) ? w->result : -EINPROGRESS;
+}
+static int control_ready(struct md_fs_work *work) {
+    struct control_work *w=(void *)work;
+    return atomic_load_explicit(&w->cancelled,memory_order_acquire) ? -ECANCELED
+        : w->continuation->ready(w->continuation);
+}
+static void control_run(struct md_fs_work *work,struct md_filesystem *fs,int error) {
+    struct control_work *w=(void *)work;
+    if (!error && atomic_load_explicit(&w->cancelled,memory_order_acquire)) error=-ECANCELED;
+    w->context.filesystem=fs;
+    w->result=error ? error : w->operation.run(w->operation.context,&w->context,&w->continuation);
+    w->context.filesystem=NULL;
+    if (w->result==-EINPROGRESS && w->continuation) work->await=control_ready;
+    else {
+        if (w->result==-EINPROGRESS) w->result=-EPROTO;
+        atomic_store_explicit(&w->done,1,memory_order_release);
+        md_resource_wakeup_signal(w->wakeup);
+    }
+}
+static int control_complete(struct md_fs_work *work) { control_release((void *)work); return 0; }
+static void control_discard(struct md_fs_work *work) { control_release((void *)work); }
+long md_fs_worker_control(void *worker,const struct md_control_actor *actor,
+        struct md_control_fs_operation operation,struct md_control_pending **pending) {
+    struct md_fs_worker *fs=worker;
+    if (!fs || !actor || !operation.run || !operation.destroy) return -EINVAL;
+    struct control_work *w=calloc(1,sizeof(*w));
+    if (!w) return -ENOMEM;
+    int error=md_task_registry_read(fs->tasks,actor->pid,0,&w->context.task);
+    if (error) { free(w); return error; }
+    w->context.actor=actor->pid; w->context.authenticated=w->context.has_identity=1;
+    w->operation=operation;
+    w->work=(struct md_fs_work){.run=control_run,.complete=control_complete,.discard=control_discard};
+    w->pending=(struct md_control_pending){.resume=control_resume,.dispose=control_dispose};
+    w->wakeup=md_resource_wakeup_retain(actor->wakeup);
+    w->worker_wakeup=md_resource_wakeup_retain(fs->wakeup);
+    atomic_init(&w->refs,2); atomic_init(&w->done,0); atomic_init(&w->cancelled,0);
+    error=md_fs_worker_submit(fs,&w->work);
+    if (error) {
+        md_fs_context_end(&w->context); md_resource_wakeup_release(w->wakeup);
+        md_resource_wakeup_release(w->worker_wakeup); free(w);
+        return error;
+    }
+    *pending=&w->pending; return -EINPROGRESS;
 }

@@ -45,15 +45,15 @@ list(APPEND origins ${src}/native_mounts.c ${src}/devpts_view.c ${src}/cgroup.c 
     ${src}/ipc_namespace.c ${src}/mqueue_view.c ${src}/landlock_policy.c ${src}/landlock_file.c
     ${src}/mount_stream.c ${src}/mount_pin.c ${src}/mount_propagation.c ${src}/temporary_directory.c ${src}/private_tree.c
     ${src}/provider_tree.c ${src}/host_fs_view.c ${src}/device_events.c ${src}/identity_snapshot.c ${src}/proc_sysctl.c ${src}/user_sysctl.c ${src}/proc_static.c ${src}/uts_namespace.c ${src}/control_event.c)
-list(APPEND origins ${fifo_descriptions} ${src}/fd_native_pin.c ${src}/network_ethernet.c)
+list(APPEND origins ${fifo_descriptions} ${src}/fd_native_pin.c ${src}/network_ethernet.c ${src}/network_icmp6.c ${src}/network_nexthop.c ${src}/network_autoconf.c)
 list(APPEND origins ${src}/proc_file.c ${src}/proc_namespace.c)
 list(APPEND origins ${src}/device_tree.c ${src}/fuse_device.c ${src}/fuse_transport.c ${src}/fuse_session.c)
 list(APPEND origins ${src}/render_device.c ${src}/render_sysfs.c ${src}/sysfs_uevent.c)
 list(APPEND origins ${src}/network_filter.c ${src}/network_filter_program.c ${src}/network_nft.c ${src}/network_nft_expression.c ${src}/network_nft_objects.c)
-list(APPEND origins ${src}/network_flow.c ${src}/network_filter_ports.c ${src}/network_forward.c ${src}/network_profile.c)
+list(APPEND origins ${src}/network_ip.c ${src}/network_route_ip.c ${src}/network_transport.c ${src}/network_flow.c ${src}/network_filter_ports.c ${src}/network_forward.c ${src}/network_profile.c)
 list(APPEND origins ${src}/network_launch.c ${src}/network_filter_update.c)
 set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c ${src}/fs_mount_change.c ${src}/fs_mount_lifecycle.c ${src}/fs_temporary.c ${src}/fs_overlay.c ${src}/fs_storage.c)
-list(APPEND mounts ${src}/proc_paths.c ${src}/procfs_view.c ${src}/proc_fdinfo.c ${src}/fs_proc.c ${src}/fs_cgroup.c ${src}/fs_bpf.c ${src}/fs_sysfs.c ${src}/fs_mqueue.c ${src}/fs_mount_file.c ${src}/mount_source.c ${src}/fs_context.c
+list(APPEND mounts ${src}/binfmt.c ${src}/binfmt_rule.c ${src}/proc_paths.c ${src}/procfs_view.c ${src}/proc_fdinfo.c ${src}/fs_proc.c ${src}/fs_cgroup.c ${src}/fs_bpf.c ${src}/fs_sysfs.c ${src}/fs_mqueue.c ${src}/fs_mount_file.c ${src}/mount_source.c ${src}/fs_context.c
     ${src}/fs_landlock.c ${src}/fs_provider.c ${src}/fs_control.c ${src}/fs_mount_propagation.c)
 set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_schema.c ${src}/inode_super.c ${src}/inode_cache.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/watch_source.c ${src}/inode_path.c
     ${src}/inode_directory.c ${src}/inode_import.c ${src}/inode_socket.c ${src}/inode_backing.c ${src}/inode_snapshot.c ${src}/inode_view.c ${src}/inode_maintenance.c ${src}/inode_fifo.c ${src}/inode_channel.c ${src}/file_open.c
@@ -248,6 +248,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_network_ethernet.c)
     target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_network_nft.c)
     target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_network_launch.c)
+    target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_network_ipv6.c)
     target_compile_options(test_task_resources PRIVATE -iquote ${src} -UNDEBUG)
     target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_ipc_database.c ../guest-exec-lab/test_storage_database.c)
     target_sources(test_task_resources PRIVATE ../guest-exec-lab/test_shm_bridge.c ${src}/shm_bridge.c ${src}/ipc_namespace_memory.c)
@@ -418,6 +419,10 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_compile_options(cooperative_guest PRIVATE -iquote ${src} -UNDEBUG)
     guest_executable(credentials_guest ../guest-exec-lab/test_credentials_guest.c)
     guest_executable(guest_interfaces ../guest-exec-lab/test_guest_interfaces.c)
+    guest_executable(binfmt_guest ../guest-exec-lab/test_binfmt_guest.c)
+    target_compile_options(binfmt_guest PRIVATE -UNDEBUG)
+    guest_executable(test_binfmt_rule ../guest-exec-lab/test_binfmt_rule.c ${src}/binfmt_rule.c)
+    target_compile_options(test_binfmt_rule PRIVATE -iquote ${src} -UNDEBUG)
     guest_executable(service_runtime ../guest-exec-lab/test_service_runtime.c)
     target_compile_options(service_runtime PRIVATE -UNDEBUG)
     guest_executable(ipc_credentials_guest ../guest-exec-lab/test_ipc_credentials_guest.c)

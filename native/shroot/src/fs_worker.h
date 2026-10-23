@@ -1,6 +1,7 @@
 #ifndef MD_FS_WORKER_H
 #define MD_FS_WORKER_H
 #include "inode_store.h"
+#include "control_file.h"
 struct md_filesystem;
 struct md_fs_attachment;
 struct md_image_catalogue;
@@ -30,6 +31,8 @@ struct md_fs_work {
      * resumes run exactly once; negative results are passed as its error.
      * Cleared before resumption; a later stage may install another wait. */
     int (*await)(struct md_fs_work *);
+    /* Optional self-owned completion cleanup after stop's join. */
+    void (*discard)(struct md_fs_work *);
 };
 /* Supervisor-owned token, retained until end or worker_stop returns. Begin is
  * only a request: state==1 proves the worker has stopped all namespace work,
@@ -74,4 +77,6 @@ void md_fs_worker_notifications(struct md_fs_worker *, int, void *,
         int (*)(void *, struct md_filesystem *, short), int (*prepare_wait)(void *));
 int md_fs_worker_error(struct md_fs_worker *);
 int md_fs_worker_stop(struct md_fs_worker *);
+long md_fs_worker_control(void *,const struct md_control_actor *,struct md_control_fs_operation,
+    struct md_control_pending **);
 #endif

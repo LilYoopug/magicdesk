@@ -44,7 +44,7 @@ static void parsing(void) {
     assert(md_network_profile_add(&p,"--dns","127.0.0.53")==-EADDRNOTAVAIL);
     assert(md_network_profile_add(&p,"--dns","192.0.2.53")==-EEXIST);
     const char *bad[]={"80","0:80","80:0","65536:80","1:999999999999999",":80","80:",
-        "127.0.0.256:80:80","127.0.0:80:80","127.0.0.1.:80:80","1:2/sctp","[::1]:80:80","-1:80","1:2/udp/extra"};
+        "127.0.0.256:80:80","127.0.0:80:80","127.0.0.1.:80:80","1:2/sctp","[:::1]:80:80","-1:80","1:2/udp/extra"};
     for (unsigned i=0;i<sizeof(bad)/sizeof(*bad);++i) assert(md_network_profile_add(&p,"-p",bad[i])<0);
     char *args[2*(1+MD_NETWORK_PUBLICATIONS_MAX+MD_NETWORK_DNS_MAX)];
     unsigned count=md_network_profile_arguments(&p,args);
@@ -62,20 +62,20 @@ static void routes(void) {
     assert(!md_network_profile_add(&p,"--network","none"));
     assert(!md_network_launch_open(&p,NULL,&a));
     assert(md_network_endpoint_enabled(a.space) && a.space->count==1 && !a.gateway);
-    struct md_filter_packet packet={.destination=htonl(0xc0000201),.destination_port=htons(80),.protocol=6};
+    struct md_filter_packet packet={.destination=md_ip_v4(htonl(0xc0000201)),.destination_port=htons(80),.protocol=6};
     struct md_network_flow_path path;
-    assert(md_network_flow_route(a.space,&packet,0,&path)==-ENETUNREACH);
-    packet.destination=htonl(INADDR_LOOPBACK);
-    assert(!md_network_flow_route(a.space,&packet,0,&path) && path.destination==a.space->inode && !path.mediated);
+    assert(md_network_flow_route(a.space,&packet,0,0,&path)==-ENETUNREACH);
+    packet.destination=md_ip_v4(htonl(INADDR_LOOPBACK));
+    assert(!md_network_flow_route(a.space,&packet,0,0,&path) && path.destination==a.space->inode && !path.mediated);
     md_network_launch_close(&a);
     p=bridge();
     assert(!md_network_launch_open(&p,NULL,&a));
     assert(!md_network_launch_open(&p,NULL,&b));
     assert(a.space->fabric!=b.space->fabric && a.space->mode==MD_NETWORK_PRIVATE);
     assert(a.space->count==2 && a.gateway->count==4);
-    packet=(struct md_filter_packet){.destination=htonl(0xc0000201),.destination_port=htons(80),.protocol=6};
-    assert(!md_network_flow_route(a.space,&packet,0,&path));
-    assert(!path.mediated && !path.destination && packet.source==htonl(0x0a580002));
+    packet=(struct md_filter_packet){.destination=md_ip_v4(htonl(0xc0000201)),.destination_port=htons(80),.protocol=6};
+    assert(!md_network_flow_route(a.space,&packet,0,0,&path));
+    assert(!path.mediated && !path.destination && packet.source.v4==htonl(0x0a580002));
     struct md_fd_object *sa=NULL,*sb=NULL; int fa=-1,fb=-1;
     struct md_identity identity=md_identity_new(0,0);
     struct sockaddr_in local={.sin_family=AF_INET,.sin_port=htons(80)};
@@ -88,6 +88,68 @@ static void routes(void) {
     md_network_launch_close(&a); md_network_launch_close(&b);
     puts("PASS host no-op, offline loopback, private bridge and unmediated outbound flow");
 }
+static void addressing(void) {
+    struct md_network_profile p=bridge();
+    const char *options[]={"--ip6","fd42:1234::42","--gateway","172.23.8.7","--ip","172.23.8.42",
+        "--subnet","fd42:1234::/64","--subnet","172.23.8.0/24","--gateway","fd42:1234::7"};
+    for (unsigned i=0;i<sizeof(options)/sizeof(*options);i+=2) {
+        assert(md_network_profile_option(options[i]));
+        assert(!md_network_profile_add(&p,options[i],options[i+1]));
+    }
+    assert(!md_network_profile_validate(&p));
+    char *args[14]; assert(md_network_profile_arguments(&p,NULL)==14);
+    assert(md_network_profile_arguments(&p,args)==14);
+    struct md_network_profile copy={0};
+    for (unsigned i=0;i<14;i+=2) assert(!md_network_profile_add(&copy,args[i],args[i+1]));
+    assert(!md_network_profile_validate(&copy));
+    struct md_network_launch launch={0};
+    assert(!md_network_launch_open(&copy,NULL,&launch));
+    for (unsigned i=0;i<2;++i) {
+        struct md_network_family_config c;
+        assert(!md_network_profile_family(&copy,i ? AF_INET6 : AF_INET,&c));
+        assert(c.address.bytes[i ? 15 : 3]==(i ? 0x42 : 42));
+        struct md_network_route_entry route;
+        struct md_ip_address destination;
+        assert(!md_network_profile_ip(i ? "2001:db8:42::1" : "192.0.2.1",&destination));
+        assert(md_network_route_lookup(launch.space,destination,0,&route));
+        assert(md_ip_equal(route.gateway,c.gateway));
+        struct md_filter_packet packet={.destination=destination,.destination_port=htons(80),.protocol=6};
+        struct md_network_flow_path path;
+        assert(!md_network_flow_route(launch.space,&packet,0,0,&path));
+        assert(!path.mediated && !path.destination && md_ip_equal(packet.source,c.address));
+    }
+    md_network_launch_close(&launch);
+    assert(md_network_profile_add(&p,"--gateway","172.23.8.9")==-EEXIST);
+    assert(md_network_profile_add(&p,"--ip","::1")==-EAFNOSUPPORT);
+    assert(md_network_profile_add(&p,"--subnet","172.23.8.1/24")==-EINVAL);
+    const char *invalid[][4]={{"10.0.2.0/24",NULL,NULL,NULL},{"fd6d:6473::/64",NULL,NULL,NULL},
+        {"172.23.8.0/24","--ip","172.23.8.255",NULL},{"172.23.8.0/24","--ip","172.23.9.1",NULL},
+        {"172.23.8.0/24","--gateway","172.23.8.0",NULL},{"127.0.0.0/8",NULL,NULL,NULL},
+        {"fe80::/64",NULL,NULL,NULL},{"::ffff:192.0.2.0/120",NULL,NULL,NULL},
+        {"172.23.8.0/32",NULL,NULL,NULL},{"fd42:1234::/128",NULL,NULL,NULL}};
+    for (unsigned i=0;i<sizeof(invalid)/sizeof(*invalid);++i) {
+        p=bridge(); assert(!md_network_profile_add(&p,"--subnet",invalid[i][0]));
+        if (invalid[i][1]) assert(!md_network_profile_add(&p,invalid[i][1],invalid[i][2]));
+        assert(md_network_profile_validate(&p)<0);
+        assert(md_network_launch_open(&p,NULL,&launch)<0 && !launch.space && !launch.gateway);
+    }
+    for (unsigned i=0;i<2;++i) {
+        p=bridge();
+        assert(!md_network_profile_add(&p,"--subnet",i ? "fd42:1234::/127" : "172.23.8.0/31"));
+        assert(!md_network_profile_validate(&p));
+        assert(!md_network_launch_open(&p,NULL,&launch));
+        md_network_launch_close(&launch);
+    }
+    p=bridge(); assert(!md_network_profile_add(&p,"--ip","10.88.0.1"));
+    struct md_network_family_config c;
+    assert(!md_network_profile_family(&p,AF_INET,&c) && c.gateway.bytes[3]==2);
+    assert(!md_network_profile_add(&p,"--gateway","10.88.0.1"));
+    assert(md_network_profile_validate(&p)==-EADDRNOTAVAIL);
+    p=(struct md_network_profile){0};
+    assert(!md_network_profile_add(&p,"--subnet","172.23.8.0/24"));
+    assert(md_network_profile_validate(&p)==-EINVAL);
+    puts("PASS launch dual-stack addressing, round trip, routes, automatic endpoints and invalid topology");
+}
 static void ports(void) {
     int held=-1; unsigned number=reserve(&held);
     char text[64]; snprintf(text,sizeof(text),"127.0.0.1:%u:80/tcp",number);
@@ -98,17 +160,17 @@ static void ports(void) {
     close(held);
     assert(!md_network_launch_open(&p,NULL,&a));
     assert(md_network_launch_open(&p,NULL,&b)==-EADDRINUSE && !b.space && !b.gateway);
-    struct md_filter_packet packet={.source=htonl(INADDR_LOOPBACK),.source_port=htons(40000),
-        .destination=htonl(INADDR_LOOPBACK),.destination_port=htons(number),.protocol=6,.state=8};
+    struct md_filter_packet packet={.source=md_ip_v4(htonl(INADDR_LOOPBACK)),.source_port=htons(40000),
+        .destination=md_ip_v4(htonl(INADDR_LOOPBACK)),.destination_port=htons(number),.protocol=6,.state=8};
     struct md_network_flow_path path;
-    assert(!md_network_flow_route(a.gateway,&packet,1,&path));
-    assert(path.mediated && path.destination==a.space->inode && packet.destination==htonl(0x0a580002)
+    assert(!md_network_flow_route(a.gateway,&packet,1,0,&path));
+    assert(path.mediated && path.destination==a.space->inode && packet.destination.v4==htonl(0x0a580002)
         && packet.destination_port==htons(80));
-    packet=(struct md_filter_packet){.source=htonl(INADDR_LOOPBACK),.source_port=htons(40000),
-        .destination=htonl(INADDR_LOOPBACK),.destination_port=htons(number),.protocol=6,.state=8};
-    assert(!md_network_flow_route(a.gateway,&packet,0,&path));
+    packet=(struct md_filter_packet){.source=md_ip_v4(htonl(INADDR_LOOPBACK)),.source_port=htons(40000),
+        .destination=md_ip_v4(htonl(INADDR_LOOPBACK)),.destination_port=htons(number),.protocol=6,.state=8};
+    assert(!md_network_flow_route(a.gateway,&packet,0,0,&path));
     assert(path.steps[0].hook==NF_INET_LOCAL_OUT && path.destination==a.space->inode
-        && packet.destination==htonl(0x0a580002) && packet.destination_port==htons(80));
+        && packet.destination.v4==htonl(0x0a580002) && packet.destination_port==htons(80));
     unsigned char bytes[4096]={0};
     struct md_network_message output={.data=bytes,.capacity=sizeof(bytes),.size=NLMSG_HDRLEN,.message=(void *)bytes};
     struct md_filter_rule *rule=&a.gateway->filter->rules[0];
@@ -129,12 +191,12 @@ static void ports(void) {
     assert(!md_network_launch_open(&p,NULL,&a));
     struct md_network_interface *inside=md_network_interface_find(a.space,0,"eth0");
     struct md_network_interface *port=md_network_interface_find(a.gateway,inside->peer,NULL);
-    struct md_filter_packet reflect={.source=htonl(0x0a580002),.source_port=htons(40000),
-        .destination=htonl(0x0a580001),.destination_port=htons(number),.protocol=6,.state=8};
+    struct md_filter_packet reflect={.source=md_ip_v4(htonl(0x0a580002)),.source_port=htons(40000),
+        .destination=md_ip_v4(htonl(0x0a580001)),.destination_port=htons(number),.protocol=6,.state=8};
     packet=reflect;
-    assert(md_network_flow_route(a.space,&packet,0,&path)==-EACCES);
+    assert(md_network_flow_route(a.space,&packet,0,0,&path)==-EACCES);
     port->hairpin=1; packet=reflect;
-    assert(!md_network_flow_route(a.space,&packet,0,&path));
+    assert(!md_network_flow_route(a.space,&packet,0,0,&path));
     assert(path.mediated && path.destination==a.space->inode);
     assert(!md_network_flow_check(a.space->fabric,&path,0));
     assert(!md_network_flow_check(a.space->fabric,&path,1));
@@ -199,8 +261,9 @@ static void reserved_publication(void) {
     struct md_network_filter f={.tables=&table,.count=1,.chains=&chain,.chain_count=1,.rules=&rule,.rule_count=1};
     struct md_network_port_reservation *reservation=NULL;
     struct md_network_forward_update *update=NULL;
+    struct md_inet_address logical={.ip=md_ip_v4(address.sin_addr.s_addr),.port=address.sin_port};
     pthread_mutex_lock(&n->fabric->lock);
-    assert(!md_network_forward_bind(n,&token,SOCK_STREAM,&address,&reservation));
+    assert(!md_network_forward_bind(n,&token,SOCK_STREAM,&logical,0,&reservation));
     md_network_forward_bound(reservation,1);
     port_state(&address,0);
     assert(!md_network_forward_prepare(n,&f,&update));
@@ -233,7 +296,7 @@ static void reserved_publication(void) {
     /* A guest may reserve a port after NAT publication, then outlive it. */
     assert(!md_network_forward_prepare(n,&f,&update));
     md_network_forward_commit(update);
-    assert(!md_network_forward_bind(n,&token,SOCK_STREAM,&address,&reservation));
+    assert(!md_network_forward_bind(n,&token,SOCK_STREAM,&logical,0,&reservation));
     md_network_forward_bound(reservation,1);
     assert(!md_network_forward_prepare(n,NULL,&update));
     md_network_forward_commit(update);
@@ -308,4 +371,4 @@ static void loopback_origin(void) {
     }
     puts("PASS native loopback TCP/UDP: OUTPUT and INPUT policy, never PREROUTING");
 }
-void test_network_launch(void) { parsing(); routes(); ports(); partial_rollback(); reserved_publication(); loopback_origin(); }
+void test_network_launch(void) { parsing(); routes(); addressing(); ports(); partial_rollback(); reserved_publication(); loopback_origin(); }

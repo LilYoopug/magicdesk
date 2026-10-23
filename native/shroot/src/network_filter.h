@@ -2,6 +2,7 @@
 #define MD_NETWORK_FILTER_H
 #include <stddef.h>
 #include <stdint.h>
+#include "network_ip.h"
 
 /* Namespace-owned ruleset catalogue. Mutations prepare a private snapshot;
  * publication and replacement run under the owning network fabric lock. */
@@ -35,12 +36,13 @@ struct md_filter_accounting { struct md_filter_counter **cells; size_t count, ca
 struct md_filter_expression {
     enum md_filter_opcode code;
     unsigned src, dst, size, key, operation, aux;
-    unsigned constant; /* NAT address/port in value instead of registers. */
+    unsigned constant, family; /* NAT address/port in value instead of registers. */
     uint64_t target;
     unsigned char value[16], mask[16];
     union {
         struct md_filter_counter counter;
         struct md_filter_transport transport;
+        uint16_t nat_port;
     };
 };
 struct md_filter_chain {
@@ -76,22 +78,23 @@ struct md_filter_set {
 /* Flow coordinates are network byte order; register metadata is native byte
  * order, as in the nftables expression ABI. Callers own route/conntrack state. */
 struct md_filter_packet {
-    uint32_t source, destination;
+    struct md_ip_address source, destination;
     uint16_t source_port, destination_port;
     unsigned protocol, state, mark, ctmark, status;
     unsigned input, output, fib_type, source_fib_type;
     char input_name[16], output_name[16];
     unsigned snat, dnat, masquerade;
-    uint32_t masquerade_address;
+    struct md_ip_address masquerade_address;
     struct md_filter_accounting *accounting;
     unsigned unmediated; /* Admission probe: reject reached per-packet effects. */
 };
 struct md_filter_rewrite {
-    uint32_t source, destination, fib_type, source_fib_type;
+    struct md_ip_address source, destination;
+    uint32_t fib_type, source_fib_type;
     uint16_t source_port, destination_port;
     int priority;
 };
-struct md_filter_port { uint32_t address; uint16_t port; unsigned protocol; };
+struct md_filter_port { struct md_ip_address address; uint16_t port; unsigned protocol; };
 struct md_network_filter {
     uint32_t generation;
     uint64_t next_handle;
@@ -124,5 +127,6 @@ int md_filter_evaluate(struct md_network_filter *,unsigned,struct md_filter_pack
 int md_filter_evaluate_transition(struct md_network_filter *,unsigned,struct md_filter_packet *,
     const struct md_filter_rewrite *,int *);
 void md_filter_account(struct md_filter_accounting *,size_t);
-int md_filter_ports(struct md_network_filter *,uint32_t,struct md_filter_port *,size_t,size_t *);
+int md_filter_chain_applies(const struct md_network_filter *,const struct md_filter_chain *,unsigned);
+int md_filter_ports(struct md_network_filter *,struct md_ip_address,struct md_filter_port *,size_t,size_t *);
 #endif

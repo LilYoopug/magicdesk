@@ -6,6 +6,8 @@
 #include <errno.h>
 #include <limits.h>
 #include <linux/if_arp.h>
+#include <linux/if_addr.h>
+#include <linux/rtnetlink.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <stdlib.h>
@@ -23,19 +25,134 @@ struct md_network_namespace *md_network_interface_owner(struct md_network_fabric
         if (md_network_interface_find(n,index,NULL)) return n;
     return NULL;
 }
-struct md_network_interface *md_network_route_find(struct md_network_namespace *n,uint32_t ip,uint32_t *gateway) {
+struct md_ip_address md_network_interface_source(const struct md_network_interface *link,struct md_ip_address target) {
+    struct md_ip_address best=md_ip_any(target.family);
+    unsigned score=0;
+    if (!link) return best;
+    for (unsigned i=0;i<link->address_count;++i) {
+        const struct md_network_ip_assignment *a=&link->addresses[i];
+        if (a->address.family!=target.family || (a->flags&(IFA_F_TENTATIVE|IFA_F_DADFAILED))) continue;
+        if (md_ip_linklocal(a->address)!=md_ip_linklocal(target) && !md_ip_multicast(target)) continue;
+        unsigned candidate=1+(!(a->flags&IFA_F_DEPRECATED) ? 8 : 0)
+            +(md_ip_prefix(a->address,target,a->prefix) ? 1 : 0)+(md_ip_equal(a->address,target) ? 16 : 0)
+            +(a->address.family==AF_INET6 && (!!(a->flags&IFA_F_TEMPORARY)==(link->ipv6.use_tempaddr>1)) ? 2 : 0);
+        if (candidate>score) { best=a->address; score=candidate; }
+    }
+    return best;
+}
+int md_network_interface_has(const struct md_network_interface *link,struct md_ip_address address) {
+    if (md_ip_unspecified(address)) return 0;
+    for (unsigned i=0;i<link->address_count;++i)
+        if (!(link->addresses[i].flags&(IFA_F_TENTATIVE|IFA_F_DADFAILED)) && (md_ip_equal(link->addresses[i].address,address)
+                || (link->kind==MD_LINK_LOOPBACK && address.family==AF_INET
+                    && link->addresses[i].address.family==AF_INET && md_ip_is_loopback(address)))) return 1;
+    return 0;
+}
+int md_network_interface_address(struct md_network_interface *link,struct md_network_ip_assignment address,int remove,int exclusive) {
+    if (md_ip_unspecified(address.address) || address.prefix>md_ip_size(address.address)*8) return -EINVAL;
+    for (unsigned i=0;i<link->address_count;++i) if (md_ip_equal(link->addresses[i].address,address.address)) {
+        if (remove) {
+            if (link->addresses[i].prefix!=address.prefix) return -EADDRNOTAVAIL;
+            memmove(link->addresses+i,link->addresses+i+1,(--link->address_count-i)*sizeof(*link->addresses));
+        } else if (exclusive) return -EEXIST;
+        else link->addresses[i]=address;
+        return 0;
+    }
+    if (remove) return -EADDRNOTAVAIL;
+    if (link->address_count==MD_NETWORK_MAX_ADDRESSES) return -ENOSPC;
+    link->addresses[link->address_count++]=address; return 0;
+}
+void md_network_interface_up(struct md_network_interface *link) {
+    if (!(link->info.flags&IFF_UP)) return;
+    if (link->kind==MD_LINK_LOOPBACK) {
+        struct md_ip_address a=md_ip_loopback(AF_INET);
+        if (!md_network_interface_has(link,a)) md_network_interface_address(link,
+            (struct md_network_ip_assignment){.address=a,.prefix=8,.scope=RT_SCOPE_HOST,.flags=IFA_F_PERMANENT},0,0);
+        if (link->ipv6.disabled) return;
+        a=md_ip_loopback(AF_INET6);
+        if (!md_network_interface_has(link,a)) md_network_interface_address(link,
+            (struct md_network_ip_assignment){.address=a,.prefix=128,.scope=RT_SCOPE_HOST,.flags=IFA_F_PERMANENT},0,0);
+    } else if (!link->ipv6.disabled && !link->ipv6.addr_gen_mode && link->info.mtu>=1280) {
+        for (unsigned i=0;i<link->address_count;++i) if (md_ip_linklocal(link->addresses[i].address)) return;
+        struct md_ip_address a=md_ip_any(AF_INET6);
+        a.bytes[0]=0xfe; a.bytes[1]=0x80;
+        memcpy(a.bytes+8,link->info.address,3); a.bytes[8]^=2;
+        a.bytes[11]=0xff; a.bytes[12]=0xfe; memcpy(a.bytes+13,link->info.address+3,3);
+        md_network_interface_address(link,(struct md_network_ip_assignment){.address=a,.prefix=64,.scope=RT_SCOPE_LINK,.flags=IFA_F_PERMANENT},0,0);
+    }
+}
+void md_network_interface_ipv6_flush(struct md_network_namespace *n,struct md_network_interface *link) {
+    for (unsigned a=0;a<link->address_count;) {
+        if (link->addresses[a].address.family!=AF_INET6) { ++a; continue; }
+        memmove(link->addresses+a,link->addresses+a+1,(--link->address_count-a)*sizeof(*link->addresses));
+    }
+    for (unsigned r=0;r<n->route_count;) {
+        if (n->routes[r].interface!=link->info.index || n->routes[r].destination.family!=AF_INET6) { ++r; continue; }
+        memmove(n->routes+r,n->routes+r+1,(--n->route_count-r)*sizeof(*n->routes));
+    }
+    for (unsigned i=0;i<n->nexthop_count;) {
+        if (n->nexthops[i].interface!=link->info.index || n->nexthops[i].gateway.family!=AF_INET6) { ++i; continue; }
+        memmove(n->nexthops+i,n->nexthops+i+1,(--n->nexthop_count-i)*sizeof(*n->nexthops));
+    }
+}
+static unsigned link_domain(struct md_network_namespace *n,const struct md_network_interface *link) {
+    if (link->kind==MD_LINK_LOOPBACK) return 0;
+    if (link->master) return link->master;
+    struct md_network_namespace *owner=md_network_interface_owner(n->fabric,link->peer);
+    struct md_network_interface *peer=owner ? md_network_interface_find(owner,link->peer,NULL) : NULL;
+    if (peer && peer->master) return peer->master;
+    return peer && peer->info.index<link->info.index ? peer->info.index : link->info.index;
+}
+struct md_network_interface *md_network_neighbor(struct md_network_namespace *n,const struct md_network_interface *link,struct md_ip_address ip) {
+    unsigned domain=link_domain(n,link);
+    if (!domain) return NULL;
+    for (struct md_network_namespace *s=n->fabric->spaces;s;s=s->next)
+        for (unsigned i=0;i<s->count;++i) {
+            struct md_network_interface *other=&s->links[i];
+            if (other!=link && (other->info.flags&IFF_UP) && md_network_interface_has(other,ip)
+                    && link_domain(s,other)==domain) return other;
+        }
+    return NULL;
+}
+int md_network_address_duplicate(struct md_network_namespace *n,const struct md_network_interface *link,struct md_ip_address ip) {
+    return md_network_neighbor(n,link,ip)!=NULL;
+}
+struct md_network_interface *md_network_route_lookup(struct md_network_namespace *n,struct md_ip_address ip,
+        unsigned output,struct md_network_route_entry *result) {
     struct md_network_interface *best=NULL;
+    struct md_network_route_entry selected={.destination=md_ip_any(ip.family),.gateway=md_ip_any(ip.family)};
+    unsigned prefix=0,metric=UINT32_MAX;
     for (unsigned i=0;i<n->count;++i) {
         struct md_network_interface *l=&n->links[i];
-        if (!(l->info.flags&IFF_UP) || !l->ipv4 || !l->prefix) continue;
-        uint32_t mask=htonl(UINT32_MAX<<(32-l->prefix));
-        if ((l->ipv4&mask)==(ip&mask) && (!best || l->prefix>best->prefix)) best=l;
+        if (!(l->info.flags&IFF_UP) || (output && output!=l->info.index)
+                || (md_ip_is_loopback(ip) && l->kind!=MD_LINK_LOOPBACK)) continue;
+        for (unsigned j=0;j<l->address_count;++j) {
+            const struct md_network_ip_assignment *a=&l->addresses[j];
+            if (a->address.family!=ip.family || (a->flags&(IFA_F_TENTATIVE|IFA_F_DADFAILED))) continue;
+            unsigned bits=md_ip_equal(a->address,ip) ? md_ip_size(ip)*8 : a->prefix;
+            if ((md_ip_equal(a->address,ip) || !(a->flags&IFA_F_NOPREFIXROUTE))
+                    && md_ip_prefix(a->address,ip,bits) && (!best || bits>prefix)) {
+                best=l; prefix=bits; metric=a->route_metric ? a->route_metric : ip.family==AF_INET6 ? 256 : 0;
+                selected=(struct md_network_route_entry){.destination=md_ip_network(a->address,bits),
+                    .gateway=md_ip_any(ip.family),.prefix=bits,.interface=l->info.index,.metric=metric,
+                    .protocol=RTPROT_KERNEL,.scope=RT_SCOPE_LINK};
+            }
+        }
     }
-    if (gateway) *gateway=best ? 0 : n->default_gateway;
-    if (!best) {
-        best=md_network_interface_find(n,n->default_interface,NULL);
-        if (best && (!(best->info.flags&IFF_UP) || !best->ipv4)) best=NULL;
+    for (unsigned i=0;i<n->route_count;++i) {
+        const struct md_network_route_entry *r=&n->routes[i];
+        unsigned preference=r->preference==1 ? 2 : r->preference==3 ? 0 : 1;
+        unsigned previous=selected.preference==1 ? 2 : selected.preference==3 ? 0 : 1;
+        if (!md_ip_prefix(ip,r->destination,r->prefix) || (best && (r->prefix<prefix
+                || (r->prefix==prefix && (r->metric>metric || (r->metric==metric && preference<=previous)))))) continue;
+        struct md_network_interface *l=md_network_interface_find(n,r->interface,NULL);
+        if (!l || !(l->info.flags&IFF_UP) || (output && output!=l->info.index)
+                || (md_ip_is_loopback(ip) && l->kind!=MD_LINK_LOOPBACK)
+                || (ip.family==AF_INET6 && l->ipv6.disabled)
+                || md_ip_unspecified(md_network_interface_source(l,ip))) continue;
+        best=l; selected=*r; prefix=r->prefix; metric=r->metric;
     }
+    if (result) *result=selected;
     return best;
 }
 int md_network_interface_reserve(struct md_network_namespace *n,unsigned extra) {
@@ -68,11 +185,12 @@ int md_network_interface_add(struct md_network_namespace *n,enum md_network_link
     if (error) return error;
     unsigned id=kind==MD_LINK_LOOPBACK ? 1 : n->fabric->next_index++;
     struct md_network_interface *link=&n->links[n->count++];
-    *link=(struct md_network_interface){.kind=kind,.policy=n->defaults,.policy_id=++n->next_policy,.info={.index=id,
+    *link=(struct md_network_interface){.kind=kind,.policy=n->defaults,.ipv6=n->defaults6,.policy_id=++n->next_policy,.info={.index=id,
         .flags=kind==MD_LINK_LOOPBACK ? IFF_LOOPBACK : IFF_BROADCAST|IFF_MULTICAST,
         .mtu=kind==MD_LINK_LOOPBACK ? 65536 : 1500,
         .type=kind==MD_LINK_LOOPBACK ? ARPHRD_LOOPBACK : ARPHRD_ETHER,.state=IF_OPER_DOWN}};
     memcpy(link->info.name,name,strlen(name)+1);
+    link->ipv6.mtu=link->info.mtu;
     if (kind!=MD_LINK_LOOPBACK) {
         link->info.address[0]=2;
         link->info.address[3]=(unsigned char)(id>>16);
@@ -89,7 +207,14 @@ static void remove_one(struct md_network_namespace *n,unsigned index) {
             --n->count; --i;
         }
     }
-    if (n->default_interface==index) n->default_interface=n->default_gateway=n->default_metric=0;
+    for (unsigned i=0;i<n->route_count;) {
+        if (n->routes[i].interface!=index) { ++i; continue; }
+        memmove(n->routes+i,n->routes+i+1,(--n->route_count-i)*sizeof(*n->routes));
+    }
+    for (unsigned i=0;i<n->nexthop_count;) {
+        if (n->nexthops[i].interface!=index) { ++i; continue; }
+        memmove(n->nexthops+i,n->nexthops+i+1,(--n->nexthop_count-i)*sizeof(*n->nexthops));
+    }
 }
 int md_network_interface_remove(struct md_network_namespace *n,unsigned index) {
     struct md_network_interface *link=md_network_interface_find(n,index,NULL);
@@ -117,6 +242,7 @@ int md_network_interface_move(struct md_network_namespace *from,unsigned index,s
     if (error) return error;
     struct md_network_interface moved=*link;
     moved.policy=to->defaults;
+    moved.ipv6=to->defaults6;
     moved.policy_id=++to->next_policy;
     moved.master=moved.hairpin=moved.isolated=0; memcpy(moved.info.name,renamed,IFNAMSIZ);
     remove_one(from,index); to->links[to->count++]=moved;
@@ -141,19 +267,32 @@ static struct md_network_namespace *create(struct md_user_namespace *owner,enum 
     n->unprivileged_port=1024; n->ping_groups[0]=1;
     n->local_ports[0]=32768; n->local_ports[1]=60999;
     n->tcp_keepalive[0]=7200; n->tcp_keepalive[1]=75; n->tcp_keepalive[2]=9;
-    n->ipv4_forward=mode==MD_NETWORK_ROUTED;
+    n->ipv4_forward=n->all6.forwarding=n->defaults6.forwarding=mode==MD_NETWORK_ROUTED;
+    n->all6.accept_dad=n->defaults6.accept_dad=1;
+    n->all6.hop_limit=n->defaults6.hop_limit=64;
+    n->all6.mtu=n->defaults6.mtu=1500;
     pthread_mutex_lock(&fabric->lock);
     unsigned loopback=0;
     error=md_network_interface_add(n,MD_LINK_LOOPBACK,"lo",&loopback);
     if (!error && mode==MD_NETWORK_ROUTED) {
         n->links[0].info.flags|=IFF_UP;
-        n->links[0].ipv4=htonl(INADDR_LOOPBACK); n->links[0].prefix=8;
+        md_network_interface_up(&n->links[0]);
         unsigned uplink=0;
         error=md_network_interface_add(n,MD_LINK_UPLINK,"eth0",&uplink);
         if (!error) {
             struct md_network_interface *link=md_network_interface_find(n,uplink,NULL);
-            link->info.flags|=IFF_UP; link->ipv4=htonl(0x0a000264); link->prefix=24;
-            n->default_interface=uplink; n->default_gateway=htonl(0x0a000202);
+            link->info.flags|=IFF_UP;
+            md_network_interface_up(link);
+            struct md_ip_address address=md_ip_v4(htonl(0x0a000264));
+            md_network_interface_address(link,(struct md_network_ip_assignment){.address=address,.prefix=24,.scope=RT_SCOPE_UNIVERSE,.flags=IFA_F_PERMANENT},0,0);
+            n->routes[n->route_count++]=(struct md_network_route_entry){.destination=md_ip_any(AF_INET),
+                .gateway=md_ip_v4(htonl(0x0a000202)),.interface=uplink,.protocol=RTPROT_BOOT};
+            address=md_ip_any(AF_INET6); address.bytes[0]=0xfd; address.bytes[1]=0x6d;
+            address.bytes[2]=0x64; address.bytes[3]=0x73; address.bytes[15]=0x64;
+            md_network_interface_address(link,(struct md_network_ip_assignment){.address=address,.prefix=64,.scope=RT_SCOPE_UNIVERSE,.flags=IFA_F_PERMANENT},0,0);
+            address.bytes[15]=2;
+            n->routes[n->route_count++]=(struct md_network_route_entry){.destination=md_ip_any(AF_INET6),
+                .gateway=address,.interface=uplink,.metric=1024,.protocol=RTPROT_BOOT};
         }
     }
     n->next=fabric->spaces; fabric->spaces=n;
@@ -244,10 +383,13 @@ int md_network_link_snapshot(struct md_network_namespace *n,uint64_t *generation
     }
     pthread_mutex_unlock(&n->fabric->lock); return result;
 }
-int md_network_ingress(struct md_network_namespace *n,const struct md_network_interface *in,uint32_t source,uint32_t destination) {
+int md_network_ingress(struct md_network_namespace *n,const struct md_network_interface *in,
+        struct md_ip_address source,struct md_ip_address destination) {
     if (!in) return -ENETUNREACH;
+    if (source.family==AF_INET6) return in->kind!=MD_LINK_LOOPBACK
+        && (md_ip_is_loopback(source) || md_ip_is_loopback(destination)) ? -ENETUNREACH : 0;
     if (in->kind!=MD_LINK_LOOPBACK && !n->all.route_localnet && !in->policy.route_localnet
-            && ((ntohl(source)>>24)==127 || (ntohl(destination)>>24)==127)) return -ENETUNREACH;
+            && (md_ip_is_loopback(source) || md_ip_is_loopback(destination))) return -ENETUNREACH;
     unsigned filter=n->all.rp_filter>in->policy.rp_filter ? n->all.rp_filter : in->policy.rp_filter;
     if (filter) {
         struct md_network_interface *reverse=md_network_route_find(n,source,NULL);

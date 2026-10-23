@@ -48,6 +48,31 @@ class PortOwnershipTest(unittest.TestCase):
             with socket.socket(socket.AF_INET, kind) as connection:
                 connection.bind(('127.0.0.1', port))
 
+    def test_ipv6_handoff_and_release(self):
+        observer = Observer(ipv6_host='0:0:0:0:0:0:0:1')
+        try:
+            reservation = observe(observer.address, operation='allocate', ipv6=True)
+            self.assertEqual(reservation['host'], '::1')
+            port = reservation['port']
+            for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+                with socket.socket(socket.AF_INET6, kind) as connection:
+                    with self.assertRaises(OSError) as error:
+                        connection.bind(('::1', port))
+                    self.assertEqual(error.exception.errno, errno.EADDRINUSE)
+            observe(observer.address, operation='handoff', port=port, ipv6=True)
+            observe(observer.address, operation='released', port=port, ipv6=True)
+            self.assertFalse(observer.reservations)
+            port = observe(observer.address, operation='allocate', ipv6=True)['port']
+        finally:
+            observer.close()
+        for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+            with socket.socket(socket.AF_INET6, kind) as connection:
+                connection.bind(('::1', port))
+
+    def test_ipv6_observer_rejects_other_families(self):
+        with self.assertRaises(ValueError):
+            Observer(ipv6_host='127.0.0.1')
+
 
 if __name__ == '__main__':
     unittest.main()

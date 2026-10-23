@@ -12,11 +12,10 @@ struct md_network_namespace *md_network_space_find(struct md_network_fabric *f,u
     for (struct md_network_namespace *n=f->spaces;n;n=n->next) if (n->inode==inode) return n;
     return NULL;
 }
-struct md_network_interface *md_network_local_interface(struct md_network_namespace *n,uint32_t ip,int up) {
+struct md_network_interface *md_network_local_interface(struct md_network_namespace *n,struct md_ip_address ip,int up) {
     for (unsigned i=0;i<n->count;++i) {
         struct md_network_interface *l=&n->links[i];
-        if ((!up || (l->info.flags&IFF_UP)) && (l->ipv4==ip
-                || (l->kind==MD_LINK_LOOPBACK && (ntohl(ip)>>24)==127))) return l;
+        if ((!up || (l->info.flags&IFF_UP)) && md_network_interface_has(l,ip)) return l;
     }
     return NULL;
 }
@@ -24,7 +23,7 @@ static void interface(struct md_filter_packet *p,const struct md_network_interfa
     char *name=input ? p->input_name : p->output_name;
     memset(name,0,16);
     if (input) p->input=link ? link->info.index : 0;
-    else { p->output=link ? link->info.index : 0; p->masquerade_address=link ? link->ipv4 : 0; }
+    else { p->output=link ? link->info.index : 0; p->masquerade_address=md_network_interface_source(link,p->destination); }
     if (link) memcpy(name,link->info.name,strnlen(link->info.name,15));
 }
 static int requires_mediation(const struct md_network_filter *f,const struct md_filter_chain *c,unsigned depth) {
@@ -68,7 +67,8 @@ static int hook(struct md_network_namespace *n,unsigned which,struct md_filter_p
     /* Native connected IO bypasses both directions. A policy on replies also
      * requires mediation, even when every outbound hook accepts the request. */
     for (size_t i=0;i<f->chain_count;++i)
-        if ((f->chains[i].hook==(int)which || f->chains[i].hook==(int)reverse_hook(which))
+        if (md_filter_chain_applies(f,&f->chains[i],p->destination.family)
+                && (f->chains[i].hook==(int)which || f->chains[i].hook==(int)reverse_hook(which))
                 && requires_mediation(f,&f->chains[i],0)) path->mediated=1;
     int priority=0;
     int error=md_filter_evaluate_transition(f,which,p,NULL,&priority);
@@ -77,7 +77,7 @@ static int hook(struct md_network_namespace *n,unsigned which,struct md_filter_p
     return error;
 }
 static struct md_network_interface *bridge_peer(struct md_network_namespace *n,const struct md_network_interface *bridge,
-        uint32_t destination,struct md_network_namespace **space) {
+        struct md_ip_address destination,struct md_network_namespace **space) {
     for (struct md_network_namespace *s=n->fabric->spaces;s;s=s->next) {
         struct md_network_interface *in=md_network_local_interface(s,destination,1);
         if (!in || in->kind!=MD_LINK_VETH) continue;
@@ -87,38 +87,47 @@ static struct md_network_interface *bridge_peer(struct md_network_namespace *n,c
     return NULL;
 }
 int md_network_flow_route(struct md_network_namespace *from,struct md_filter_packet *p,int external,
-        struct md_network_flow_path *path) {
+        unsigned output,struct md_network_flow_path *path) {
     *path=(struct md_network_flow_path){.generation=from->fabric->policy_generation};
     struct md_network_namespace *n=from;
-    struct md_network_interface *out=md_network_route_find(n,p->destination,NULL);
-    if (!external && !p->source) p->source=out ? out->ipv4 : 0;
+    struct md_network_route_entry origin={0};
+    struct md_network_interface *out=md_network_route_lookup(n,p->destination,output,&origin);
+    if (!external) path->transport=md_network_route_transport(out,&origin);
+    if (!external && md_ip_unspecified(p->source)) p->source=md_network_interface_source(out,p->destination);
     interface(p,out,0);
     p->fib_type=external || md_network_local_interface(n,p->destination,0) ? RTN_LOCAL : RTN_UNICAST;
     path->original=*p;
     int arrived=external;
     unsigned ingress_port=0;
-    if (external) interface(p,md_network_interface_find(n,(ntohl(p->source)>>24)==127 ? 1 : n->default_interface,NULL),1);
+    if (external) interface(p,md_ip_is_loopback(p->source)
+        ? md_network_interface_find(n,1,NULL) : md_network_route_find(n,p->source,NULL),1);
     int error=hook(n,external ? NF_INET_PRE_ROUTING : NF_INET_LOCAL_OUT,p,path);
     while (!error) {
         struct md_network_interface *local=md_network_local_interface(n,p->destination,1);
+        if (local && md_ip_linklocal(p->destination) && n==from && output && local->info.index!=output) local=NULL;
         if (local || (external && n==from && !p->dnat)) {
             interface(p,NULL,0);
             if (!arrived) interface(p,local,1);
             error=hook(n,NF_INET_LOCAL_IN,p,path);
             path->destination=n->inode; break;
         }
-        out=md_network_route_find(n,p->destination,NULL);
+        struct md_network_route_entry route;
+        out=md_network_route_lookup(n,p->destination,n==from ? output : 0,&route);
         if (!out || !(out->info.flags&IFF_UP)) { error=-ENETUNREACH; break; }
+        struct md_network_transport_policy transport=md_network_route_transport(out,&route);
+        if (transport.mtu && (!path->transport.mtu || transport.mtu<path->transport.mtu)) path->transport.mtu=transport.mtu;
         interface(p,out,0);
         if (arrived) {
-            if (!n->ipv4_forward) { error=-ENETUNREACH; break; }
+            if (md_ip_linklocal(p->source) || md_ip_linklocal(p->destination)) { error=-ENETUNREACH; break; }
+            if (!md_network_forwarding(n,p->destination.family,p->input)) { error=-ENETUNREACH; break; }
             error=hook(n,NF_INET_FORWARD,p,path);
         }
         if (!error) error=hook(n,NF_INET_POST_ROUTING,p,path);
         if (error) break;
         if (out->kind==MD_LINK_UPLINK) {
             if (n->mode!=MD_NETWORK_ROUTED) error=-ENETUNREACH;
-            else if ((ntohl(p->destination)>>28)==14 || p->destination==INADDR_BROADCAST) error=-EOPNOTSUPP;
+            else if (md_ip_multicast(p->destination)
+                    || (p->destination.family==AF_INET && p->destination.v4==INADDR_BROADCAST)) error=-EOPNOTSUPP;
             break;
         }
         struct md_network_namespace *next=NULL;
@@ -128,7 +137,7 @@ int md_network_flow_route(struct md_network_namespace *from,struct md_filter_pac
             input=next ? md_network_interface_find(next,out->peer,NULL) : NULL;
             if (input && input->master) input=md_network_interface_find(next,input->master,NULL);
         } else if (out->kind==MD_LINK_BRIDGE) {
-            input=bridge_peer(n,out,p->destination,&next);
+            input=bridge_peer(n,out,md_ip_unspecified(route.gateway) ? p->destination : route.gateway,&next);
             if (input && ingress_port) {
                 struct md_network_interface *in=md_network_interface_find(n,ingress_port,NULL);
                 struct md_network_interface *port=md_network_interface_find(n,input->peer,NULL);
@@ -185,7 +194,7 @@ static int check_path(struct md_network_fabric *f,struct md_network_flow_path *p
             p.source=s->after.destination; p.destination=s->after.source;
             p.source_port=s->after.destination_port; p.destination_port=s->after.source_port;
             rewrite=tuple(&s->packet);
-            uint32_t address=rewrite.source; rewrite.source=rewrite.destination; rewrite.destination=address;
+            struct md_ip_address address=rewrite.source; rewrite.source=rewrite.destination; rewrite.destination=address;
             uint16_t port=rewrite.source_port; rewrite.source_port=rewrite.destination_port; rewrite.destination_port=port;
             interface(&p,md_network_interface_find(n,s->packet.output,NULL),1);
             interface(&p,md_network_interface_find(n,s->packet.input,NULL),0);
@@ -193,7 +202,7 @@ static int check_path(struct md_network_fabric *f,struct md_network_flow_path *p
             rewrite.priority=(hook==NF_INET_PRE_ROUTING || hook==NF_INET_LOCAL_OUT)
                 ? NF_IP_PRI_NAT_DST : NF_IP_PRI_NAT_SRC;
         }
-        if (!override && hook==NF_INET_FORWARD && !n->ipv4_forward) return -ENETUNREACH;
+        if (!override && hook==NF_INET_FORWARD && !md_network_forwarding(n,p.destination.family,p.input)) return -ENETUNREACH;
         p.fib_type=md_network_local_interface(n,p.destination,0) ? RTN_LOCAL : RTN_UNICAST;
         p.source_fib_type=md_network_local_interface(n,p.source,0) ? RTN_LOCAL : RTN_UNICAST;
         rewrite.fib_type=md_network_local_interface(n,rewrite.destination,0) ? RTN_LOCAL : RTN_UNICAST;

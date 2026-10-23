@@ -3,6 +3,7 @@
 #include "network_namespace.h"
 #include "network_message.h"
 #include <linux/netlink.h>
+struct md_network_fabric;
 enum md_network_target_kind { MD_NETWORK_TARGET_NONE, MD_NETWORK_TARGET_FD, MD_NETWORK_TARGET_PID };
 struct md_network_target_reference { enum md_network_target_kind kind; int value; };
 /* Resolves guest descriptors or guest-visible PIDs, never host PID/path input. */
@@ -11,6 +12,11 @@ struct md_network_target {
     int (*resolve)(void *,struct md_network_target_reference,struct md_network_namespace **);
 };
 int md_network_route_query(unsigned);
+/* Caller holds the fabric lock. Address removal and notification are atomic. */
+int md_network_route_disable_ipv6(struct md_network_namespace *,uint64_t,unsigned);
+/* Called by the shared network event loop under the fabric lock. */
+int64_t md_network_route_expire(struct md_network_fabric *,int64_t);
+int md_network_route_privacy(struct md_network_namespace *,uint64_t,unsigned);
 /* Legacy ioctl admission uses the same transaction, policy and notifications. */
 int md_network_route_set_address(struct md_network_namespace *,const struct md_identity *,const char *,const unsigned char [6]);
 int md_network_route_set_flags(struct md_network_namespace *,const struct md_identity *,const char *,unsigned);

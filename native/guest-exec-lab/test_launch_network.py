@@ -9,6 +9,9 @@ import threading
 
 from test_oci_services import Suite, Server
 
+CUSTOM = ['--subnet', '172.23.8.0/24', '--ip', '172.23.8.42', '--gateway', '172.23.8.7',
+          '--subnet', 'fd42:1234::/64', '--ip6', 'fd42:1234::42', '--gateway', 'fd42:1234::7']
+
 
 class NativePeer:
     """Local native routing target; no internet service controls the result."""
@@ -61,11 +64,13 @@ class NativePeer:
 SERVER = r'''
 import select, socket, sys
 token = sys.argv[1].encode()
-tcp = socket.socket()
-tcp.bind(('0.0.0.0', 18080))
+family = socket.AF_INET6 if sys.argv[2:] == ['6'] else socket.AF_INET
+address = '::' if family == socket.AF_INET6 else '0.0.0.0'
+tcp = socket.socket(family)
+tcp.bind((address, 18080))
 tcp.listen()
-udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-udp.bind(('0.0.0.0', 18080))
+udp = socket.socket(family, socket.SOCK_DGRAM)
+udp.bind((address, 18080))
 print('NETWORK_READY', flush=True)
 while True:
     ready, _, _ = select.select([tcp, udp], [], [], 90)
@@ -84,35 +89,38 @@ while True:
 '''
 
 
-def exchange(port, token):
-    with socket.create_connection(('127.0.0.1', port), timeout=5) as connection:
+def exchange(port, token, family=socket.AF_INET):
+    address = '::1' if family == socket.AF_INET6 else '127.0.0.1'
+    with socket.create_connection((address, port), timeout=5) as connection:
         connection.sendall(b'tcp')
         assert connection.recv(64) == token + b'tcp'
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+    with socket.socket(family, socket.SOCK_DGRAM) as connection:
         connection.settimeout(5)
-        connection.sendto(b'udp', ('127.0.0.1', port))
+        connection.sendto(b'udp', (address, port))
         assert connection.recvfrom(64)[0] == token + b'udp'
 
 
-def reserve_pair():
+def reserve_pair(family=socket.AF_INET):
+    address = '::1' if family == socket.AF_INET6 else '127.0.0.1'
     while True:
-        tcp = socket.socket()
-        tcp.bind(('127.0.0.1', 0))
+        tcp = socket.socket(family)
+        tcp.bind((address, 0))
         port = tcp.getsockname()[1]
-        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp = socket.socket(family, socket.SOCK_DGRAM)
         try:
-            udp.bind(('127.0.0.1', port))
+            udp.bind((address, port))
             return port, tcp, udp
         except OSError:
             tcp.close()
             udp.close()
 
 
-def released(port):
+def released(port, family=socket.AF_INET):
+    address = '::1' if family == socket.AF_INET6 else '127.0.0.1'
     for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
-        with socket.socket(socket.AF_INET, kind) as probe:
+        with socket.socket(family, kind) as probe:
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            probe.bind(('127.0.0.1', port))
+            probe.bind((address, port))
 
 
 def cli(suite, store):
@@ -128,6 +136,13 @@ def cli(suite, store):
             command = ([suite.runner, '--store', store, *tail] if kind == 'runner'
                        else suite.image_command(kind, store, *tail))
             assert suite.command(command).strip() == 'CLI_OK', (kind, mode)
+        tail = ['--network', 'bridge', *CUSTOM, '--', '/bin/sh', '-c',
+                'ip -4 address show dev eth0; ip -6 address show dev eth0; ip -4 route; ip -6 route']
+        command = ([suite.runner, '--store', store, *tail] if kind == 'runner'
+                   else suite.image_command(kind, store, *tail))
+        result = suite.command(command)
+        for value in ('172.23.8.42/24', 'fd42:1234::42/64', 'default via 172.23.8.7', 'default via fd42:1234::7'):
+            assert value in result, (kind, value, result)
     assert suite.command(suite.image_command('exec', store, '--', '/bin/cat', '/etc/resolv.conf')) == before
     print('PASS exec/run/login/low-level CLI policies and isolated resolver', flush=True)
 
@@ -170,6 +185,7 @@ print('DNS_VIEW_OK')
     assert command(code="print(open('/etc/resolv.conf').read(), end='')") == before
     for mode in ('host', 'none', 'routed'):
         command('--network', mode, '-p', '18081:80', code="raise AssertionError('must not execute')", expected=1)
+        command('--network', mode, *CUSTOM, code="raise AssertionError('must not execute')", expected=1)
 
     ports = []
     with ExitStack() as cleanup:
@@ -177,6 +193,8 @@ print('DNS_VIEW_OK')
             port, tcp, udp = reserve_pair()
             options = ['--network', 'bridge', '-p', f'127.0.0.1:{port}:18080/tcp',
                        '-p', f'127.0.0.1:{port}:18080/udp']
+            if token == 'second-':
+                options += CUSTOM
             tcp.close(); udp.close()
             server = Server(suite, suite.image_command('exec', store, *options, '--', python, '-u', '-c', SERVER, token))
             cleanup.callback(server.close)
@@ -198,6 +216,22 @@ print('DNS_VIEW_OK')
         released(port)
     print('PASS concurrent bridge TCP/UDP publications, occupied port and normal teardown', flush=True)
 
+    port, tcp, udp = reserve_pair(socket.AF_INET6)
+    tcp.close(); udp.close()
+    options = ['--network', 'bridge', *CUSTOM, '-p', f'[::1]:{port}:18080/tcp', '-p', f'[::1]:{port}:18080/udp']
+    server = Server(suite, suite.image_command('exec', store, *options, '--', python, '-u', '-c', SERVER, 'v6-', '6'))
+    try:
+        server.ready('NETWORK_READY')
+        exchange(port, b'v6-', socket.AF_INET6)
+        with socket.create_connection(('::1', port), timeout=5) as connection:
+            connection.sendall(b'stop')
+            assert connection.recv(64) == b'v6-stop'
+        server.completed()
+    finally:
+        server.close()
+    released(port, socket.AF_INET6)
+    print('PASS custom IPv6 subnet TCP/UDP publication and release', flush=True)
+
     peer = NativePeer()
     try:
         outbound = f'''
@@ -212,6 +246,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
 print('OUTBOUND_OK')
 '''
         command('--network', 'bridge', code=outbound)
+        command('--network', 'bridge', *CUSTOM, code=outbound)
         # Preserve the existing low-level backend, separately from bridge.
         command('--network', 'routed', code=outbound)
     finally:

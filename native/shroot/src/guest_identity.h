@@ -72,6 +72,10 @@ void md_identity_exec(const struct md_identity *, struct md_identity *);
  * exec preparation binds it to the selected image, never to a second pathname. */
 int md_exec_image_admit(int sealed_fd, uint32_t uid, uint32_t gid, mode_t mode,
     const struct md_file_capabilities *, struct md_exec_image **out);
+/* Filesystem-only binfmt C admission; the handler, not a shebang, authorizes
+ * taking credentials from this sealed input instead of the interpreter ELF. */
+int md_exec_image_admit_interpreted(int sealed_fd,uint32_t uid,uint32_t gid,mode_t mode,
+    const struct md_file_capabilities *,struct md_exec_image **out);
 void md_exec_image_release(struct md_exec_image *);
 int md_exec_image_dup(const struct md_exec_image *);
 
