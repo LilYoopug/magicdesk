@@ -123,21 +123,60 @@ static int scope_delete(struct md_inode_store *s, const char *scope) {
     }
     return r;
 }
+static int collection_plan(struct md_inode_store *s) {
+    /* Snapshot ownership once under the writer transaction. Busy descendants
+     * keep their edges; deleting a leaf wakes only its direct parents. */
+    return mdi_sql(s,
+        "CREATE TEMP TABLE view_edges(child TEXT,parent TEXT,PRIMARY KEY(child,parent)) WITHOUT ROWID;"
+        "INSERT OR IGNORE INTO view_edges SELECT c.scope,u.scope FROM inode_views c "
+            "JOIN objects u ON u.object=c.upper WHERE c.scope!=u.scope;"
+        "INSERT OR IGNORE INTO view_edges SELECT c.scope,u.scope FROM inode_views c "
+            "JOIN objects u ON u.object=c.work WHERE c.scope!=u.scope;"
+        "INSERT OR IGNORE INTO view_edges SELECT c.scope,u.scope FROM overlay_links l "
+            "JOIN objects c ON c.object=l.object JOIN objects u ON u.object=l.upper WHERE c.scope!=u.scope;"
+        "CREATE INDEX temp.view_edges_parent ON view_edges(parent);"
+        "CREATE TEMP TABLE view_gc(scope TEXT PRIMARY KEY,blockers INTEGER NOT NULL) WITHOUT ROWID;"
+        "INSERT INTO view_gc SELECT v.scope,(SELECT count(*) FROM view_edges e WHERE e.parent=v.scope) "
+            "FROM inode_views v JOIN objects o ON o.object=v.scope WHERE v.scope>'" MDI_ROOT "';"
+        "CREATE INDEX temp.view_gc_ready ON view_gc(scope) WHERE blockers=0;");
+}
+static int collection_advance(struct md_inode_store *s,const char *scope,int removed) {
+    sqlite3_stmt *q=NULL;
+    int r=mdi_prepare(s,removed
+        ? "UPDATE temp.view_gc SET blockers=blockers-1 WHERE blockers>0 "
+          "AND scope IN (SELECT parent FROM temp.view_edges WHERE child=?1)"
+        : "UPDATE temp.view_gc SET blockers=-1 WHERE scope=?1",&q);
+    if (!r) r=mdi_bind_id(q,1,scope);
+    if (!r) r=mdi_sql_error(mdi_step(s,q));
+    sqlite3_finalize(q); q=NULL;
+    if (!r && removed) {
+        r=mdi_prepare(s,"DELETE FROM temp.view_gc WHERE scope=?1",&q);
+        if (!r) r=mdi_bind_id(q,1,scope);
+        if (!r) r=mdi_sql_error(mdi_step(s,q));
+        sqlite3_finalize(q);
+    }
+    return r;
+}
 static int views(struct md_inode_store *s, int collect) {
     char after[33]=MDI_ROOT;
     int r=0;
+    if (collect) {
+        sqlite3_stmt *q=NULL;
+        r=mdi_prepare(s,"SELECT 1 FROM inode_views WHERE scope>?1 LIMIT 1",&q);
+        if (!r) r=mdi_bind_id(q,1,after);
+        int next=r ? SQLITE_ERROR : mdi_step(s,q);
+        if (!r && next!=SQLITE_ROW && next!=SQLITE_DONE) r=mdi_sql_failure(next);
+        sqlite3_finalize(q);
+        if (r || next==SQLITE_DONE) return r;
+        r=collection_plan(s);
+    }
     while (!r) {
         sqlite3_stmt *q=NULL;
         r=mdi_prepare(s,collect
-            ? "SELECT v.scope FROM inode_views v JOIN objects o ON o.object=v.scope "
-              "WHERE v.scope>?1 AND NOT EXISTS(SELECT 1 FROM inode_views c JOIN objects u "
-              "ON u.object IN(c.upper,c.work) WHERE u.scope=v.scope AND c.scope!=v.scope) "
-              "AND NOT EXISTS(SELECT 1 FROM overlay_links l JOIN objects u ON u.object=l.upper "
-              "JOIN objects c ON c.object=l.object WHERE u.scope=v.scope AND c.scope!=v.scope) "
-              "ORDER BY v.scope LIMIT 1"
+            ? "SELECT scope FROM temp.view_gc WHERE blockers=0 ORDER BY scope LIMIT 1"
             : "SELECT v.scope FROM inode_views v "
               "JOIN objects o ON o.object=v.scope WHERE v.scope>?1 ORDER BY v.scope LIMIT 1",&q);
-        if (!r) r=mdi_bind_id(q,1,after);
+        if (!r && !collect) r=mdi_bind_id(q,1,after);
         int next=r ? SQLITE_ERROR : mdi_step(s,q);
         char scope[33];
         if (!r && next==SQLITE_ROW) {
@@ -153,12 +192,16 @@ static int views(struct md_inode_store *s, int collect) {
         if (flock(lease,LOCK_EX|LOCK_NB)) {
             if (errno!=EWOULDBLOCK) r=-errno;
             else if (!collect) r=-EBUSY;
+            else r=collection_advance(s,scope,0);
         } else if (collect) {
             r=scope_delete(s,scope);
-            /* Removing a child can make an earlier parent collectable. */
-            if (!r) memcpy(after,MDI_ROOT,sizeof(after));
+            if (!r) r=collection_advance(s,scope,1);
         }
         close(lease);
+    }
+    if (collect) {
+        int cleanup=mdi_sql(s,"DROP TABLE IF EXISTS temp.view_gc; DROP TABLE IF EXISTS temp.view_edges;");
+        if (!r) r=cleanup;
     }
     return r;
 }

@@ -118,10 +118,12 @@ static int walk(struct md_inode_store *s,int dirfd,const char *path,
             next=current;
             if (!r && last && attributes) r=mdi_stat(s,&next,attributes);
         } else r=mdi_path_step(s,&current,name,cursor,resolve,&next,last ? attributes : NULL,last ? pin : NULL);
-        if (r == -ENOENT && last && missing && !special) {
+        /* Preserve the first unresolved component for dependency-driven import.
+         * Ordinary callers still accept only an absent terminal component. */
+        if (r == -ENOENT && !special) {
             out->parent = current; strcpy(out->name, name);
             out->trailing = slash;
-            return 0;
+            return last && missing ? 0 : r;
         }
         if (r) return r;
         if (next.kind == S_IFLNK && (!last || follow == MDI_FOLLOW

@@ -3,6 +3,7 @@
 #include "inode_internal.h"
 #include "fs_operation.h"
 #include "linux_abi.h"
+#include "test_sql_plan.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -1155,6 +1156,20 @@ static void foreign_key_indexes(sqlite3 *db) {
     sqlite3_finalize(keys);
     puts("PASS every foreign-key child lookup uses an index, including view collection");
 }
+static void lookup_indexes(struct md_inode_store *s) {
+    for (unsigned i=0;i<MDI_QUERY_COUNT;++i) {
+        sqlite3_stmt *q=NULL;
+        CHECK(!mdi_query_acquire(s,i,&q));
+        const char *sql=sqlite3_sql(q);
+        /* The reserve takes the first row of its primary-key index once;
+         * other retained lookups must seek rather than scan or sort. */
+        if (i!=MDI_RESERVE_FIRST && !strncmp(sql,"SELECT ",7)) test_sql_indexed_lookup(s->db,sql);
+        CHECK(!mdi_query_release(q,0));
+    }
+    test_sql_indexed_lookup(s->db,"SELECT s.address FROM sockets s JOIN inode_channels c ON c.object=s.object "
+        "WHERE c.channel=?1 LIMIT 1");
+    puts("PASS retained filesystem and reverse socket lookups use indexed seeks without sorting");
+}
 static void counter_audit(void) {
     struct md_inode_store *s = store("counter-audit", 1);
     int fd = md_inode_create(s, MD_INODE_ROOT, "file", 0600); CHECK(fd >= 0); close(fd);
@@ -1165,6 +1180,7 @@ static void counter_audit(void) {
     sqlite3 *db;
     CHECK(sqlite3_open(database, &db) == SQLITE_OK);
     foreign_key_indexes(db);
+    lookup_indexes(s);
     CHECK(sqlite3_exec(db, "UPDATE objects SET name_count=0 WHERE kind=32768", NULL, NULL, NULL) == SQLITE_OK);
     CHECK(md_inode_audit(s, &audit) == -EIO);
     CHECK(sqlite3_exec(db, "UPDATE objects SET name_count=1 WHERE kind=32768;"
@@ -1176,9 +1192,10 @@ static void counter_audit(void) {
     md_inode_store_close(s);
     CHECK(sqlite3_exec(db,"DROP INDEX objects_parent; DROP INDEX backings_object;"
         "DROP INDEX inode_views_upper; DROP INDEX inode_views_work; DROP INDEX overlay_origins_object;"
-        "DROP INDEX overlay_links_upper; DROP INDEX file_paths_parent",NULL,NULL,NULL)==SQLITE_OK);
+        "DROP INDEX overlay_links_upper; DROP INDEX file_paths_parent; DROP INDEX inode_channels_channel",NULL,NULL,NULL)==SQLITE_OK);
     s=store("counter-audit",0);
     foreign_key_indexes(db);
+    lookup_indexes(s);
     CHECK(!md_inode_audit(s,&audit));
     md_inode_store_close(s);
     CHECK(sqlite3_exec(db, "PRAGMA user_version=4", NULL, NULL, NULL) == SQLITE_OK);

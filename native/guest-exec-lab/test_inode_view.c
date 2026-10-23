@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/xattr.h>
 #include <sys/socket.h>
@@ -29,6 +30,36 @@ static void collect(struct md_inode_store *s) {
     assert(!mdi_begin(s,1));
     assert(!mdi_views_collect(s));
     assert(!mdi_commit(s,0));
+}
+static int count_collection_work(void *value) { ++*(unsigned long long *)value; return 0; }
+static unsigned long long dependent_views(const char *base,unsigned count) {
+    char path[PATH_MAX]; snprintf(path,sizeof(path),"%s/dependencies-%u",base,count);
+    struct md_inode_store *s=NULL; assert(!md_inode_store_open(path,1,&s));
+    struct md_inode_store **children=calloc(count,sizeof(*children)); assert(children);
+    for (unsigned i=0;i<count;++i) assert(!md_inode_view_create(s,MD_FILESYSTEM_OVERLAY,&children[i]));
+    /* Build the ownership graph directly: this measures collection, not copy-up. */
+    assert(!mdi_begin(s,1));
+    for (unsigned i=1;i<count;++i) {
+        char *sql=i%2
+            ? sqlite3_mprintf("UPDATE inode_views SET upper='%q',work='%q' WHERE scope='%q'",
+                children[i-1]->lifetime->scope,children[i-1]->lifetime->scope,children[i]->lifetime->scope)
+            : sqlite3_mprintf("INSERT INTO overlay_links VALUES('%q','%q',0)",
+                children[i]->lifetime->scope,children[i-1]->lifetime->scope);
+        assert(sql && !mdi_sql(s,sql)); sqlite3_free(sql);
+    }
+    assert(!mdi_commit(s,0));
+    for (unsigned i=0;i+1<count;++i) md_inode_store_close(children[i]);
+    unsigned long long work=0;
+    sqlite3_progress_handler(s->db,100,count_collection_work,&work);
+    collect(s);
+    sqlite3_progress_handler(s->db,0,NULL,NULL);
+    assert(views(s)==count+1); /* A leased descendant retains every ancestor. */
+    md_inode_store_close(children[count-1]); free(children);
+    sqlite3_progress_handler(s->db,100,count_collection_work,&work);
+    collect(s);
+    sqlite3_progress_handler(s->db,0,NULL,NULL);
+    assert(views(s)==1);
+    md_inode_store_close(s); return work*100;
 }
 static void text(int fd, const char *expected) {
     char data[32]; ssize_t n=pread(fd,data,sizeof(data),0);
@@ -489,6 +520,9 @@ static void channel_views(struct md_inode_store *s,const char *base) {
     puts("PASS overlay channels: foreign FIFO and socket identity, upper links, new channels and remount");
 }
 void test_inode_view(const char *base) {
+    unsigned long long small=dependent_views(base,32),large=dependent_views(base,128);
+    printf("view collection SQL work: 32=%llu 128=%llu steps\n",small,large); fflush(stdout);
+    assert(large<small*6);
     char path[PATH_MAX]; snprintf(path,sizeof(path),"%s/view-store",base);
     struct md_inode_store *s=NULL,*view=NULL;
     assert(!md_inode_store_open(path,1,&s));

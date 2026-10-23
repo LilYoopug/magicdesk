@@ -67,6 +67,9 @@ capabilities do not change, and the host kernel need not implement SysV IPC.
 ## Ownership
 
 `ipc/v2/shm/segments.db` stores namespace-scoped keys, IDs, canonical owners and attachment references.
+Attachment references are indexed by segment as well as by owner/address space,
+so a segment's reference count does not scan unrelated mappings. Admission
+prepares this rebuildable index; IPC_STAT does not modify the schema.
 Mapped files carry data. Transactions hold a native file lock only while
 updating metadata, not across guest execution or waits. Each supervisor holds
 an owner lease; abandoned references are reaped using nonblocking file locks,

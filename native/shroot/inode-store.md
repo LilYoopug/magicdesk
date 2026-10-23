@@ -213,6 +213,11 @@ Upper/work reservations share the metadata transaction and retained projection
 lease. A dependent view retains its referenced parent metadata; collection
 retires children before parents. Reconnection and object-ID access preserve the
 selected scope, including after sender closure and queued SCM transfer.
+Collection snapshots upper/work and copy-up dependencies once per writer
+transaction. An indexed leaf queue releases only the deleted child's direct
+parents; a busy leaf keeps its dependencies and is not repeatedly retried.
+The temporary graph is discarded before commit. Ordinary file operations do not
+build it. Scaling tests cover long mixed dependency chains and retained children.
 
 Overlay whiteout/opaque attributes are transactional metadata, including explicit
 tombstones that mask native attributes. Ordinary xattr operations and logical
@@ -336,6 +341,10 @@ unlinked native FD or a sealed store that cannot promote retains descriptor-tran
 Sealing, backup and
 overlay admission materialize the selected namespace before existing SQL-based
 snapshot/COW logic runs. Moving into a physical-permission directory promotes too.
+Whole-scope and subtree materialization collect directory identities once, close
+the SQL cursor, then promote leaves. Repeating a filtered, sorted `LIMIT 1`
+query per directory can rescan the scope and must not replace this snapshot.
+No cursor crosses the promotion recovery journal's transaction boundary.
 The source is not copied and no kernel hardlink permission is needed. Open native
 FDs resolve through their actual proc alias, including deletion; after promotion
 they resolve through the catalogue's device/inode association. Landlock file rules

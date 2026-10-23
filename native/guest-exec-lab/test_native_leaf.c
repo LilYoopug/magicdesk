@@ -763,6 +763,33 @@ static void contents(struct md_inode_store *s,const char *path,const char *text)
     char data[32]; assert(read(fd,data,sizeof(data))==(ssize_t)strlen(text) && !memcmp(data,text,strlen(text)));
     close(fd);
 }
+static int count_sql_work(void *data) {
+    ++*(unsigned *)data;
+    return 0;
+}
+static void materialization_cost(const char *path) {
+    struct md_inode_store *s; assert(!md_inode_store_open(path,1,&s));
+    struct md_identity ids=md_identity_new(0,0); s->identity=&ids;
+    unsigned work[2]={0},created=0;
+    for (unsigned pass=0;pass<2;++pass) {
+        unsigned count=pass ? 128 : 32;
+        for (;created<count;++created) {
+            char name[32]; snprintf(name,sizeof(name),"directory-%u",created);
+            assert(!md_inode_mkdir(s,-1,name,0755));
+        }
+        assert(!mdi_begin(s,1));
+        sqlite3_progress_handler(s->db,100,count_sql_work,&work[pass]);
+        assert(!mdi_leaf_materialize(s));
+        sqlite3_progress_handler(s->db,0,NULL,NULL);
+        assert(!mdi_commit(s,0));
+    }
+    /* Count VM work, not elapsed time: four times the directories must not
+     * cause a full scope scan and sort for each next directory. */
+    printf("materialization SQL work: 32=%u00 128=%u00 steps\n",work[0],work[1]);
+    assert(work[0] && work[1]<=work[0]*6);
+    md_inode_store_close(s); md_identity_release(&ids);
+    puts("PASS directory materialization SQL work grows linearly");
+}
 static void sealing(const char *path) {
     struct md_inode_store *s,*copy; assert(!md_inode_store_open(path,1,&s));
     struct md_identity ids=md_identity_new(0,0); s->identity=&ids;
@@ -912,6 +939,7 @@ int main(int argc,char **argv) {
     char store[PATH_MAX]; snprintf(store,sizeof(store),"%s/store",argv[1]); catalogue(store);
     snprintf(store,sizeof(store),"%s/hybrid",argv[1]); hybrid(store);
     snprintf(store,sizeof(store),"%s/births",argv[1]); catalogue_births(store);
+    snprintf(store,sizeof(store),"%s/materialization",argv[1]); materialization_cost(store);
     snprintf(store,sizeof(store),"%s/sealed",argv[1]); sealing(store);
     snprintf(store,sizeof(store),"%s/overlay",argv[1]); overlays(store);
     return 0;

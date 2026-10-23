@@ -2,6 +2,7 @@
 #include "sysv_ipc_internal.h"
 #include "sysv_shm.h"
 #include "private_tree.h"
+#include "test_sql_plan.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -36,6 +37,18 @@ static unsigned descriptors(void) {
     unsigned count=0;
     while (readdir(d)) ++count;
     closedir(d); return count;
+}
+static void ipc_lookup_indexes(sqlite3 *db) {
+    const char *queries[]={
+        "SELECT seq,type,data FROM messages WHERE object=?1 ORDER BY seq LIMIT 1",
+        "SELECT seq,type,data FROM messages WHERE object=?1 AND type<=?2 ORDER BY type,seq LIMIT 1",
+        "SELECT seq,type,data FROM messages WHERE object=?1 AND type!=?2 ORDER BY seq LIMIT 1",
+        "SELECT seq,type,data FROM messages WHERE object=?1 AND type=?2 ORDER BY seq LIMIT 1",
+        "SELECT 1 FROM undo WHERE object=?1",
+        "SELECT count(*) FROM waiters WHERE object=?1 AND n=?2 AND zero=?3"
+    };
+    for (unsigned i=0;i<sizeof(queries)/sizeof(*queries);++i) test_sql_indexed_lookup(db,queries[i]);
+    puts("PASS IPC queue ordering and semaphore cleanup use indexed lookups");
 }
 static void *retain_shm(void *authority) {
     struct md_shm *s=authority;
@@ -131,6 +144,7 @@ void test_ipc_database(void) {
     struct md_ipc *ipc=NULL,*rejected=NULL;
     fixed_owner=1;
     assert(!md_ipc_open(root,0,NULL,&ipc));
+    ipc_lookup_indexes(ipc->database.handle);
     assert(owners(ipc->database.handle)==1);
     assert(md_ipc_open(root,0,NULL,&rejected)==-EEXIST && !rejected);
     assert(owners(ipc->database.handle)==1);
@@ -142,6 +156,8 @@ void test_ipc_database(void) {
     assert(!md_shm_open(root,0,NULL,&shm));
     char path[256]; snprintf(path,sizeof(path),"%s/ipc/v2/shm/segments.db",root);
     sqlite3 *db=NULL; assert(sqlite3_open(path,&db)==SQLITE_OK);
+    test_sql_indexed_lookup(db,"SELECT info,(SELECT coalesce(sum(n),0) FROM refs WHERE segment=?1) "
+        "FROM segments WHERE id=?1 AND namespace=?2");
     assert(owners(db)==1);
     assert(md_shm_open(root,0,NULL,&rejected_shm)==-EEXIST && !rejected_shm);
     assert(owners(db)==1);

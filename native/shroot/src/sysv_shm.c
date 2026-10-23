@@ -154,7 +154,8 @@ int md_shm_open(const char *store, uint64_t namespace_id, struct md_user_namespa
         "CREATE UNIQUE INDEX IF NOT EXISTS segment_key ON segments(namespace,key) WHERE key!=0 AND removed=0;"
         "CREATE TABLE IF NOT EXISTS owners(owner INTEGER PRIMARY KEY,namespace INTEGER NOT NULL);"
         "CREATE TABLE IF NOT EXISTS garbage(id INTEGER PRIMARY KEY);"
-        "CREATE TABLE IF NOT EXISTS refs(owner INTEGER,space INTEGER,segment INTEGER,n INTEGER,PRIMARY KEY(owner,space,segment));");
+        "CREATE TABLE IF NOT EXISTS refs(owner INTEGER,space INTEGER,segment INTEGER,n INTEGER,PRIMARY KEY(owner,space,segment));"
+        "CREATE INDEX IF NOT EXISTS refs_segment ON refs(segment);");
     if (!r) r = exec_sql(s,"BEGIN IMMEDIATE");
     if (!r) r=md_ipc_database_boot(&s->database,
         "DELETE FROM refs; DELETE FROM owners; UPDATE segments SET removed=1;");

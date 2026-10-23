@@ -383,12 +383,10 @@ int mdi_leaf_materialize_directory(struct md_inode_store *s,const struct mdi_nod
     struct materialize m={s,parent};
     return parent->attached ? mdi_leaf_list(s,parent,promote_name,&m) : 0;
 }
-int mdi_leaf_materialize_tree(struct md_inode_store *s,const struct mdi_node *root) {
+static int materialize_directories(struct md_inode_store *s,const char *sql,const char *id) {
     sqlite3_stmt *q=NULL;
-    int r=mdi_prepare(s,"WITH RECURSIVE dirs(object) AS (SELECT ?1 UNION "
-        "SELECT n.object FROM names n JOIN dirs d ON n.parent=d.object "
-        "JOIN objects o ON o.object=n.object WHERE o.kind=16384) SELECT object FROM dirs",&q);
-    if (!r) r=mdi_bind_id(q,1,root->id);
+    int r=mdi_prepare(s,sql,&q);
+    if (!r) r=mdi_bind_id(q,1,id);
     char (*ids)[33]=NULL;
     size_t count=0,capacity=0;
     while (!r) {
@@ -415,25 +413,12 @@ int mdi_leaf_materialize_tree(struct md_inode_store *s,const struct mdi_node *ro
     }
     free(ids); return r;
 }
+int mdi_leaf_materialize_tree(struct md_inode_store *s,const struct mdi_node *root) {
+    return materialize_directories(s,"WITH RECURSIVE dirs(object) AS (SELECT ?1 UNION "
+        "SELECT n.object FROM names n JOIN dirs d ON n.parent=d.object "
+        "JOIN objects o ON o.object=n.object WHERE o.kind=16384) SELECT object FROM dirs",root->id);
+}
 int mdi_leaf_materialize(struct md_inode_store *s) {
-    char after[33]="";
-    int r=0;
-    while (!r) {
-        sqlite3_stmt *q=NULL;
-        r=mdi_prepare(s,"SELECT object FROM objects WHERE kind=16384 AND scope=?1 AND object>?2 ORDER BY object LIMIT 1",&q);
-        if (!r) r=mdi_bind_id(q,1,s->lifetime->scope);
-        if (!r) r=mdi_bind_id(q,2,after);
-        int found=0;
-        if (!r) {
-            int next=mdi_step(s,q);
-            if (next==SQLITE_ROW && sqlite3_column_bytes(q,0)==32) { memcpy(after,sqlite3_column_text(q,0),33); found=1; }
-            else if (next!=SQLITE_DONE) r=-EIO;
-        }
-        sqlite3_finalize(q);
-        if (r || !found) break;
-        struct mdi_node parent;
-        r=mdi_node(s,after,&parent);
-        if (!r) r=mdi_leaf_materialize_directory(s,&parent);
-    }
-    return r;
+    return materialize_directories(s,
+        "SELECT object FROM objects WHERE kind=16384 AND scope=?1",s->lifetime->scope);
 }

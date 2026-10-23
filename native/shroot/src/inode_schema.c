@@ -62,6 +62,7 @@ int mdi_schema_indexes(struct md_inode_store *s) {
         "CREATE INDEX IF NOT EXISTS overlay_links_upper ON overlay_links(upper);"
         "CREATE INDEX IF NOT EXISTS file_paths_parent ON file_paths(parent);"
         "CREATE INDEX IF NOT EXISTS native_publication_parent ON native_publication(parent);"
+        "CREATE INDEX IF NOT EXISTS inode_channels_channel ON inode_channels(channel);"
         "CREATE INDEX IF NOT EXISTS events_object ON events(object,sequence);"
         "COMMIT;");
     if (r) mdi_sql(s,"ROLLBACK");

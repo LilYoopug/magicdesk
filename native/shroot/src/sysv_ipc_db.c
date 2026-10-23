@@ -120,9 +120,12 @@ int md_ipc_open(const char *store, uint64_t namespace_id, struct md_user_namespa
         "CREATE TABLE IF NOT EXISTS sems(object INTEGER REFERENCES objects ON DELETE CASCADE,n INTEGER,value INTEGER,pid INTEGER,PRIMARY KEY(object,n));"
         "CREATE TABLE IF NOT EXISTS messages(seq INTEGER PRIMARY KEY AUTOINCREMENT,object INTEGER REFERENCES objects ON DELETE CASCADE,type INTEGER,data BLOB);"
         "CREATE INDEX IF NOT EXISTS message_order ON messages(object,type,seq);"
+        "CREATE INDEX IF NOT EXISTS message_fifo ON messages(object,seq);"
         "CREATE TABLE IF NOT EXISTS owners(id INTEGER PRIMARY KEY,namespace INTEGER NOT NULL);"
         "CREATE TABLE IF NOT EXISTS undo(owner INTEGER REFERENCES owners ON DELETE CASCADE,space INTEGER,object INTEGER REFERENCES objects ON DELETE CASCADE,n INTEGER,delta INTEGER,pid INTEGER,PRIMARY KEY(owner,space,object,n));"
-        "CREATE TABLE IF NOT EXISTS waiters(owner INTEGER REFERENCES owners ON DELETE CASCADE,tid INTEGER,object INTEGER REFERENCES objects ON DELETE CASCADE,n INTEGER,zero INTEGER,PRIMARY KEY(owner,tid));");
+        "CREATE TABLE IF NOT EXISTS waiters(owner INTEGER REFERENCES owners ON DELETE CASCADE,tid INTEGER,object INTEGER REFERENCES objects ON DELETE CASCADE,n INTEGER,zero INTEGER,PRIMARY KEY(owner,tid));"
+        "CREATE INDEX IF NOT EXISTS undo_object ON undo(object);"
+        "CREATE INDEX IF NOT EXISTS waiters_object ON waiters(object,n,zero);");
     sqlite3_stmt *q=NULL;
     if (!r) r=md_ipc_exec(s,"BEGIN IMMEDIATE");
     if (!r) r=md_ipc_database_boot(&s->database,"DELETE FROM objects; DELETE FROM owners;");

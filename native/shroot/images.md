@@ -130,8 +130,12 @@ size and diff_id validation remains mandatory.
 Archive entries never go through a host disk extractor. Absolute entry names and
 `..` components are rejected. Whiteouts and opaque directories remove only lower
 names before that layer's entries are applied. Forward hardlinks are resolved
-without substituting copies or symlinks; unresolved/cyclic links fail. Directory
-metadata is accumulated across layers and applied before publication, so final
+without substituting copies or symlinks; unresolved/cyclic links fail. Resolution
+uses an indexed dependency queue, including a missing intermediate symlink alias,
+instead of repeatedly scanning the entire link list. Queue priority preserves
+the original pass/entry order of metadata application without recursion.
+`test_image_layer` checks SQL-work scaling, deep chains and rollback on failure.
+Directory metadata is accumulated across layers and applied before publication, so final
 restrictive modes do not block later-layer extraction into the private staging
 tree. Import runs no image scripts.
 

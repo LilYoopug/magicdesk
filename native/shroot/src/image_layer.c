@@ -165,7 +165,7 @@ static int entry_file(struct md_inode_store *s, struct archive *ar, struct archi
         char target[PATH_MAX];
         r = path_name(link, target);
         sqlite3_stmt *q = NULL;
-        if (!r) r = mdi_prepare(s, "INSERT INTO temp.layer_links VALUES(?1,?2,?3,?4)", &q);
+        if (!r) r = mdi_prepare(s, "INSERT INTO temp.layer_links(parent,name,target,capability) VALUES(?1,?2,?3,?4)", &q);
         if (!r) r = mdi_bind_id(q, 1, loc.parent.id);
         if (!r) r = mdi_bind_name(q, 2, loc.name);
         if (!r) r = mdi_sql_error(sqlite3_bind_text(q, 3, target, -1, SQLITE_TRANSIENT));
@@ -243,37 +243,62 @@ static int entry_file(struct md_inode_store *s, struct archive *ar, struct archi
     return r;
 }
 static int links(struct md_inode_store *s) {
-    int r = 0;
-    for (;;) {
-        sqlite3_stmt *q = NULL;
-        r = mdi_prepare(s, "SELECT rowid,parent,name,target,capability FROM temp.layer_links", &q);
-        unsigned remaining = 0, changed = 0;
-        while (!r) {
-            int rc = mdi_step(s, q);
-            if (rc == SQLITE_DONE) break;
-            if (rc != SQLITE_ROW) { r = mdi_sql_failure(rc); break; }
-            ++remaining;
-            struct mdi_location target;
-            int found = mdi_walk(s, MD_INODE_ROOT, (const char *)sqlite3_column_text(q, 3), MDI_NOFOLLOW, 0, &target);
-            if (found == -ENOENT) continue;
-            if (found) { r = found; break; }
-            if (target.node.kind == S_IFDIR) { r = -EPERM; break; }
-            int size = sqlite3_column_bytes(q, 2);
-            char name[NAME_MAX+1];
-            if (size < 1 || size > NAME_MAX) { r = -EIO; break; }
-            memcpy(name, sqlite3_column_blob(q, 2), (size_t)size); name[size] = 0;
-            r = mdi_add_name(s, (const char *)sqlite3_column_text(q, 1), name, target.node.id);
+    int r=0;
+    /* Keep the old pass/entry ordering (including capability writes), but wake
+     * only links waiting for a newly published name. No recursion or rescans. */
+    while (!r) {
+        sqlite3_stmt *q=NULL;
+        r=mdi_prepare(s,"SELECT rowid,parent,name,target,capability,ready FROM temp.layer_links "
+            "WHERE ready IS NOT NULL ORDER BY ready,rowid LIMIT 1",&q);
+        int rc=r ? SQLITE_ERROR : mdi_step(s,q);
+        if (!r && rc!=SQLITE_ROW && rc!=SQLITE_DONE) r=mdi_sql_failure(rc);
+        if (r || rc==SQLITE_DONE) { sqlite3_finalize(q); break; }
+        sqlite3_int64 id=sqlite3_column_int64(q,0),round=sqlite3_column_int64(q,5);
+        char parent[33],name[NAME_MAX+1];
+        int size=sqlite3_column_bytes(q,2);
+        if (sqlite3_column_bytes(q,1)!=32 || size<1 || size>NAME_MAX) r=-EIO;
+        else {
+            memcpy(parent,sqlite3_column_text(q,1),32); parent[32]=0;
+            memcpy(name,sqlite3_column_blob(q,2),(size_t)size); name[size]=0;
+        }
+        struct mdi_location target={0};
+        int found=r ? r : mdi_walk(s,MD_INODE_ROOT,(const char *)sqlite3_column_text(q,3),MDI_NOFOLLOW,0,&target);
+        if (!r && !found && target.node.kind==S_IFDIR) r=-EPERM;
+        if (!r && !found) {
+            r=mdi_add_name(s,parent,name,target.node.id);
             if (!r && sqlite3_column_type(q,4)!=SQLITE_NULL)
                 r=mdi_file_capability(s,&target.node,sqlite3_column_blob(q,4),sqlite3_column_bytes(q,4));
-            sqlite3_stmt *del = NULL;
-            if (!r) r = mdi_prepare(s, "DELETE FROM temp.layer_links WHERE rowid=?1", &del);
-            if (!r) r = mdi_sql_error(sqlite3_bind_int64(del, 1, sqlite3_column_int64(q, 0)));
-            if (!r) r = mdi_sql_error(mdi_step(s, del));
-            sqlite3_finalize(del); ++changed;
         }
+        sqlite3_finalize(q); q=NULL;
+        if (!r && !found) {
+            r=mdi_prepare(s,"UPDATE temp.layer_links SET ready=?1+(rowid<=?2),waiting_parent=NULL,waiting_name=NULL "
+                "WHERE waiting_parent=?3 AND waiting_name=?4",&q);
+            if (!r) r=mdi_sql_error(sqlite3_bind_int64(q,1,round));
+            if (!r) r=mdi_sql_error(sqlite3_bind_int64(q,2,id));
+            if (!r) r=mdi_bind_id(q,3,parent);
+            if (!r) r=mdi_bind_name(q,4,name);
+            if (!r) r=mdi_sql_error(mdi_step(s,q));
+            sqlite3_finalize(q); q=NULL;
+        }
+        if (!r && !found) {
+            r=mdi_prepare(s,"DELETE FROM temp.layer_links WHERE rowid=?1",&q);
+            if (!r) r=mdi_sql_error(sqlite3_bind_int64(q,1,id));
+            if (!r) r=mdi_sql_error(mdi_step(s,q));
+        } else if (!r && found==-ENOENT && *target.parent.id) {
+            r=mdi_prepare(s,"UPDATE temp.layer_links SET ready=NULL,waiting_parent=?2,waiting_name=?3 WHERE rowid=?1",&q);
+            if (!r) r=mdi_sql_error(sqlite3_bind_int64(q,1,id));
+            if (!r) r=mdi_bind_id(q,2,target.parent.id);
+            if (!r) r=mdi_bind_name(q,3,target.name);
+            if (!r) r=mdi_sql_error(mdi_step(s,q));
+        } else if (!r) r=found;
         sqlite3_finalize(q);
-        if (r || !remaining) break;
-        if (!changed) { r = -ENOENT; break; }
+    }
+    if (!r) {
+        sqlite3_stmt *q=NULL;
+        r=mdi_prepare(s,"SELECT 1 FROM temp.layer_links LIMIT 1",&q);
+        int rc=r ? SQLITE_ERROR : mdi_step(s,q);
+        if (!r) r=rc==SQLITE_DONE ? 0 : rc==SQLITE_ROW ? -ENOENT : mdi_sql_failure(rc);
+        sqlite3_finalize(q);
     }
     return r;
 }
@@ -321,7 +346,9 @@ static int read_tree(struct md_inode_store *s, int fd, uint64_t *bytes, uint64_t
     if (objects >= 0) r = mdi_source_register(s, objects, &source);
     if (!r && source) r = mdi_sources_open(s);
     if (!r) r = mdi_sql(s, "CREATE TEMP TABLE IF NOT EXISTS image_metadata(object TEXT PRIMARY KEY,mode INTEGER,seconds INTEGER,nanos INTEGER,uid INTEGER,gid INTEGER,atime INTEGER,atime_nanos INTEGER);"
-        "CREATE TEMP TABLE layer_links(parent TEXT,name BLOB,target TEXT,capability BLOB,UNIQUE(parent,name));"
+        "CREATE TEMP TABLE layer_links(parent TEXT,name BLOB,target TEXT,capability BLOB,ready INTEGER DEFAULT 0,waiting_parent TEXT,waiting_name BLOB,UNIQUE(parent,name));"
+        "CREATE INDEX temp.layer_links_ready ON layer_links(ready) WHERE ready IS NOT NULL;"
+        "CREATE INDEX temp.layer_links_waiting ON layer_links(waiting_parent,waiting_name) WHERE waiting_parent IS NOT NULL;"
         "CREATE TEMP TABLE layer_acls(path TEXT,type INTEGER,value BLOB,PRIMARY KEY(path,type));"
         "CREATE TEMP TABLE layer_paths(path TEXT PRIMARY KEY);");
     /* OCI whiteouts only remove lower entries, regardless of tar ordering. */

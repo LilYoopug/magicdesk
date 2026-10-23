@@ -448,7 +448,7 @@ def main():
         if args.case == "stores":
             names = ("test_mounts", "test_inodes", "test_snapshot", "test_native_mounts", "test_durability")
         if args.case in ("all", "stores"):
-            names += ("test_schema", "test_publication", "test_native_leaf", "image")
+            names += ("test_schema", "test_publication", "test_native_leaf", "test_image_layer", "image")
         if args.case == "durability":
             names = ("bootstrap", "supervisor", "run", "service")
         if args.case in ("all", "durability"):
@@ -482,6 +482,8 @@ def main():
             if args.case == "supervisor-state":
                 return
         if args.case in ("all", "stores"):
+            check("archive hardlink dependencies", root + "/libmagicdesk_guest_test_image_layer.so "
+                  + root + "/image-layer-unit", "PASS image hardlinks: linear dependency resolution")
             check("storage schema", root + "/libmagicdesk_guest_test_schema.so " + root + "/schema-unit",
                   "PASS concurrent preparation fails busy")
             inspection = check("all-scope source inspection", root + "/libmagicdesk_guest_image.so inspect "

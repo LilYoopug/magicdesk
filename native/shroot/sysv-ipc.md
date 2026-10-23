@@ -42,6 +42,10 @@ or execution.
 semaphore values, undo adjustments and waiter registrations. A native file lock
 serializes transactions across independent launches; SQLite uses WAL. This is
 transient IPC state, separate from OCI layers, filesystem names and snapshots.
+FIFO message selection and typed selection have separate ordered indexes.
+Semaphore waiter and undo lookups are indexed by object as well as by owner;
+removing one set must not scan all other sets' bookkeeping. These rebuildable
+indexes are prepared during IPC admission, never in the per-call path.
 The initial namespace shares objects across launches within the same store and
 boot. CLONE_NEWIPC creates an empty namespace; object IDs from another namespace
 fail lookup even when its key is reused locally. Unshare releases the previous
@@ -102,6 +106,8 @@ The resource fixture also verifies failed admission, owner-ID collisions,
 malformed boot metadata and exact descriptor cleanup. Database tests cover
 independent concurrent connections, retained-directory rename, WAL/rollback
 locking, rollback visibility and symlink rejection.
+Query-plan checks reject full-table scans and temporary sorting in queue
+selection and semaphore bookkeeping lookups.
 
 `test_sysv_apps.py` exercises stock fakeroot-sysv, Symfony SemaphoreStore,
 PHP SysV message queues and Apache prefork with `Mutex sysvsem default` and two
