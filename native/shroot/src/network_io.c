@@ -48,6 +48,13 @@ int md_network_io_progress(struct md_network_io *n,struct md_ipc_io *io,struct m
         struct md_ipc_io_message *message,long *result) {
     int fd=(*fds)->fds[0];
     long nr=n->number;
+    if (nr==SYS_setsockopt || nr==SYS_getsockopt) {
+        if (n->args[1]!=SOL_SOCKET || n->args[2]!=SO_BINDTODEVICE) *result=-ENOPROTOOPT;
+        else if (nr==SYS_setsockopt)
+            *result=md_network_endpoint_device_set(n->endpoint,n->identity,(const char *)&message->address);
+        else *result=md_network_endpoint_device_get(n->endpoint,(char *)&message->address,&message->address_size);
+        return 0;
+    }
     if (nr==SYS_bind) {
         *result=md_network_endpoint_bind(n->endpoint,fd,n->identity,(void *)&message->address,message->address_size);
         return 0;

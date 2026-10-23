@@ -87,7 +87,7 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
     int user_control=ref.kind==MD_PROC_MAX_USER_NAMESPACES;
     int catalogue=ref.kind==MD_PROC_DEVICES;
     if (q->operation==MD_FS_STATFS) {
-        md_fs_statfs_result(fd,md_mount_policy_flags(&mount->policy),NULL,out,output);
+        md_fs_statfs_result(fd,md_view_policy_flags(mount),NULL,out,output);
         if (!out->error) ((struct md_fs_statfs *)output->data)->type=PROC_SUPER_MAGIC;
         return 1;
     }
@@ -203,7 +203,7 @@ int md_fs_proc_operation(struct md_filesystem *fs,struct md_mount_namespace *vie
         r=file.ops->access(file.context,&actor,q->mode); break;
     }
     case MD_FS_STATFS:
-        md_fs_statfs_result(fd,md_mount_policy_flags(&mount->policy),NULL,out,output);
+        md_fs_statfs_result(fd,md_view_policy_flags(mount),NULL,out,output);
         break;
     case MD_FS_OPEN: case MD_FS_REOPEN: {
         if (q->flags&O_DIRECTORY) { r=-ENOTDIR; break; }

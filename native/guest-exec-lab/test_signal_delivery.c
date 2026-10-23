@@ -59,7 +59,8 @@ static void realtime_order(int retain_again) {
     while (waitpid(pid,&status,0)==pid && WIFSTOPPED(status)) {
         assert(WSTOPSIG(status)==SIGRTMAX && ++stops<=4);
         int deliver=SIGRTMAX;
-        assert(!md_signal_delivery_event(&q,pid,SIGRTMAX,&deliver));
+        int expected=q.realtime ? MD_SIGNAL_RESTORED : MD_SIGNAL_NEW;
+        assert(md_signal_delivery_event(&q,pid,SIGRTMAX,&deliver)==expected);
         if (retain_again && stops==1) {
             assert(!ptrace(PTRACE_GETSIGINFO,pid,NULL,&info) && info.si_value.sival_int==1);
             assert(!md_signal_delivery_retain(&q,pid,&info));
@@ -194,7 +195,15 @@ int main(void) {
             }
             assert(q.active && ++stops<=2);
             int deliver=0;
-            assert(md_signal_delivery_event(&q,pid,WSTOPSIG(status),&deliver)==1);
+            int owned=md_signal_delivery_event(&q,pid,WSTOPSIG(status),&deliver);
+            assert(owned==(stops<2 ? MD_SIGNAL_CARRIER : MD_SIGNAL_RESTORED));
+            if (owned==MD_SIGNAL_RESTORED) {
+                siginfo_t restored;
+                assert(!ptrace(PTRACE_GETSIGINFO,pid,NULL,&restored));
+                assert(!q.active && restored.si_signo==SIGTRAP);
+                assert(restored.si_pid==original(SIGTRAP).si_pid);
+                deliver=WSTOPSIG(status);
+            }
             assert(pc(pid)==stopped);
             assert(!ptrace(PTRACE_CONT,pid,NULL,(void *)(intptr_t)deliver));
         }

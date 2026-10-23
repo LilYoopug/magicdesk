@@ -172,6 +172,7 @@ static void entry(FILE *stream, unsigned info, unsigned id, unsigned parent, dev
     }
 }
 static int super_readonly(struct md_filesystem *fs,const struct md_view_mount *mount) {
+    if (mount && mount->provider) return !!(md_provider_tree_super_flags(mount->provider)&MD_MOUNT_READONLY);
     if (!md_view_inode(mount)) return 0;
     struct md_inode_store *store;
     int r=md_fs_storage_get(fs,mount,&store);
@@ -190,7 +191,7 @@ static const char *filesystem_type(const struct md_view_mount *mount) {
         return type==FUSE_SUPER_MAGIC ? "fuse" : type==SYSFS_MAGIC ? "sysfs" : "tmpfs";
     }
     if (mount && mount->backing==MD_MOUNT_MQUEUE) return "mqueue";
-    if (mount && mount->cgroup) return md_cgroup_devices(mount->cgroup) ? "cgroup" : "cgroup2";
+    if (mount && mount->cgroup) return md_cgroup_legacy(mount->cgroup) ? "cgroup" : "cgroup2";
     return !md_view_inode(mount) ? "none" : md_filesystem_name(mount->storage ? mount->storage->filesystem_kind : MD_FILESYSTEM_INODE);
 }
 static int filesystem_options(struct md_filesystem *fs,const struct md_view_mount *mount,char *out,size_t size) {

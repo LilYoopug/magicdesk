@@ -125,6 +125,15 @@ including a signal interrupting metadata notification cancellation. Ordered
 replay preserves original siginfo ahead of later kernel arrivals; a queue
 handoff during non-leader exec retains its carrier identity.
 
+An interrupted native SVC alias retains its PC until the kernel has chosen
+restart versus EINTR. `svc_machine` queues PTRACE_INTERRUPT at the real signal
+stop; the resulting stop precedes handler execution and owns translation of
+the saved signal-frame PC (or the live PC for ignored/suppressed signals).
+Filter/dumpability fences wait for that boundary instead of translating early.
+Only this interrupted-alias case adds a stop. Metadata notification cancellation
+uses the same read-only replay owner for original SVCs and native aliases.
+A restored delivery is not requeued merely because other signals remain pending.
+
 `task_checkpoint` owns all normal bootstrap control markers: selective TRACE
 outside application filters, scoped SYSEMU inside them, and a synthetic
 interrupt to recover ARM64's hidden x7 before publishing one typed event.

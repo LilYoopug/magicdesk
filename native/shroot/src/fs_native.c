@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/openat2.h>
+#include <linux/stat.h>
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
@@ -53,6 +54,15 @@ void md_fs_native_descriptor(struct md_filesystem *fs,const struct md_fs_request
         struct stat st;
         out->error=fstat(q->directory[0],&st) ? -errno : 0;
         if (!out->error) md_fs_stat_info(&st,&out->info);
+        if (!out->error && (q->mode&MD_FS_STAT_MOUNT)) {
+            struct statx native;
+            if (syscall(SYS_statx,q->directory[0],"",AT_EMPTY_PATH,STATX_MNT_ID,&native)) out->error=-errno;
+            else if ((native.stx_mask&STATX_MNT_ID) && native.stx_mnt_id) {
+                uint64_t mount=0;
+                out->error=md_fs_native_mount(fs,native.stx_mnt_id,&mount);
+                if (!out->error) md_fs_info_mount(&out->info,mount,!!(native.stx_attributes&STATX_ATTR_MOUNT_ROOT));
+            }
+        }
     } else if (q->operation==MD_FS_STATFS && (!q->path[0] || !*q->path[0])) {
         out->error=0;
         md_fs_statfs_result(q->directory[0],0,NULL,out,output);

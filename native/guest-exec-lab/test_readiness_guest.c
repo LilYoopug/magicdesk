@@ -82,6 +82,45 @@ static void byte_read(int fd) {
     assert(n==1);
 }
 static void byte_write(int fd) { assert(write(fd,"x",1)==1); }
+static void concurrent_admission(void) {
+    assert(!unshare(CLONE_NEWNS|CLONE_NEWUTS));
+    assert(!mount("proc","/proc","proc",0,NULL));
+    int source=open("/proc/sys/kernel/hostname",O_RDONLY|O_CLOEXEC);
+    int ready[2],go[2];
+    assert(source>=0 && !pipe2(ready,O_CLOEXEC) && !pipe2(go,O_CLOEXEC));
+    pid_t children[6];
+    for (unsigned i=0;i<6;++i) {
+        children[i]=fork(); assert(children[i]>=0);
+        if (children[i]) continue;
+        close(ready[0]); close(go[1]);
+        byte_write(ready[1]); byte_read(go[0]);
+        for (unsigned round=0;round<64;++round) {
+            int ep=epoll_create1(EPOLL_CLOEXEC); assert(ep>=0);
+            struct epoll_event event={.data.u64=42},out;
+            int result=epoll_ctl(ep,EPOLL_CTL_ADD,source,&event);
+            if (result) fprintf(stderr,"admission child=%u round=%u errno=%d\n",i,round,errno);
+            assert(!result);
+            assert(!epoll_wait(ep,&out,1,0));
+            struct pollfd item={source,0,0};
+            assert(!poll(&item,1,0));
+            assert(!epoll_ctl(ep,EPOLL_CTL_DEL,source,NULL));
+            assert(!close(ep));
+        }
+        _exit(0);
+    }
+    close(ready[1]); close(go[0]);
+    for (unsigned i=0;i<6;++i) byte_read(ready[0]);
+    for (unsigned i=0;i<6;++i) byte_write(go[1]);
+    close(ready[0]); close(go[1]);
+    for (unsigned i=0;i<6;++i) {
+        int status;
+        /* EVENT_WAIT: every independent readiness/admission owner completes;
+         * the launch deadline fails a cycle between their descriptor turns. */
+        assert(waitpid(children[i],&status,0)==children[i] && status==0);
+    }
+    close(source);
+    puts("PASS mixed epoll: concurrent cold admission drains earlier readiness turns");
+}
 static volatile sig_atomic_t signalled;
 static void on_signal(int number) { assert(number==SIGUSR1); signalled=1; }
 static void native_wait_signals(void) {
@@ -447,6 +486,7 @@ static int filter_probe(void) {
 }
 int main(int argc,char **argv) {
     setbuf(stdout,NULL);
+    if (argc==2 && !strcmp(argv[1],"--concurrent-admission")) { concurrent_admission(); return 0; }
     if (argc==2 && !strcmp(argv[1],"--poll-sandbox")) { poll_sandbox(0); return 0; }
     if (argc==2 && !strcmp(argv[1],"--poll-sandbox-protected")) { poll_sandbox(1); return 0; }
     if (argc==2 && !strcmp(argv[1],"--mixed")) { mixed(0,0); return 0; }

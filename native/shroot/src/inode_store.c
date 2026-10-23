@@ -40,8 +40,8 @@ int md_inode_open_object(struct md_inode_store *s, const char *id, int flags) {
     struct stat st;
     if (!r) r = mdi_backing_stat(s, &node, &st);
     if (!r && node.kind != S_IFREG) r = -EINVAL;
-    if (!r && !(flags & O_PATH)) r = mdi_permission(s, &node, R_OK, 0);
-    if (!r) r=mdi_landlock_object(s,&node,s->landlock_execute ? MD_LL_EXECUTE : md_landlock_open_access(flags,node.kind));
+    if (!r) r = mdi_open_permission(s, &node, flags);
+    if (!r) r=mdi_landlock_object(s,&node,s->image_open ? MD_LL_EXECUTE : md_landlock_open_access(flags,node.kind));
     int fd = -1;
     int directory = r ? -1 : mdi_backing_directory(s, &node);
     if (!r && directory < 0) r = directory;
@@ -227,6 +227,7 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
         if (!r) r=mdi_write(s);
         if (!r) r = mdi_allocate(s, S_IFREG, mode, flags, NULL, loc.parent.id, &loc.node, &fd);
         if (!r) r = mdi_add_name(s, loc.parent.id, loc.name, loc.node.id);
+        if (!r) r = mdi_dentry_capture(s,&loc,&completion->dentry);
         if (!r) r = mdi_event(s, loc.parent.id, &loc.node, loc.name, IN_CREATE, NULL);
         if (!r && (flags&O_DSYNC)) s->sync_requested=1;
         r = mdi_commit(s, r);
@@ -241,8 +242,7 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     if (!r && image && loc.node.kind != S_IFREG) r = -EACCES;
     int device=!r && (loc.node.kind==S_IFCHR || loc.node.kind==S_IFBLK) && !(flags&O_PATH);
     if (device && s->nodev) r=-EACCES;
-    if (!r) r = mdi_open_permission(s, &loc.node, flags);
-    if (!r && image) r = mdi_permission(s, &loc.node, X_OK, 0);
+    if (!r) r = image ? mdi_permission(s, &loc.node, X_OK, 0) : mdi_open_permission(s, &loc.node, flags);
     if (!r) r=mdi_landlock(s,&loc.node,&loc.parent,image ? MD_LL_EXECUTE : md_landlock_open_access(flags,loc.node.kind));
     /* Decline special endpoints before copy-up or any data-open effect. */
     if (!r && native_plan && !md_open_native_kind(flags,loc.node.kind)) r=-EXDEV;
@@ -278,15 +278,22 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
         if (!r) r = mdi_location_path(s, &loc, image->path, sizeof(image->path));
         if (!r) memcpy(image->object, loc.node.id, sizeof(image->object));
     }
+    uint64_t dentry=0;
+    if (!r) r=mdi_dentry_capture(s,&loc,&dentry);
     if (!r && (flags&O_DSYNC) && (!plan || s->write_transaction)) s->sync_requested=1;
     r = mdi_finish(s, r);
     if (r) { if (fd >= 0) close(fd); return r; }
-    if (deferred) return mdi_fifo_prepare(s, fd, completion);
+    if (deferred) {
+        int result=mdi_fifo_prepare(s,fd,completion);
+        if (result>=0) completion->dentry=dentry;
+        return result;
+    }
     if (plan) *completion=(struct md_open_completion){.kind=MD_OPEN_PLAN,
         .backing_device=st.st_dev,.backing_inode=st.st_ino,.mode=st.st_mode&S_IFMT};
     completion->native_leaf=loc.node.native;
     if (device) *completion=(struct md_open_completion){.kind=MD_OPEN_DEVICE,
         .device=loc.node.rdev,.mode=loc.node.kind};
+    completion->dentry=dentry;
     return fd;
 }
 int md_inode_link(struct md_inode_store *s, int sourcefd, const char *source,
@@ -405,12 +412,17 @@ int md_inode_rename(struct md_inode_store *s, int sourcefd, const char *source,
     if (!r) r=mdi_leaf_promote(s,&a.node);
     if (!r && b.exists) r=mdi_leaf_promote(s,&b.node);
     if (!r) r=mdi_write(s);
+    uint64_t source_entry=0,target_entry=0;
+    if (!r) r=mdi_dentry_capture(s,&a,&source_entry);
+    if (!r && flags==RENAME_EXCHANGE) r=mdi_dentry_capture(s,&b,&target_entry);
     if (!r) r = mdi_delete_name(s, a.parent.id, a.name);
     if (!r && b.exists) r = mdi_delete_name(s, b.parent.id, b.name);
     if (!r) r = mdi_add_name(s, b.parent.id, b.name, a.node.id);
     if (!r) r = mdi_reparent(s, &a.node, b.parent.id);
     if (!r && flags == RENAME_EXCHANGE) r = mdi_add_name(s, a.parent.id, a.name, b.node.id);
     if (!r && flags == RENAME_EXCHANGE) r = mdi_reparent(s, &b.node, a.parent.id);
+    if (!r) r=mdi_dentry_move(s,source_entry,b.parent.id,b.name);
+    if (!r && flags==RENAME_EXCHANGE) r=mdi_dentry_move(s,target_entry,a.parent.id,a.name);
     if (!r && b.exists && flags != RENAME_EXCHANGE) r = mdi_removed_event(s, &b, 0);
     unsigned cookie = 0;
     if (!r) r = mdi_event(s, a.parent.id, &a.node, a.name, IN_MOVED_FROM, &cookie);

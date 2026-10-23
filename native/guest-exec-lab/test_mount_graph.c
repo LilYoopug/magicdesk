@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "mount_graph.h"
+#include "host_fs_view.h"
 #include "mount_stream.h"
 #include "fs_mount_internal.h"
 #include "fs_storage.h"
@@ -708,6 +709,14 @@ int test_mount_graph_child(int argc, char **argv) {
             assert(!cpu.error && cpu.fd>=0); char bytes[64]; assert(read(cpu.fd,bytes,sizeof(bytes))>0); close(cpu.fd);
             assert(open_file(&fs,"/sys/devices/system/cpu/possible",O_WRONLY,NULL,NULL).error==-EROFS);
             assert(open_file(&fs,"/sys/devices/platform",O_PATH,NULL,NULL).error==-ENOENT);
+            struct md_view_mount *sys=NULL;
+            for (unsigned i=0;fs.mounts->tree && i<fs.mounts->tree->count;++i) {
+                struct md_view_mount *m=&fs.mounts->tree->mounts[i];
+                if (m->provider && md_host_fs_kind(m->provider)==MD_HOST_FS_SYS) sys=m;
+            }
+            assert(sys);
+            assert(!!md_provider_tree_super_flags(sys->provider)==!!pass);
+            assert(md_mount_policy_set(md_provider_tree_super_policy(sys->provider),0)==-EPERM);
             if (!pass) { send_byte(fd,'r'); assert(receive_byte(fd)=='x'); }
         }
         close_filesystem(&fs);
@@ -753,6 +762,7 @@ static void host_projections(const char *base) {
     struct md_mount_graph_parcel parcel={0};
     assert(!md_mount_graph_export(fs.mounts,fs.store->lifetime->root,&parcel)); send_graph(pair[0],&parcel);
     assert(receive_byte(pair[0])=='r');
+    assert(!md_mount_policy_set(md_provider_tree_super_policy(sysfs),MD_MOUNT_READONLY));
     md_fs_storage_close(&storage); close_filesystem(&fs); md_provider_tree_release(sysfs);
     send_byte(pair[0],'x'); reap(child); close(pair[0]);
     assert(descriptors()==before);

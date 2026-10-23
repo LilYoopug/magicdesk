@@ -28,7 +28,7 @@ const char *md_fs_operation_name(unsigned operation) {
         NAME(NATIVE_MOUNT), NAME(MKNOD), NAME(CHROOT), NAME(UMASK), NAME(STATFS), NAME(WATCH_PATH),
         NAME(TASK_PATH), NAME(XATTR), NAME(FXATTR), NAME(IPC_PEER), NAME(MOUNT), NAME(FSOPEN),
         NAME(FSCONFIG), NAME(FSMOUNT), NAME(BPF), NAME(FDINFO), NAME(LANDLOCK), NAME(OPEN_TREE),
-        NAME(IOCTL), NAME(SYNC), NAME(SHM_CHANNEL)
+        NAME(IOCTL), NAME(SYNC), NAME(SHM_CHANNEL), NAME(FSPICK)
 #undef NAME
     };
     return md_fs_operation_valid(operation) ? names[operation] : NULL;
@@ -128,6 +128,10 @@ int md_fs_request_validate(const struct md_fs_request *q) {
     if (q->operation==MD_FS_FSOPEN)
         return descriptors || !*a || *b || (q->flags&~(O_RDWR|O_CLOEXEC))
             || q->mode || q->capacity || q->offset ? -EINVAL : 0;
+    if (q->operation==MD_FS_FSPICK)
+        return (!*a && !(descriptors&1)) || *b || (descriptors&2)
+            || q->flags&~(O_RDWR|O_CLOEXEC) || (q->flags&O_ACCMODE)!=O_RDWR
+            || q->mode&~AT_SYMLINK_NOFOLLOW || q->capacity || q->offset ? -EINVAL : 0;
     if (q->operation==MD_FS_IOCTL)
         return descriptors!=1 || q->directory[0]<0 || *a || *b
             || (q->flags && !md_filesystem_ioctl_opens(q->mode))

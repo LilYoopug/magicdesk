@@ -19,7 +19,8 @@ struct md_mount_namespace {
     /* Complete cold launch topology. Guest topology changes invalidate it. */
     struct {
         unsigned count;
-        struct { unsigned id; dev_t device; ino_t inode; struct md_view_mount *parent; } mounts[MD_INODE_INITIAL_BOUNDARIES];
+        /* Descendants such as portable /dev nodes do not add root boundaries. */
+        struct { unsigned id; dev_t device; ino_t inode; struct md_view_mount *parent; } mounts[16];
         struct md_inode_mount_boundaries boundaries;
     } initial_boundary;
     struct md_mount_identity *native_ids;

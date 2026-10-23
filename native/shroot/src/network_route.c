@@ -106,7 +106,11 @@ static int namespace_reference(const struct rtattr *attribute,unsigned type,stru
 static int parse_link(const struct nlmsghdr *h,struct link_change *change,struct attrs *a) {
     if (h->nlmsg_len<NLMSG_LENGTH(sizeof(struct ifinfomsg))) return -EINVAL;
     const struct ifinfomsg *m=NLMSG_DATA(h);
-    if (m->ifi_index<0 || (m->ifi_family!=AF_UNSPEC && m->ifi_family!=AF_PACKET && m->ifi_family!=AF_BRIDGE)) return -EINVAL;
+    int ipv6_dump=h->nlmsg_type==RTM_GETLINK && (h->nlmsg_flags&NLM_F_DUMP)==NLM_F_DUMP
+        && m->ifi_family==AF_INET6;
+    int ipv4_query=h->nlmsg_type==RTM_GETLINK && m->ifi_family==AF_INET;
+    if (m->ifi_index<0 || (m->ifi_family!=AF_UNSPEC && m->ifi_family!=AF_PACKET
+            && m->ifi_family!=AF_BRIDGE && !ipv6_dump && !ipv4_query)) return -EINVAL;
     *change=(struct link_change){.index=(unsigned)m->ifi_index,.change=m->ifi_change,.flags=m->ifi_flags,
         .family=m->ifi_family};
     int error=attributes(IFLA_RTA(m),h->nlmsg_len-NLMSG_LENGTH(sizeof(*m)),a,IFLA_MAX);
@@ -373,14 +377,17 @@ static int route_dump_table(const struct nlmsghdr *h,uint32_t *table) {
     }
     return error;
 }
-static int routes(struct md_network_namespace *n,const struct nlmsghdr *h,uint32_t port,int dump,struct md_network_message *o) {
+static int routes(struct md_network_namespace *n,const struct nlmsghdr *h,uint32_t port,int dump,int strict,
+        struct md_network_message *o) {
     if (h->nlmsg_len<NLMSG_LENGTH(sizeof(struct rtmsg))) return -EINVAL;
     const struct rtmsg *m=NLMSG_DATA(h);
     if (m->rtm_family!=AF_UNSPEC && m->rtm_family!=AF_INET) return h->nlmsg_type==RTM_GETROUTE && dump ? 0 : -EAFNOSUPPORT;
     if (h->nlmsg_type==RTM_GETROUTE) {
         if (!dump) return route_lookup(n,h,port,o);
         uint32_t table=0;
-        int selected=route_dump_table(h,&table);
+        /* Legacy dump clients initialize rtmsg like a route mutation. Linux
+         * ignores those selectors unless NETLINK_GET_STRICT_CHK is enabled. */
+        int selected=strict ? route_dump_table(h,&table) : 0;
         if (selected) return selected;
         if (table && table!=RT_TABLE_MAIN) return 0;
         for (unsigned i=0;i<n->count;++i) if (n->links[i].ipv4) {
@@ -629,7 +636,9 @@ long md_network_route(struct md_network_namespace *n,const struct md_identity *i
         if (h->nlmsg_type==RTM_GETLINK) {
             if (dump) {
                 for (unsigned i=0;!error && i<n->count;++i)
-                    if ((!change.master || n->links[i].master==change.master)
+                    /* IPv6 GETLINK enumerates inet6_dev objects, not generic
+                     * links. The IPv4 fabric has none, including on loopback. */
+                    if (change.family!=AF_INET6 && (!change.master || n->links[i].master==change.master)
                             && (change.family!=AF_BRIDGE || n->links[i].master))
                         error=link_reply(&out,h,port,1,n,&n->links[i],change.family==AF_BRIDGE ? AF_BRIDGE : AF_UNSPEC);
             } else {
@@ -641,7 +650,7 @@ long md_network_route(struct md_network_namespace *n,const struct md_identity *i
         else if (h->nlmsg_type==RTM_GETADDR || h->nlmsg_type==RTM_NEWADDR || h->nlmsg_type==RTM_DELADDR)
             error=addresses(n,h,port,dump,&out);
         else if (h->nlmsg_type==RTM_GETROUTE || h->nlmsg_type==RTM_NEWROUTE || h->nlmsg_type==RTM_DELROUTE)
-            error=routes(n,h,port,dump,&out);
+            error=routes(n,h,port,dump,strict,&out);
         else if (query) error=policy_dump(&out,h,port,dump);
         else error=-EOPNOTSUPP;
     }

@@ -259,6 +259,85 @@ int md_inode_path(struct md_inode_store *s, int dirfd, char *out, size_t size) {
     if (!r) r = mdi_node_path(s, &node, out, size);
     return mdi_finish(s, r);
 }
+int mdi_dentry_capture(struct md_inode_store *s,const struct mdi_location *loc,uint64_t *id) {
+    *id=0;
+    if (loc->node.native || loc->node.kind==S_IFDIR) return 0;
+    const struct mdi_cache_key key={.query=MDI_DENTRY_CAPTURE,.id=loc->parent.id,.name=loc->name};
+    if (mdi_cache_number_get(s,&key,id)) return 0;
+    sqlite3_stmt *q=NULL;
+    int r=mdi_query_acquire(s,MDI_DENTRY_CAPTURE,&q);
+    if (!r) r=mdi_bind_id(q,1,loc->parent.id);
+    if (!r) r=mdi_bind_name(q,2,loc->name);
+    if (!r) r=mdi_bind_id(q,3,loc->node.id);
+    if (!r) {
+        int next=mdi_step(s,q);
+        if (next!=SQLITE_ROW) r=next==SQLITE_DONE ? -ESTALE : mdi_sql_failure(next);
+        else *id=(uint64_t)sqlite3_column_int64(q,0);
+    }
+    r=mdi_query_release(q,r);
+    if (!r) mdi_cache_number_put(s,&key,*id);
+    return r;
+}
+int mdi_dentry_move(struct md_inode_store *s,uint64_t id,const char *parent,const char *name) {
+    if (!id) return 0;
+    /* Rename retains the old entry identity, not the newly allocated readdir
+     * cookie. Unlink retains a tombstone until its inode's normal collection. */
+    sqlite3_stmt *q=NULL;
+    int r=mdi_prepare(s,"DELETE FROM dentry_paths WHERE cookie=(SELECT cookie FROM names "
+        "WHERE parent=?1 AND name=?2)",&q);
+    if (!r) r=mdi_bind_id(q,1,parent);
+    if (!r) r=mdi_bind_name(q,2,name);
+    if (!r) r=mdi_sql_error(mdi_step(s,q));
+    sqlite3_finalize(q); q=NULL;
+    if (!r) r=mdi_prepare(s,"UPDATE dentry_paths SET parent=?1,name=?2,"
+        "cookie=(SELECT cookie FROM names WHERE parent=?1 AND name=?2) WHERE id=?3",&q);
+    if (!r) r=mdi_bind_id(q,1,parent);
+    if (!r) r=mdi_bind_name(q,2,name);
+    if (!r) r=mdi_sql_error(sqlite3_bind_int64(q,3,(sqlite3_int64)id));
+    if (!r) r=mdi_sql_error(mdi_step(s,q));
+    if (!r && sqlite3_changes(s->db)!=1) r=-ESTALE;
+    sqlite3_finalize(q); return r;
+}
+int md_inode_dentry_path(struct md_inode_store *s,int fd,uint64_t id,int native_birth,char *out,size_t size) {
+    if (!out) return -EFAULT;
+    if (!size) return -ERANGE;
+    if (!id && !native_birth) return md_inode_path(s,fd,out,size);
+    int r=mdi_begin(s,0);
+    if (r) return r;
+    struct mdi_node node={0};
+    r=mdi_fd(s,fd,&node);
+    if (!r && (node.native || node.kind==S_IFDIR)) return mdi_finish(s,mdi_node_path(s,&node,out,size));
+    enum mdi_query slot=id ? MDI_DENTRY_PATH : MDI_DENTRY_BIRTH;
+    sqlite3_stmt *q=NULL;
+    if (!r) r=mdi_query_acquire(s,slot,&q);
+    if (!r && id) r=mdi_sql_error(sqlite3_bind_int64(q,1,(sqlite3_int64)id));
+    if (!r) r=mdi_bind_id(q,2,node.id);
+    struct mdi_location loc={.node=node};
+    int deleted=0;
+    char parent[33];
+    if (!r) {
+        int next=mdi_step(s,q);
+        if (next!=SQLITE_ROW) r=next==SQLITE_DONE ? -ESTALE : mdi_sql_failure(next);
+        else {
+            const char *p=(const char *)sqlite3_column_text(q,0);
+            int length=sqlite3_column_bytes(q,1);
+            if (!p || strlen(p)!=32 || length<1 || length>NAME_MAX) r=-EIO;
+            else {
+                memcpy(parent,p,33); memcpy(loc.name,sqlite3_column_blob(q,1),(size_t)length);
+                loc.name[length]=0; deleted=sqlite3_column_int(q,2);
+            }
+        }
+    }
+    r=mdi_query_release(q,r);
+    if (!r) r=mdi_node(s,parent,&loc.parent);
+    if (!r) r=mdi_location_path(s,&loc,out,size);
+    if (!r && deleted) {
+        size_t length=strlen(out);
+        if (length+sizeof(" (deleted)")>size) r=-ERANGE;
+        else memcpy(out+length," (deleted)",sizeof(" (deleted)"));
+    }
+    return mdi_finish(s,r);
+}
 int mdi_node_path(struct md_inode_store *s, const struct mdi_node *source, char *out, size_t size) {
     struct mdi_node node = *source;
     int r = 0;

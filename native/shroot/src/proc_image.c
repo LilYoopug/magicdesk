@@ -8,6 +8,7 @@
 #include "proc_control.h"
 #include "raw.h"
 #include "arguments.h"
+#include "process_arguments.h"
 #include "namespace_internal.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -46,10 +47,10 @@ long md_proc_executable_open(const struct md_fs *fs, const char *path, int flags
     return result.result.fd;
 }
 void md_proc_image_init(struct md_process_image *image, const void *arguments,
-        size_t argument_bytes, const void *auxv, size_t bytes) {
-    if (argument_bytes>MD_EXEC_BYTES || bytes>sizeof(image->auxv))
+        size_t argument_bytes, size_t environment_bytes, const void *auxv, size_t bytes) {
+    if (argument_bytes>MD_EXEC_BYTES || environment_bytes>MD_EXEC_BYTES || bytes>sizeof(image->auxv))
         md_die("process image bounds", -E2BIG);
-    image->arguments=arguments; image->argument_bytes=argument_bytes;
+    image->arguments=arguments; image->argument_bytes=argument_bytes; image->environment_bytes=environment_bytes;
     memcpy(image->auxv, auxv, bytes); image->auxv_bytes = bytes;
 }
 static long append_bytes(int fd, const void *data, size_t size) {
@@ -66,11 +67,21 @@ struct image_snapshot {
     enum md_proc_kind kind;
     size_t offset;
 };
+static long read_arguments(void *context,uintptr_t address,void *out,size_t size) {
+    (void)context;
+    long error=md_read_memory(out,(const void *)address,size);
+    return error<0 ? error : (long)size;
+}
 static long snapshot_bytes(void *context, void *out, size_t capacity) {
     struct image_snapshot *s=context;
     const struct md_process_image *image=s->image;
-    const void *data=s->kind==MD_PROC_AUXV ? image->auxv : image->arguments;
-    size_t size=s->kind==MD_PROC_AUXV ? image->auxv_bytes : image->argument_bytes;
+    if (s->kind==MD_PROC_CMDLINE) {
+        long n=md_process_arguments_read(image,md_page_size,read_arguments,NULL,out,capacity,s->offset);
+        if (n>0) s->offset+=(size_t)n;
+        return n;
+    }
+    const void *data=image->auxv;
+    size_t size=image->auxv_bytes;
     size_t n=size-s->offset;
     if (n>capacity) n=capacity;
     if (!n) return 0;

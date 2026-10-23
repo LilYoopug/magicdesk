@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/sysmacros.h>
+#include <sys/mount.h>
 #include <unistd.h>
 void md_test_fs_provider_async(struct md_filesystem *);
 void md_test_fuse_filesystem(struct md_filesystem *);
@@ -60,6 +61,66 @@ static void check_device(struct md_filesystem *fs) {
     md_control_file_release(file);
     assert(md_fuse_request_result(pending,NULL,0)==-ECONNABORTED);
     md_fuse_request_release(pending); md_fuse_connection_release(connection);
+}
+static void portable_metadata(struct md_filesystem *fs,int imported) {
+    struct stat host_before,host_after;
+    assert(!stat("/dev/urandom",&host_before));
+    struct md_fs_context root={.filesystem=fs,.has_identity=1,.task={.identity=md_identity_new(0,0)}};
+    struct md_fs_request q={.operation=MD_FS_STAT,.directory={-1,-1},.path={"/dev/urandom",NULL}};
+    struct md_fs_result r;
+    md_fs_context_execute(&root,&q,&r,NULL);
+    assert(!r.error && S_ISCHR(r.info.mode) && r.info.rdev==makedev(1,9));
+    if (imported) assert(r.info.uid==123 && r.info.gid==456 && (r.info.mode&0777)==0600);
+    q.operation=MD_FS_CHOWN; q.attributes.uid=123; q.attributes.gid=456;
+    md_fs_context_execute(&root,&q,&r,NULL); assert(!r.error);
+    q.operation=MD_FS_CHMOD; q.mode=0600;
+    md_fs_context_execute(&root,&q,&r,NULL); assert(!r.error);
+    struct md_fs_context owner={.filesystem=fs,.has_identity=1,.task={.identity=md_identity_new(123,456)}};
+    struct md_fs_context other={.filesystem=fs,.has_identity=1,.task={.identity=md_identity_new(124,456)}};
+    q.operation=MD_FS_OPEN; q.flags=O_RDONLY; q.mode=0;
+    md_fs_context_execute(&other,&q,&r,NULL); assert(r.error==-EACCES);
+    md_fs_context_execute(&owner,&q,&r,NULL);
+    if (r.error || r.fd<0) fprintf(stderr,"portable device open: error=%d fd=%d completion=%u\n",
+        r.error,r.fd,r.open_completion.kind);
+    assert(!r.error && r.fd>=0);
+    char byte; assert(read(r.fd,&byte,1)==1); close(r.fd);
+    q=(struct md_fs_request){.operation=MD_FS_MOUNT,.mode=MD_FS_MOUNT_REMOUNT,
+        .flags=MS_REMOUNT|MS_BIND|MS_RDONLY,.directory={-1,-1},.path={"/dev/urandom",NULL}};
+    md_fs_context_execute(&root,&q,&r,NULL);
+    if (imported) {
+        /* Graph import borrows policy; only the original namespace may mutate it. */
+        assert(r.error==-EPERM);
+        goto checked;
+    }
+    if (r.error) fprintf(stderr,"portable device remount: %d\n",r.error);
+    assert(!r.error);
+    struct md_fs_request chown={.operation=MD_FS_CHOWN,.directory={-1,-1},.path={"/dev/urandom",NULL},
+        .attributes={.uid=0,.gid=0}};
+    md_fs_context_execute(&root,&chown,&r,NULL); assert(r.error==-EROFS);
+    q.flags=MS_REMOUNT|MS_BIND;
+    md_fs_context_execute(&root,&q,&r,NULL); assert(!r.error);
+checked:
+    assert(!stat("/dev/urandom",&host_after));
+    assert(host_before.st_uid==host_after.st_uid && host_before.st_gid==host_after.st_gid
+        && host_before.st_mode==host_after.st_mode);
+    md_fs_context_end(&other); md_fs_context_end(&owner); md_fs_context_end(&root);
+}
+static void portable_directories(struct md_filesystem *fs) {
+    const char *paths[]={"/dev","/dev/pts","/sys","/sys/class","/sys/fs"};
+    for (unsigned i=0;i<sizeof(paths)/sizeof(*paths);++i) {
+        struct md_fs_result r=request(fs,MD_FS_STAT,paths[i],0,NULL);
+        assert(!r.error && S_ISDIR(r.info.mode) && !r.info.uid && !r.info.gid);
+        unsigned mode=i<2 ? 0755 : 0555;
+        assert((r.info.mode&07777)==mode);
+        struct md_fs_result opened=request(fs,MD_FS_OPEN,paths[i],O_PATH|O_DIRECTORY,NULL);
+        assert(!opened.error && opened.fd>=0);
+        struct md_fs_request q={.operation=MD_FS_FSTAT,.directory={opened.fd,-1}};
+        md_fs_execute(fs,&q,&r,NULL);
+        assert(!r.error && !r.info.uid && !r.info.gid && (r.info.mode&07777)==mode);
+        close(opened.fd);
+    }
+    struct md_fs_result r=request(fs,MD_FS_UNLINK,"/dev",AT_REMOVEDIR,NULL);
+    assert(r.error==-EBUSY);
 }
 struct resumed { struct md_fs_continuation base; unsigned *destroyed; };
 static int ready(struct md_fs_continuation *c) { (void)c; return 1; }
@@ -148,6 +209,8 @@ void md_test_fuse_device(const char *path) {
     alarm(30); setbuf(stdout,NULL);
     struct md_inode_store *store=NULL; assert(!md_inode_store_open(path,1,&store));
     assert(!md_inode_runtime_prepare(store));
+    struct md_fs_request root_mode={.operation=MD_FS_CHMOD,.directory={-1,-1},.path={"/",NULL},.mode=0755};
+    assert(!md_inode_metadata(store,&root_mode));
     struct md_fs_storage_cache storage={0};
     struct md_filesystem fs={.store=store,.storage=&storage};
     assert(!md_fs_mounts_open(&fs,NULL,0));
@@ -161,7 +224,7 @@ void md_test_fuse_device(const char *path) {
     struct md_inode_statistics stats={0}; md_inode_measure(store,&stats);
     for (unsigned i=0;i<32;++i) assert(!request(&fs,MD_FS_STAT,"/",0,NULL).error);
     assert(!stats.walk_components && !stats.walk_materializations); md_inode_measure(store,NULL);
-    check_device(&fs); continuations(&fs); sessions();
+    check_device(&fs); portable_metadata(&fs,0); portable_directories(&fs); continuations(&fs); sessions();
     struct md_fs_result shm=request(&fs,MD_FS_OPEN,"/dev/shm/test",O_CREAT|O_RDWR,NULL);
     assert(!shm.error && shm.fd>=0 && write(shm.fd,"ok",2)==2); close(shm.fd);
     assert(md_mount_graph_portable(fs.mounts));
@@ -171,6 +234,8 @@ void md_test_fuse_device(const char *path) {
     assert(!md_mount_graph_import(&parcel,&imported));
     struct md_filesystem foreign=fs; foreign.mounts=imported;
     check_device(&foreign);
+    portable_metadata(&foreign,1);
+    portable_directories(&foreign);
     shm=request(&foreign,MD_FS_OPEN,"/dev/shm/test",O_RDONLY,NULL);
     if (shm.error || shm.fd<0) fprintf(stderr,"imported shm: error=%d fd=%d host=%u\n",shm.error,shm.fd,shm.host_path);
     assert(!shm.error && shm.fd>=0); char bytes[2]; assert(read(shm.fd,bytes,2)==2 && !memcmp(bytes,"ok",2)); close(shm.fd);
@@ -180,4 +245,5 @@ void md_test_fuse_device(const char *path) {
     md_provider_tree_release(dev); md_provider_tree_release(sys);
     md_fs_mounts_close(&fs); md_fs_storage_close(&storage); md_inode_store_close(store);
     puts("PASS FUSE device: typed authority, disconnect, portable namespace, shared memory, inode fast path and owned continuations");
+    puts("PASS portable devices: guest ownership/DAC, native IO, read-only bind policy, graph transfer and unchanged host metadata");
 }

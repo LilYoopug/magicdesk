@@ -35,7 +35,7 @@ static int execute(const char *supervisor, const char *bootstrap, int denied, in
             assert(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0);
             assert(syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &program) == 0);
         }
-        if (bootstrap) execl(supervisor, supervisor, "--deadline-seconds", "10", bootstrap, "--probe", NULL);
+        if (bootstrap) execl(supervisor, supervisor, "--diagnostics", "--deadline-seconds", "10", bootstrap, "--probe", NULL);
         else execl("/system/bin/sh", "sh", "-c", "printf 'independent shell works\\n'", NULL);
         _exit(126);
     }
@@ -53,7 +53,9 @@ int main(int argc, char **argv) {
     assert(!md_launch_identity(10000, 10000, 10000, 10000));
     const int missing[] = {SYS_pidfd_open, SYS_faccessat2, SYS_seccomp,SYS_close_range,NO_ADDFD,NO_PRIVATE_CLONE};
     for (unsigned i = 0; i < sizeof(missing)/sizeof(*missing); ++i) {
-        assert(execute(argv[1], argv[2], missing[i], ENOSYS) == 126);
+        int result=execute(argv[1], argv[2], missing[i], ENOSYS);
+        if (result!=126) fprintf(stderr,"Capability denial nr=%d returned %d, expected 126\n",missing[i],result);
+        assert(result==126);
         assert(execute(NULL, NULL, missing[i], ENOSYS) == 0);
     }
     /* Bootstrap HUP and SIGCHLD are independent events: closing the listener

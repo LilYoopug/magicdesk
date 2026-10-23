@@ -30,7 +30,21 @@ int md_inode_store_format(void) { return 17; }
     "WHEN 1 THEN 'user.overlay.whiteout' WHEN 2 THEN 'user.overlay.opaque' " \
     "WHEN 3 THEN 'trusted.overlay.whiteout' WHEN 4 THEN 'trusted.overlay.opaque' END,value " \
     "FROM overlay_attributes; DROP TABLE overlay_attributes;"
-static const char *const revisions[]={PUBLICATION_SCHEMA,XATTR_UPGRADE};
+#define DENTRY_SCHEMA \
+    "CREATE TABLE dentry_paths(id INTEGER PRIMARY KEY,cookie INTEGER UNIQUE," \
+    "object TEXT NOT NULL REFERENCES objects ON DELETE CASCADE," \
+    "parent TEXT NOT NULL REFERENCES objects,name BLOB NOT NULL) STRICT;" \
+    "CREATE INDEX dentry_paths_object ON dentry_paths(object,id);" \
+    "CREATE INDEX dentry_paths_parent ON dentry_paths(parent);" \
+    "CREATE TRIGGER dentry_added AFTER INSERT ON names " \
+    "WHEN (SELECT kind FROM objects WHERE object=NEW.object)!=16384 BEGIN " \
+    "INSERT INTO dentry_paths VALUES(NEW.cookie,NEW.cookie,NEW.object,NEW.parent,NEW.name); END;" \
+    "CREATE TRIGGER dentry_removed AFTER DELETE ON names BEGIN " \
+    "UPDATE dentry_paths SET cookie=NULL WHERE cookie=OLD.cookie; END;"
+#define DENTRY_UPGRADE DENTRY_SCHEMA \
+    "INSERT INTO dentry_paths SELECT n.cookie,n.cookie,n.object,n.parent,n.name " \
+    "FROM names n JOIN objects o ON n.object=o.object WHERE o.kind!=16384;"
+static const char *const revisions[]={PUBLICATION_SCHEMA,XATTR_UPGRADE,DENTRY_UPGRADE};
 const struct mdi_schema_plan mdi_schema_current = {revisions,sizeof(revisions)/sizeof(*revisions)};
 int md_inode_store_revision(void) { return 1 + (int)mdi_schema_current.count; }
 
@@ -240,7 +254,7 @@ int mdi_schema_begin_create(struct md_inode_store *s) {
                 "UPDATE objects SET acl_mask=acl_mask&~OLD.type WHERE object=OLD.object; END;"
             "CREATE TABLE events(sequence INTEGER PRIMARY KEY AUTOINCREMENT, parent TEXT NOT NULL,"
             "object TEXT NOT NULL,name BLOB NOT NULL,mask INTEGER NOT NULL,cookie INTEGER NOT NULL) STRICT;");
-    if (!r) r=mdi_sql(s,PUBLICATION_SCHEMA);
+    if (!r) r=mdi_sql(s,PUBLICATION_SCHEMA DENTRY_SCHEMA);
     if (!r) r=set_revision(s,md_inode_store_revision());
     return r;
 }

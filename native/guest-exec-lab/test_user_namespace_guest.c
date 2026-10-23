@@ -63,7 +63,12 @@ static void namespace_limit_case(int mounted) {
             mounted ? "/tmp/user-limit-proc" : "/proc",watch_names[i]);
         int watch=open(path,O_RDONLY); assert(watch>=0 && read_limit(watch)==watch_values[i]);
         assert(!close(watch));
-        assert(open(path,O_WRONLY)<0 && errno==EACCES);
+        /* The mapping retains global UID 0. These writable sysctls use
+         * global-root DAC, not namespace-local capabilities. */
+        watch=open(path,O_RDWR); assert(watch>=0);
+        char value[32]; int size=snprintf(value,sizeof(value),"%u\n",watch_values[i]);
+        assert(pwrite(watch,value,(size_t)size,0)==size && read_limit(watch)==watch_values[i]);
+        assert(!close(watch));
     }
     int fd=open(limit_path,O_RDWR|O_CLOEXEC);
     if (fd<0) perror("user namespace limit");
@@ -137,6 +142,14 @@ int test_user_namespace_limits(void) {
         assert(!setgroups(0,NULL) && !setgid(1000) && !setuid(1000));
         assert(open(limit_path,O_WRONLY)<0 && errno==EACCES);
         int fd=open(limit_path,O_RDONLY); assert(fd>=0 && read_limit(fd)==INT_MAX); close(fd);
+        assert(!unshare(CLONE_NEWUSER));
+        write_map("uid_map","0 1000 1\n"); write_map("setgroups","deny\n"); write_map("gid_map","0 1000 1\n");
+        assert(geteuid()==0);
+        const char *names[]={"max_user_instances","max_user_watches","max_queued_events"};
+        for (unsigned i=0;i<3;++i) {
+            char path[96]; snprintf(path,sizeof(path),"/proc/sys/fs/inotify/%s",names[i]);
+            assert(open(path,O_WRONLY)<0 && errno==EACCES);
+        }
         _exit(0);
     }
     completed(child);

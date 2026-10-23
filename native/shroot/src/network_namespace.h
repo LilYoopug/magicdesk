@@ -21,7 +21,7 @@ const struct md_user_namespace *md_network_namespace_owner(const struct md_netwo
 int md_network_namespace_managed(const struct md_network_namespace *);
 enum md_network_parameter { MD_NET_UNPRIVILEGED_PORT, MD_NET_PING_GROUPS, MD_NET_LOCAL_PORTS,
     MD_NET_IPV4_FORWARD, MD_NET_ROUTE_LOCALNET, MD_NET_RP_FILTER, MD_NET_ARP_NOTIFY,
-    MD_NET_BRIDGE_FILTER };
+    MD_NET_BRIDGE_FILTER, MD_NET_TCP_KEEPIDLE, MD_NET_TCP_KEEPINTVL, MD_NET_TCP_KEEPCNT };
 #define MD_NET_SCOPE_ALL UINT64_MAX
 #define MD_NET_SCOPE_DEFAULT (UINT64_MAX-1)
 /* Resolve a policy lifetime once at open. Rename retains it; namespace moves

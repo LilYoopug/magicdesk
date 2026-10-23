@@ -7,6 +7,7 @@
 #include "mount_policy.h"
 #include "control_event.h"
 #include "inode_watch.h"
+#include "sysctl_value.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/magic.h>
@@ -30,6 +31,7 @@ const char *md_proc_sysctl_name(enum md_proc_file_kind kind) {
     case MD_PROC_FILE_OVERFLOWGID: return "overflowgid";
     case MD_PROC_FILE_CAP_LAST: return "cap_last_cap";
     case MD_PROC_FILE_NR_OPEN: return "nr_open";
+    case MD_PROC_FILE_PID_MAX: return "pid_max";
     case MD_PROC_FILE_INOTIFY_INSTANCES: return "max_user_instances";
     case MD_PROC_FILE_INOTIFY_WATCHES: return "max_user_watches";
     case MD_PROC_FILE_INOTIFY_QUEUE: return "max_queued_events";
@@ -51,13 +53,19 @@ static char *field(struct utsname *names, enum md_proc_file_kind kind) {
     default: return NULL;
     }
 }
+static int inotify_limit(enum md_proc_file_kind kind) {
+    return kind>=MD_PROC_FILE_INOTIFY_INSTANCES && kind<=MD_PROC_FILE_INOTIFY_QUEUE;
+}
+static int writable(enum md_proc_file_kind kind) {
+    return kind<=MD_PROC_FILE_DOMAINNAME || inotify_limit(kind);
+}
 int md_proc_sysctl_access(enum md_proc_file_kind kind, const struct md_identity *id,
         unsigned mode, int effective) {
     if (!md_proc_sysctl_name(kind) || !id || mode&~7U) return -EINVAL;
     if (mode&X_OK) return -EACCES;
     /* Linux's UTS sysctl table uses global-root DAC, without a capability
      * override. sethostname has its separate namespace-scoped capability. */
-    if ((mode&W_OK) && (kind>MD_PROC_FILE_DOMAINNAME
+    if ((mode&W_OK) && (!writable(kind)
             || (effective ? id->uid.effective : id->uid.real))) return -EACCES;
     return 0;
 }
@@ -72,9 +80,10 @@ long md_proc_sysctl_read(const struct md_uts_namespace *uts, enum md_proc_file_k
         switch (kind) {
         case MD_PROC_FILE_CAP_LAST: value=MD_CAP_LAST; break;
         case MD_PROC_FILE_NR_OPEN: value=MD_PROCESS_NOFILE_MAX; break;
-        case MD_PROC_FILE_INOTIFY_INSTANCES: value=MD_INOTIFY_MAX_INSTANCES; break;
-        case MD_PROC_FILE_INOTIFY_WATCHES: value=MD_INOTIFY_MAX_WATCHES; break;
-        case MD_PROC_FILE_INOTIFY_QUEUE: value=MD_INOTIFY_QUEUE_LIMIT; break;
+        case MD_PROC_FILE_PID_MAX: value=MD_PID_MAX; break;
+        case MD_PROC_FILE_INOTIFY_INSTANCES: value=md_user_namespace_limit(NULL,MD_USER_INOTIFY_INSTANCES); break;
+        case MD_PROC_FILE_INOTIFY_WATCHES: value=md_user_namespace_limit(NULL,MD_USER_INOTIFY_WATCHES); break;
+        case MD_PROC_FILE_INOTIFY_QUEUE: value=md_inode_watch_queue_limit(); break;
         default: break;
         }
         snprintf(scalar,sizeof(scalar),"%u",value);
@@ -95,15 +104,28 @@ long md_proc_sysctl_read(const struct md_uts_namespace *uts, enum md_proc_file_k
 }
 long md_proc_sysctl_write(struct md_uts_namespace *uts, enum md_proc_file_kind kind,
         const struct md_identity *writer, const void *data, size_t size, int64_t *offset) {
-    if (!uts || !offset || *offset<0) return -EINVAL;
+    if (!offset || *offset<0) return -EINVAL;
     if (md_proc_sysctl_access(kind,writer,W_OK,1)) return -EPERM;
     if (!size) return 0;
+    int64_t next;
+    if (size>INT64_MAX || __builtin_add_overflow(*offset,(int64_t)size,&next)) return -EINVAL;
+    if (inotify_limit(kind)) {
+        int error=0;
+        if (!*offset) {
+            uint32_t value=0;
+            error=md_sysctl_parse_uint(data,size,&value);
+            if (!error) error=kind==MD_PROC_FILE_INOTIFY_QUEUE ? md_inode_watch_set_queue_limit(value)
+                : md_user_namespace_set_limit(NULL,kind==MD_PROC_FILE_INOTIFY_INSTANCES
+                    ? MD_USER_INOTIFY_INSTANCES : MD_USER_INOTIFY_WATCHES,value);
+        }
+        if (!error) *offset=next;
+        return error ? error : (long)size;
+    }
+    if (!uts) return -EINVAL;
     struct utsname names; md_uts_namespace_read(uts,&names);
     char *text=field(&names,kind);
     if ((uint64_t)*offset>strlen(text)) return (long)size;
     size_t position=(size_t)*offset;
-    int64_t next;
-    if (size>INT64_MAX || __builtin_add_overflow(*offset,(int64_t)size,&next)) return -EINVAL;
     for (size_t i=0;i<size && position<sizeof(names.nodename)-1;++i) {
         char c=((const char *)data)[i];
         if (!c || c=='\n') break;
@@ -118,7 +140,7 @@ int md_proc_sysctl_stat(enum md_proc_file_kind kind,struct stat *out) {
     if (!md_proc_sysctl_name(kind)) return -EINVAL;
     if (stat("/proc/sys/kernel",out)) return -errno;
     out->st_ino=UINT64_C(0xc000000000000000)|(unsigned)kind;
-    out->st_mode=S_IFREG|(kind<=MD_PROC_FILE_DOMAINNAME ? 0644 : 0444);
+    out->st_mode=S_IFREG|(writable(kind) ? 0644 : 0444);
     out->st_nlink=1; out->st_rdev=0; out->st_size=0; out->st_blocks=0;
     out->st_uid=0; out->st_gid=0; return 0;
 }

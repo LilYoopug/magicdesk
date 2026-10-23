@@ -66,9 +66,10 @@ static void file_checks(int fd, const char *original, nlink_t links) {
         CHECK(copy >= 0 && fcntl(copy, F_GETFD) == FD_CLOEXEC);
         CHECK(lseek(copy, 0, SEEK_CUR) == 0 && read(copy, text, 4) == 4 && !memcmp(text, "data", 4));
         CHECK(lseek(fd, 0, SEEK_CUR) == 2);
+        char copied[256]; alias(copied, sizeof(copied), i, copy);
+        text_link(copied, original);
         close(copy);
-        if (namespace) CHECK(readlink(path, text, sizeof(text)) == -1 && errno == ENOTSUP);
-        else text_link(path, original);
+        text_link(path, original);
     }
 }
 struct worker { int fd; };
@@ -91,7 +92,7 @@ int main(int argc, char **argv) {
         CHECK(read(atoi(argv[2]), data, sizeof(data)) == 6 && !memcmp(data, "inside", 6));
         return 0;
     }
-    if (argc == 4 && !strcmp(argv[1], "child")) {
+    if (argc == 5 && !strcmp(argv[1], "child")) {
         namespace = atoi(argv[3]);
         int fd = atoi(argv[2]);
         char path[128]; alias(path, sizeof(path), 0, fd);
@@ -99,6 +100,7 @@ int main(int argc, char **argv) {
         char data[4]; struct stat st;
         CHECK(copy >= 0 && read(copy, data, 4) == 4 && !memcmp(data, "data", 4));
         CHECK(stat(path, &st) == 0 && st.st_nlink == 0);
+        text_link(path, argv[4]);
         close(copy);
         puts("PASS proc: inherited open-unlinked file is usable after exec");
         return 0;
@@ -110,7 +112,20 @@ int main(int argc, char **argv) {
     CHECK(fd >= 0 && write(fd, "data", 4) == 4);
     char original[4096], path[4096], other[4096], text[4096];
     snprintf(original, sizeof(original), "%s/data", argv[1]);
-    if (namespace) CHECK(link("data", "alias") == 0);
+    if (namespace) {
+        CHECK(link("data", "alias") == 0);
+        int linked = open("alias", O_RDONLY);
+        CHECK(linked >= 0);
+        snprintf(other, sizeof(other), "%s/alias", argv[1]);
+        file_checks(linked, other, 2);
+        CHECK(rename("alias", "renamed") == 0);
+        snprintf(other, sizeof(other), "%s/renamed", argv[1]);
+        file_checks(linked, other, 2);
+        CHECK(unlink("renamed") == 0 && link("data", "alias") == 0);
+        snprintf(other, sizeof(other), "%s/renamed (deleted)", argv[1]);
+        file_checks(linked, other, 2);
+        close(linked);
+    }
     file_checks(fd, original, namespace ? 2 : 1);
     alias(path, sizeof(path), 0, fd);
     CHECK(fchmod(fd, 0) == 0);
@@ -241,7 +256,7 @@ int main(int argc, char **argv) {
     if (!pid) {
         char descriptor[32], mode[8];
         snprintf(descriptor, sizeof(descriptor), "%d", fd); snprintf(mode, sizeof(mode), "%d", namespace);
-        execl(exe, exe, "child", descriptor, mode, NULL); _exit(2);
+        execl(exe, exe, "child", descriptor, mode, other, NULL); _exit(2);
     }
     int status;
     /* EVENT_WAIT: exec child's exit; outer fixture timeout cancels failure. */

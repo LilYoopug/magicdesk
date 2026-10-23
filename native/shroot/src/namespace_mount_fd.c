@@ -58,7 +58,17 @@ long md_namespace_mount_fd(const struct md_fs *fs,long nr,const unsigned long *a
         q.path[0]=key; q.path[1]=value;
         return md_namespace_paths_request(fs,&q);
     }
-    if (nr==SYS_fsopen) {
+    if (nr==SYS_fspick) {
+        unsigned flags=(unsigned)a[2];
+        if (flags&~(FSPICK_CLOEXEC|FSPICK_SYMLINK_NOFOLLOW|FSPICK_NO_AUTOMOUNT|FSPICK_EMPTY_PATH)) return -EINVAL;
+        r=md_read_string(key,sizeof(key),(const char *)a[1]);
+        if (r<0) return r;
+        if (!*key && !(flags&FSPICK_EMPTY_PATH)) return -ENOENT;
+        q.operation=MD_FS_FSPICK; q.directory[0]=(int)a[0]; q.path[0]=key;
+        q.flags=O_RDWR|((flags&FSPICK_CLOEXEC) ? O_CLOEXEC : 0);
+        q.mode=(flags&FSPICK_SYMLINK_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW : 0;
+        return md_namespace_paths_request(fs,&q);
+    } else if (nr==SYS_fsopen) {
         r=md_fs_fsopen_parameters(&q,(unsigned)a[1]);
         if (r<0) return r;
         r=md_read_string(key,sizeof(key),(const char *)a[0]);

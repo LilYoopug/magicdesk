@@ -94,8 +94,11 @@ static void check(struct md_inode_store *s) {
     assert(!md_inode_stat(s,-1,"file",0,&a));
     assert(!md_inode_stat(s,-1,"alias",0,&b));
     assert(a.st_ino==b.st_ino && a.st_dev==b.st_dev && a.st_nlink==2 && a.st_size==8);
-    int fd=md_inode_open(s,-1,"alias",O_RDONLY,0); assert(fd>=0);
-    char text[9]={0}; assert(read(fd,text,8)==8 && !strcmp(text,"contents")); close(fd);
+    struct md_open_completion opened;
+    int fd=md_inode_prepare_open(s,-1,"alias",O_RDONLY,0,0,&opened); assert(fd>=0 && opened.dentry);
+    char text[64]={0}; assert(read(fd,text,8)==8 && !strcmp(text,"contents"));
+    assert(!md_inode_dentry_path(s,fd,opened.dentry,0,text,sizeof(text)) && !strcmp(text,"/alias"));
+    close(fd);
     struct md_inode_audit audit; assert(!md_inode_audit(s,&audit));
 }
 static void historical(const char *path,int revision,struct stat *file) {
@@ -109,7 +112,7 @@ static void historical(const char *path,int revision,struct stat *file) {
     int fd=openat(objects,file_id,O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC,0600); assert(fd>=0);
     assert(write(fd,"contents",8)==8 && !fstat(fd,file)); close(fd);
     struct stat directory; assert(!fstatat(objects,root_id,&directory,0));
-    if (revision==2) {
+    if (revision>=2) {
         int parent=openat(objects,root_id,O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(parent>=0);
         fd=openat(parent,"native",O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC,0600); assert(fd>=0);
         assert(write(fd,"native",6)==6 && !fchmod(fd,01700));
@@ -121,7 +124,8 @@ static void historical(const char *path,int revision,struct stat *file) {
     sqlite3 *db=NULL; assert(sqlite3_open(database,&db)==SQLITE_OK);
     assert(sqlite3_exec(db,"PRAGMA journal_mode=WAL; BEGIN",NULL,NULL,NULL)==SQLITE_OK);
     assert(sqlite3_exec(db,format17_revision1,NULL,NULL,NULL)==SQLITE_OK);
-    if (revision==2) assert(sqlite3_exec(db,format17_revision2,NULL,NULL,NULL)==SQLITE_OK);
+    if (revision>=2) assert(sqlite3_exec(db,format17_revision2,NULL,NULL,NULL)==SQLITE_OK);
+    if (revision>=3) assert(sqlite3_exec(db,format17_revision3,NULL,NULL,NULL)==SQLITE_OK);
     sqlite3_stmt *q=NULL;
     assert(sqlite3_prepare_v2(db,"INSERT INTO objects(object,kind,device,inode,parent,backing,logical_inode,logical_device,scope,mode) "
         "VALUES(?1,?2,?3,?4,?5,?1,?4,?3,?6,?7)",-1,&q,NULL)==SQLITE_OK);
@@ -177,7 +181,7 @@ static void baseline(const char *path,int revision,struct md_inode_store *fresh)
     assert(scalar(s,"SELECT value FROM properties WHERE key='schema-revision'")==md_inode_store_revision());
     assert(scalar(s,"SELECT count(*) FROM native_publication")==0);
     same_schema(fresh->db,s->db);
-    if (revision==2) native_value(s);
+    if (revision>=2) native_value(s);
     md_inode_store_close(s);
     printf("PASS frozen format-17 revision-%d: contents, identities and fresh/upgraded schema equivalence\n",revision);
 }
@@ -369,7 +373,7 @@ int main(int argc,char **argv) {
     char path[PATH_MAX];
     snprintf(path,sizeof(path),"%s/fresh",argv[1]); initialize(path);
     struct md_inode_store *fresh=NULL; assert(!md_inode_store_open(path,0,&fresh));
-    for (int revision=1;revision<=2;++revision) {
+    for (int revision=1;revision<=3;++revision) {
         snprintf(path,sizeof(path),"%s/revision-%d",argv[1],revision); baseline(path,revision,fresh);
     }
     md_inode_store_close(fresh);

@@ -12,31 +12,51 @@ long md_task_status_open(int tid) {
     return RAW4(openat,AT_FDCWD,path,O_RDONLY|O_CLOEXEC,0);
 }
 static long read_status(int fd,char *text,size_t capacity);
-long md_task_nofile(int tid,uint64_t *soft) {
-    if (tid<=0 || !soft) return -EINVAL;
+static const char *const limits[]={
+    [RLIMIT_CPU]="Max cpu time", [RLIMIT_FSIZE]="Max file size",
+    [RLIMIT_DATA]="Max data size", [RLIMIT_STACK]="Max stack size",
+    [RLIMIT_CORE]="Max core file size", [RLIMIT_RSS]="Max resident set",
+    [RLIMIT_NPROC]="Max processes", [RLIMIT_NOFILE]="Max open files",
+    [RLIMIT_MEMLOCK]="Max locked memory", [RLIMIT_AS]="Max address space",
+    [RLIMIT_LOCKS]="Max file locks", [RLIMIT_SIGPENDING]="Max pending signals",
+    [RLIMIT_MSGQUEUE]="Max msgqueue size", [RLIMIT_NICE]="Max nice priority",
+    [RLIMIT_RTPRIO]="Max realtime priority", [RLIMIT_RTTIME]="Max realtime timeout"
+};
+static int limit_value(const char **cursor,rlim_t *out) {
+    const char *p=*cursor;
+    while (*p==' ' || *p=='\t') ++p;
+    uint64_t value=0; unsigned digits=0;
+    if (md_prefix(p,"unlimited")) { value=RLIM_INFINITY; p+=9; digits=1; }
+    else while (*p>='0' && *p<='9') {
+        unsigned digit=(unsigned)(*p++-'0');
+        if (value>(UINT64_MAX-digit)/10) return -EIO;
+        value=value*10+digit; ++digits;
+    }
+    if (!digits || (*p!=' ' && *p!='\t' && *p!='\n' && *p)) return -EIO;
+    *out=value; *cursor=p; return 0;
+}
+long md_task_limit(int tid,unsigned resource,struct rlimit *value) {
+    if (tid<=0 || !value || resource>=sizeof(limits)/sizeof(*limits) || !limits[resource]) return -EINVAL;
+    long result=RAW4(prlimit64,tid,resource,0,value);
+    if (result!=-EACCES && result!=-EPERM) return result;
     char path[64]="/proc/";
     md_decimal(path+md_length(path),(unsigned)tid);
     md_copy(path+md_length(path),sizeof(path)-md_length(path),"/limits");
     long fd=RAW4(openat,AT_FDCWD,path,O_RDONLY|O_CLOEXEC,0);
-    if (fd<0) return fd;
+    if (fd<0) return fd==-ENOENT ? -ESRCH : fd;
     char text[4096];
     long size=read_status((int)fd,text,sizeof(text));
     RAW1(close,fd);
     if (size<0) return size;
-    for (char *p=text;*p;++p) {
-        if ((p!=text && p[-1]!='\n') || !md_prefix(p,"Max open files")) continue;
-        p+=sizeof("Max open files")-1;
+    for (const char *p=text;*p;++p) {
+        if ((p!=text && p[-1]!='\n') || !md_prefix(p,limits[resource])) continue;
+        p+=md_length(limits[resource]);
         if (*p!=' ' && *p!='\t') return -EIO;
-        while (*p==' ' || *p=='\t') ++p;
-        if (md_prefix(p,"unlimited") && (p[9]==' ' || p[9]=='\t')) { *soft=UINT64_MAX; return 0; }
-        uint64_t value=0; unsigned digits=0;
-        while (*p>='0' && *p<='9') {
-            unsigned digit=(unsigned)(*p++-'0');
-            if (value>(UINT64_MAX-digit)/10) return -EIO;
-            value=value*10+digit; ++digits;
-        }
-        if (!digits || (*p!=' ' && *p!='\t')) return -EIO;
-        *soft=value; return 0;
+        struct rlimit parsed;
+        int error=limit_value(&p,&parsed.rlim_cur);
+        if (!error) error=limit_value(&p,&parsed.rlim_max);
+        if (!error) *value=parsed;
+        return error;
     }
     return -ENOTSUP;
 }

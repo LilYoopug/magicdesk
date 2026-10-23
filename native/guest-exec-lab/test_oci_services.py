@@ -169,6 +169,16 @@ class Suite:
     def image_command(self, *args):
         return [self.image, *args] if self.image else [self.runner, 'image', *args]
 
+    def installed_environment(self, name):
+        store = self.command(['shroot', 'path', name], quiet=True).strip()
+        # Cold admission belongs to the runtime under test, not to read-only
+        # inspection by an APK which may carry an older schema revision.
+        self.command(self.image_command('prepare', store), quiet=True)
+        info = json.loads(self.command(self.image_command('inspect', store), quiet=True))
+        info.update(name=name, store=store, launches=[json.loads(line) for line in
+                    self.command(self.image_command('launches', store), quiet=True).splitlines() if line])
+        return info
+
     def new_client(self):
         return self.transport.Client(self.config['url'],
                                      self.config['http_headers']['Authorization'].removeprefix('Bearer '),

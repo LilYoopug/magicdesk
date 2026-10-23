@@ -7,7 +7,7 @@
 struct md_pid_namespace;
 struct md_pid_identity;
 struct md_identity;
-enum { MD_PID_LEVELS=32 };
+enum { MD_PID_LEVELS=32, MD_PID_MAX=4194304 };
 struct md_pid_number_value { uint64_t namespace; int32_t number; uint32_t reserved; };
 /* Immutable connection/message-time numbers, independent of later reaping or
  * native PID reuse. No process reference is needed after capture. */
@@ -32,6 +32,10 @@ struct md_pid_namespace *md_pid_namespace_by_inode(uint64_t);
 /* Reserve before clone. Publication at the kernel birth event allocates
  * nothing. Failed clones release the unpublished reservation. */
 int md_pid_identity_prepare(struct md_pid_namespace *, struct md_pid_identity **);
+/* Requested numbers run from the innermost logical namespace outwards.
+ * The native ancestor, if explicitly selected, remains kernel-owned. */
+int md_pid_identity_prepare_selected(struct md_pid_namespace *,const struct md_identity *,
+    const pid_t *,unsigned,struct md_pid_identity **);
 int md_pid_identity_publish(struct md_pid_identity *, pid_t native, pid_t group);
 struct md_pid_identity *md_pid_identity_retain(struct md_pid_identity *);
 void md_pid_identity_release(struct md_pid_identity *);

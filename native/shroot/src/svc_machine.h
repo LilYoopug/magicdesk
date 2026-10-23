@@ -8,6 +8,7 @@ struct md_svc_machine_thread {
     int syscall_exit, draining;
     uintptr_t retry_svc;
     uint64_t retry_number;
+    uintptr_t signal_alias, signal_svc, signal_sp;
     struct user_pt_regs restored;
 };
 struct md_svc_registry *md_svc_machine_admit(pid_t,uintptr_t descriptor);
@@ -22,6 +23,8 @@ int md_svc_machine_syscall(struct md_svc_registry *,struct md_svc_machine_thread
 int md_svc_machine_exit(struct md_svc_machine_thread *,pid_t);
 int md_svc_machine_signal(struct md_svc_registry *,struct md_svc_machine_thread *,pid_t,
     struct md_signal_delivery *,int *deliver);
+/* Complete kernel signal delivery before another stop owner borrows registers. */
+int md_svc_machine_signal_committed(struct md_svc_registry *,struct md_svc_machine_thread *,pid_t,int status);
 /* Reconstruct the guest continuation before publishing queued signals.
  * Return 1 while a native operation must first reach its owned checkpoint. */
 int md_svc_machine_flush(struct md_svc_registry *,struct md_svc_machine_thread *,pid_t);

@@ -91,6 +91,61 @@ static int writing(const char *path,const char *text) {
     ssize_t n=write(fd,text,strlen(text)); int error=errno; close(fd); errno=error;
     return (int)n;
 }
+static void named_hierarchies(void) {
+    const char *first="/tmp/cg-named",*alias="/tmp/cg-named-alias",*other="/tmp/cg-other";
+    assert(!mkdir(first,0700) && !mkdir(alias,0700) && !mkdir(other,0700));
+    int host=open("/proc/self/ns/cgroup",O_RDONLY|O_CLOEXEC); assert(host>=0);
+    for (unsigned i=0;i<4;++i) {
+        const char *invalid[]={"none","none,devices,name=md","none,name=bad/name","none,name=md,name=other"};
+        assert(mount("none",first,"cgroup",0,invalid[i])<0 && errno==EINVAL);
+    }
+    assert(!mount("none",first,"cgroup",0,"none,name=md-session"));
+    int context=syscall(SYS_fsopen,"cgroup",FSOPEN_CLOEXEC); assert(context>=0);
+    assert(!syscall(SYS_fsconfig,context,FSCONFIG_SET_FLAG,"none",NULL,0));
+    assert(!syscall(SYS_fsconfig,context,FSCONFIG_SET_STRING,"name","md-session",0));
+    assert(!syscall(SYS_fsconfig,context,FSCONFIG_CMD_CREATE,NULL,NULL,0));
+    int detached=syscall(SYS_fsmount,context,FSMOUNT_CLOEXEC,0); assert(detached>=0);
+    assert(!syscall(SYS_move_mount,detached,"",AT_FDCWD,alias,MOVE_MOUNT_F_EMPTY_PATH));
+    close(detached); close(context);
+    struct stat a,b; struct statfs fs;
+    assert(!stat(first,&a) && !stat(alias,&b) && a.st_ino==b.st_ino && a.st_dev==b.st_dev);
+    assert(!statfs(first,&fs) && fs.f_type==CGROUP_SUPER_MAGIC);
+    assert(access("/tmp/cg-named/devices.allow",F_OK)<0 && errno==ENOENT);
+    assert(access("/tmp/cg-named/cgroup.controllers",F_OK)<0 && errno==ENOENT);
+    assert(!mount("none",other,"cgroup",0,"name=md-independent,none"));
+    assert(!mkdir("/tmp/cg-named/child",0700));
+    assert(writing("/tmp/cg-named/child/cgroup.procs","0")==1);
+    char text[8192]; read_text("/proc/self/cgroup",text,sizeof(text));
+    assert(strstr(text,":name=md-session:/child\n") && strstr(text,":name=md-independent:/\n"));
+    int retained=open("/tmp/cg-named-alias/child/tasks",O_RDONLY); assert(retained>=0);
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        read_text("/proc/self/cgroup",text,sizeof(text));
+        assert(strstr(text,":name=md-session:/child\n"));
+        assert(!unshare(CLONE_NEWCGROUP|CLONE_NEWNS));
+        read_text("/proc/self/cgroup",text,sizeof(text));
+        assert(strstr(text,":name=md-session:/\n"));
+        assert(!umount2(alias,0));
+        assert(!mount("none",alias,"cgroup",0,"name=md-session"));
+        assert(!stat(alias,&a) && !stat("/tmp/cg-named/child",&b) && a.st_ino==b.st_ino);
+        assert(writing("/tmp/cg-named-alias/tasks","0")==1);
+        assert(!setns(host,CLONE_NEWCGROUP));
+        read_text("/proc/self/cgroup",text,sizeof(text));
+        assert(strstr(text,":name=md-session:/child\n"));
+        _exit(0);
+    }
+    int status;
+    /* EVENT_WAIT: fork inherits both hierarchies and isolates namespace roots. */
+    assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    assert(rmdir("/tmp/cg-named/child")<0 && errno==EBUSY);
+    assert(writing("/tmp/cg-named-alias/cgroup.procs","0")==1);
+    assert(!rmdir("/tmp/cg-named/child"));
+    assert(!fstat(retained,&a) && !a.st_nlink);
+    assert(read(retained,text,sizeof(text))<0 && errno==ENODEV); close(retained);
+    assert(!umount2(first,0) && !umount2(alias,0) && !umount2(other,0));
+    assert(!rmdir(first) && !rmdir(alias) && !rmdir(other)); close(host);
+    puts("PASS named cgroup hierarchies: legacy/FD mounts, independent membership, fork, namespace roots and retired controls");
+}
 static void namespace_delegation(void) {
     assert(!mkdir("/tmp/cg-options",0700));
     assert(mount("none","/tmp/cg-options","cgroup2",0,"nsdelegate,bogus")<0 && errno==EINVAL);
@@ -159,6 +214,14 @@ static void population_events(void) {
     int first=inotify_add_watch(watch,"/tmp/cgv2/events/cgroup.events",IN_MODIFY|IN_DELETE_SELF|IN_EXCL_UNLINK);
     int second=inotify_add_watch(watch,"/tmp/cgv2/events/leaf/cgroup.events",IN_MODIFY|IN_DELETE_SELF);
     assert(first>0 && second>0 && first!=second);
+    for (unsigned path_only=0;path_only<2;++path_only) {
+        int target=open("/tmp/cgv2/events/cgroup.events",O_CLOEXEC|(path_only ? O_PATH : O_RDONLY));
+        assert(target>=0);
+        int duplicate=dup(target); assert(duplicate>=0); close(target);
+        char link[64]; snprintf(link,sizeof(link),"/proc/self/fd/%d",duplicate);
+        assert(inotify_add_watch(watch,link,IN_MODIFY|IN_MASK_ADD)==first);
+        close(duplicate);
+    }
     int fd=open("/tmp/cgv2/events/cgroup.events",O_RDONLY|O_CLOEXEC); assert(fd>=0);
     int ep=epoll_create1(EPOLL_CLOEXEC); assert(ep>=0);
     struct epoll_event event={.events=EPOLLPRI,.data.fd=fd};
@@ -278,6 +341,7 @@ int test_cgroup_guest(int pid_namespace) {
     stopped_newborn_membership();
     delegation_metadata();
     namespace_delegation();
+    named_hierarchies();
     struct statfs st; assert(!statfs("/tmp/cgv2",&st) && st.f_type==CGROUP2_SUPER_MAGIC);
     assert(!statfs("/tmp/cgv1",&st) && st.f_type==CGROUP_SUPER_MAGIC);
     char text[8192]; read_text("/tmp/cgv2/cgroup.controllers",text,sizeof(text)); assert(!strcmp(text,"pids\n"));

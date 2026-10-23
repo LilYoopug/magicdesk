@@ -4,10 +4,12 @@
 #include "proc_paths.h"
 #include "proc_control.h"
 #include "descriptor_calls.h"
+#include "fd_client.h"
 #include "adapter_buffer.h"
 #include "raw.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/stat.h>
 #include <sys/inotify.h>
 #include "namespace_internal.h"
 #include "open_request.h"
@@ -53,6 +55,24 @@ static long path_at(const struct md_fs *fs, const char *exe, int fd,
     return md_fs_resolve(fs, fd, path, follow, out);
 }
 
+static long native_metadata_fallback(const struct md_fs *fs,long nr,const unsigned long *a,long error) {
+    if ((error!=-EMFILE && error!=-EACCES && error!=-EPERM)
+            || (nr!=SYS_fstat && nr!=SYS_newfstatat && nr!=SYS_statx)) return error;
+    /* A protected caller can still inspect its native proc/dev FD when an
+     * export channel cannot be admitted. Hold its table across classification
+     * and the native operation; managed files retain the namespace result. */
+    long locked=md_fd_control(MD_FD_USE,0,0,0);
+    if (locked<0) return locked;
+    long native=md_namespace_native_descriptor((int)a[0]);
+    struct statx st;
+    if (native>0) error=nr==SYS_statx
+        ? RAW5(statx,a[0],a[1],a[2],(a[3]&~(unsigned long)STATX_MNT_ID_UNIQUE)|STATX_MNT_ID,&st)
+        : md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
+    long released=md_fd_control(MD_FD_RELEASE,0,0,0);
+    if (released<0) return released;
+    return !error && nr==SYS_statx ? md_namespace_native_statx_result(fs,a,&st) : error;
+}
+
 long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a) {
     if (nr==SYS_pipe2) return md_descriptor_pair(nr,a);
     if (nr==SYS_fsync || nr==SYS_fdatasync || nr==SYS_syncfs)
@@ -79,7 +99,10 @@ long md_file_call(const struct md_fs *fs, const char *exe, long nr, const unsign
             if (result!=-EXDEV) return result;
         }
     }
-    if (fs->endpoint[0]) return md_namespace_call(fs,exe,nr,a);
+    if (fs->endpoint[0]) {
+        long result=md_namespace_call(fs,exe,nr,a);
+        return descriptor ? native_metadata_fallback(fs,nr,a,result) : result;
+    }
     char first[PATH_MAX], second[PATH_MAX];
     long r;
     int flags;

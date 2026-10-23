@@ -288,7 +288,7 @@ void md_boot(uintptr_t *kernel_stack) {
     if (machine_entry) md_svc_runtime_prepare(program.entry,image.entry,capabilities);
     r = md_interception_enter_image(guest_aux, (unsigned)auxc);
     if (r < 0) md_die("enter guest image", r);
-    md_proc_image_init(&process_image, arguments, argument_bytes, guest_aux, (auxc + 1) * sizeof(*guest_aux));
+    md_proc_image_init(&process_image, arguments, argument_bytes, environment_bytes, guest_aux, (auxc + 1) * sizeof(*guest_aux));
     md_command_close(&command);
     md_enter(image.entry, (uintptr_t)sp, &process_image);
 }

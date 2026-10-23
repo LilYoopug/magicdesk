@@ -348,7 +348,7 @@ static void context_execute(struct md_fs_context *context,
     struct md_identity identity=task->identity;
     const struct md_identity *previous = fs->store->identity;
     const struct md_landlock_policy *previous_landlock=fs->store->landlock;
-    int previous_execute=fs->store->landlock_execute;
+    int previous_execute=fs->store->image_open;
     if (q->operation == MD_FS_IPC || q->operation==MD_FS_IPC_PEER) {
         struct md_ipc_credentials *ipc=NULL;
         int error=md_fs_ipc_authority(fs,&ipc);
@@ -370,7 +370,7 @@ static void context_execute(struct md_fs_context *context,
     const struct md_task_snapshot *previous_actor=fs->actor;
     fs->actor=context->authenticated ? task : NULL;
     fs->store->landlock=context->authenticated ? task->landlock : NULL;
-    fs->store->landlock_execute=q->operation==MD_FS_OPEN_IMAGE
+    fs->store->image_open=q->operation==MD_FS_OPEN_IMAGE
         || (q->operation==MD_FS_OPEN_OBJECT && (q->mode&MD_FS_OBJECT_EXECUTE))
         || (q->operation==MD_FS_REOPEN && (q->mode&MD_FS_REOPEN_EXECUTE));
     if (context->authenticated) fs->mounts=task->mounts;
@@ -393,7 +393,8 @@ static void context_execute(struct md_fs_context *context,
     else if (q->operation == MD_FS_CHROOT) change_root(fs, task->fs, q, out,output);
     else if (q->operation==MD_FS_MOUNT)
         md_fs_mount_execute(fs,q,out,output);
-    else if (q->operation==MD_FS_FSOPEN || q->operation==MD_FS_FSCONFIG || q->operation==MD_FS_FSMOUNT)
+    else if (q->operation==MD_FS_FSOPEN || q->operation==MD_FS_FSCONFIG || q->operation==MD_FS_FSMOUNT
+            || q->operation==MD_FS_FSPICK)
         md_fs_context_mount(fs,q,out,output);
     else if (q->operation==MD_FS_OPEN_TREE) md_fs_open_tree(fs,q,out,output);
     else if (q->operation==MD_FS_BPF) md_fs_bpf(fs,q,out,output);
@@ -415,6 +416,12 @@ static void context_execute(struct md_fs_context *context,
         && (q->operation==MD_FS_READLINK || (q->operation==MD_FS_STAT && (q->flags&AT_SYMLINK_NOFOLLOW))
             || (q->operation==MD_FS_OPEN && (q->flags&(O_PATH|O_NOFOLLOW))==(O_PATH|O_NOFOLLOW)));
     if (proc_link_delegated) out->error=-EREMOTE;
+    if (out->error==-EREMOTE && boundary.path) {
+        /* Implicit native proc bindings retain namespace capability checks
+         * before either the worker or the calling task performs native IO. */
+        int error=md_procfs_check(fs,NULL,boundary.path,1);
+        if (error) out->error=error;
+    }
     if (out->error==-EREMOTE && fs->store->landlock) {
         int error=md_fs_landlock_delegate(fs,q,boundary.path ? boundary.path : "");
         if (error) out->error=error;
@@ -466,7 +473,7 @@ static void context_execute(struct md_fs_context *context,
     if (context->authenticated) fs->mounts=previous_mounts;
     fs->store->identity = previous;
     fs->store->landlock=previous_landlock;
-    fs->store->landlock_execute=previous_execute;
+    fs->store->image_open=previous_execute;
     fs->actor=previous_actor;
 }
 static void object_execute(struct md_fs_context *context, const struct md_fs_request *q,
@@ -744,6 +751,11 @@ opened:
     else {
         out->fd = r;
         md_view_capture(fs,fs->mounts,fs->inode_mount,out,output);
+        if (!out->error && q->operation==MD_FS_REOPEN && q->origin[0] && output && output->origin
+                && *output->origin) {
+            (*output->origin)->dentry=q->origin[0]->dentry;
+            (*output->origin)->native_leaf=q->origin[0]->native_leaf;
+        }
         if (local_plan && !out->error) {
             int fd=md_open_pinned(md_fs_anchor_fd(*output->origin),(int)q->flags);
             out->open_completion=(struct md_open_completion){0};

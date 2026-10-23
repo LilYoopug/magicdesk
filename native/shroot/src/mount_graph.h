@@ -5,9 +5,10 @@
 struct md_fs_mounts;
 struct md_view_mount;
 
-enum { MD_MOUNT_GRAPH_PLACEMENT_FDS=6+3*MD_FS_MOUNTS_MAX,
+enum { MD_MOUNT_GRAPH_PLACEMENT_FDS=6+4*MD_FS_MOUNTS_MAX,
     MD_MOUNT_GRAPH_FDS=MD_MOUNT_GRAPH_PLACEMENT_FDS+MD_FS_MOUNTS_MAX*MD_INODE_CUSTODY_FDS };
 /* An owned parcel: manifest, root policy, pin carrier, then source/covered/policy per mount.
+ * Portable providers carry one further live superblock policy descriptor.
  * Deduplicated backing-store custody follows placement. Allocate only the
  * actual vector on this cold path, never its maximum on normal filesystem IO.
  * No paths, data OFDs, process pointers or process-local mount IDs travel here.

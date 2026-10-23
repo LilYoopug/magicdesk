@@ -363,6 +363,46 @@ static void syscall_exec_test(void) {
     assert(execs==1 && active && nr==SYS_exit_group && entries==exits+1);
 }
 static void child_signal(int signal) { (void)signal; syscall(SYS_getpid); }
+static void syscall_signal_test(void) {
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        struct sigaction action={.sa_handler=child_signal,.sa_flags=SA_RESTART};
+        assert(!sigaction(SIGUSR1,&action,NULL));
+        assert(!ptrace(PTRACE_TRACEME,0,0,0)); raise(SIGSTOP);
+        for (unsigned i=0;i<32;++i) {
+            struct stat st;
+            assert(!syscall(SYS_newfstatat,AT_FDCWD,"/dev/null",&st,0));
+        }
+        _exit(0);
+    }
+    stop(child);
+    assert(!ptrace(PTRACE_SETOPTIONS,child,0,PTRACE_O_TRACESYSGOOD));
+    int active=0, deliver=0, signals=0;
+    uint64_t nr=0;
+    for (;;) {
+        assert(!ptrace(PTRACE_SYSCALL,child,0,deliver)); deliver=0;
+        int status;
+        /* EVENT_WAIT: exact syscall/signal stop; the fixture alarm bounds it. */
+        assert(waitpid(child,&status,__WALL)==child);
+        if (WIFEXITED(status)) { assert(!WEXITSTATUS(status)); break; }
+        assert(WIFSTOPPED(status));
+        if (WSTOPSIG(status)==SIGUSR1) { deliver=SIGUSR1; ++signals; continue; }
+        assert(WSTOPSIG(status)==(SIGTRAP|0x80));
+        struct ptrace_syscall_info info={0};
+        assert(ptrace(PTRACE_GET_SYSCALL_INFO,child,sizeof(info),&info)>0);
+        if (info.op==PTRACE_SYSCALL_INFO_ENTRY) {
+            if (active) fprintf(stderr,"duplicate syscall entry old=%llu new=%llu\n",
+                                (unsigned long long)nr,(unsigned long long)info.entry.nr);
+            assert(!active); active=1; nr=info.entry.nr;
+            if (nr==SYS_newfstatat) assert(!kill(child,SIGUSR1));
+        } else {
+            if (!active) fprintf(stderr,"unmatched syscall exit old=%llu value=%lld\n",
+                                 (unsigned long long)nr,(long long)info.exit.rval);
+            assert(info.op==PTRACE_SYSCALL_INFO_EXIT && active); active=0;
+        }
+    }
+    assert(signals==32 && active && nr==SYS_exit_group);
+}
 static void kill_stopped_test(void) {
     struct sigaction action={.sa_handler=child_signal,.sa_flags=SA_RESTART};
     assert(!sigaction(SIGCHLD,&action,NULL));
@@ -588,6 +628,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "syscall-edit-close")) syscall_edit_close_test();
     else if (!strcmp(argv[1], "credential-transition")) credential_transition_test();
     else if (!strcmp(argv[1], "syscall-exec")) syscall_exec_test();
+    else if (!strcmp(argv[1], "syscall-signal")) syscall_signal_test();
     else if (!strcmp(argv[1], "mixed")) mixed_test();
     else if (!strcmp(argv[1], "kill-stopped")) kill_stopped_test();
     else if (!strcmp(argv[1], "owner-exit")) owner_test(0);

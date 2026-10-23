@@ -263,7 +263,7 @@ print('PASS gdb-jit')
 
 
 def commands(*, proot=False):
-    cases = [(name, [TARGET, name]) for name in ('attach', 'seize', 'trace-exit', 'syscall', 'syscall-edit-close', 'syscall-exec', 'credential-transition', 'mixed',
+    cases = [(name, [TARGET, name]) for name in ('attach', 'seize', 'trace-exit', 'syscall', 'syscall-edit-close', 'syscall-exec', 'syscall-signal', 'credential-transition', 'mixed',
                                                'kill-stopped', 'owner-exit', 'exitkill', 'thread-exec', 'syscall-thread-exec', 'clone-untraced', 'shared-files-debugger', 'perf-event')]
     cases.append(('strace-detach', ['python3', '-c', STRACE_DETACH]))
     cases.append(('strace-detach-socket', ['python3', '-c', STRACE_DETACH, '--socket']))
@@ -286,14 +286,14 @@ def commands(*, proot=False):
     cases.append(('strace', ['/bin/sh', '-ec',
         "strace -f -qq -o /tmp/md-debugger-strace.log /bin/sh -c 'cat /etc/passwd >/dev/null' 2>/tmp/md-debugger-strace.err\n"
         "cat /tmp/md-debugger-strace.err\n"
-        "! grep -q 'Stray PTRACE_EVENT' /tmp/md-debugger-strace.err\n"
+        "test ! -s /tmp/md-debugger-strace.err\n"
         "grep -F 'openat(AT_FDCWD, \"/etc/passwd\", O_RDONLY)' /tmp/md-debugger-strace.log\n"
         "grep 'execve(' /tmp/md-debugger-strace.log\n"
         "grep -E 'clone3?\\(' /tmp/md-debugger-strace.log\necho PASS strace"]))
     cases.append(('strace-shm', ['/bin/sh', '-ec',
         "strace -f -qq -o /tmp/md-debugger-shm.log /tmp/md-debugger-tests shm-target 2>/tmp/md-debugger-shm.err\n"
         "cat /tmp/md-debugger-shm.err\n"
-        "! grep -q 'Stray PTRACE_EVENT' /tmp/md-debugger-shm.err\n"
+        "test ! -s /tmp/md-debugger-shm.err\n"
         "test \"$(grep -c '^.*shmat(' /tmp/md-debugger-shm.log)\" = 4\n"
         "test \"$(grep -c '^.*shmdt(' /tmp/md-debugger-shm.log)\" = 4\n"
         "! grep -E 'clone3?\\(|close_range\\(0,' /tmp/md-debugger-shm.log\necho PASS strace-shm"]))
@@ -301,7 +301,7 @@ def commands(*, proot=False):
         "strace -f -qq -e trace=mprotect,mremap,clone,clone3 -o /tmp/md-debugger-jit.log "
         "/tmp/md-debugger-tests jit-target 2>/tmp/md-debugger-jit.err\n"
         "cat /tmp/md-debugger-jit.err\n"
-        "! grep -q 'Stray PTRACE_EVENT' /tmp/md-debugger-jit.err\n"
+        "test ! -s /tmp/md-debugger-jit.err\n"
         "test \"$(grep -c 'mprotect(.*PROT_READ|PROT_EXEC) *= 0' /tmp/md-debugger-jit.log)\" = 4\n"
         "! grep -E 'mremap\\(|clone3?\\(|= -1' /tmp/md-debugger-jit.log\necho PASS strace-jit"]))
     return cases

@@ -45,6 +45,10 @@ launch and exec preparation. Both the stock loader and target program are opened
 from the selected backend. The stock interpreter owns linking/TLS/dlopen. Exec carries the
 endpoint in bootstrap arguments, not environment variables, and retains one
 seccomp filter and the real kernel cwd/descriptors.
+Image acquisition checks execute permission, not guest read permission: the
+loader's internal ELF read does not grant the caller data access to an
+execute-only file. Named images, retained objects and descriptor reopens share
+this request purpose and retain Landlock EXECUTE, mount and set-ID checks.
 Named image opens retain the walker's resolved final component, including
 hardlink aliases and symlink targets inside bind mounts; they do not reconstruct
 that component from an ambiguous inode. Descriptor-only path reporting retains
@@ -201,10 +205,20 @@ link text and unowned host links retain kernel behavior. Detached directory
 paths are not fabricated. A bind mount's root has an exact mountpoint path even
 when its backing file has hardlink aliases; no backing name is guessed.
 
-Explicit current-process/thread cmdline and auxv opens return a guest-image
-snapshot backed by an unlinked temporary file. Reads and seek use the ordinary
-native descriptor, without a data proxy. Foreign-process snapshots and proc-like
-stat metadata remain unsupported. Executable object IDs support later `exe` open/stat
+Explicit current-process/thread and foreign-process cmdline and auxv opens
+return a guest-image snapshot after the selected proc entry's access check.
+Reads and seek use an ordinary native descriptor, without a data proxy.
+Command-line snapshots follow the startup string area, not the mutable argv
+pointer array. If an application replaces the final argv NUL, the common local
+and remote reader applies Linux's setproctitle convention: the first string may
+extend into the contiguous environment area, bounded by one page and its first
+NUL. Ordinary argument lists retain their exact original byte count. This also
+applies to public cmdline reads of a non-dumpable process; it does not grant
+access to that process's auxv, executable or arbitrary memory.
+Path metadata, access and O_PATH opens retain the actual proc inode and its
+lifetime, including openat2 resolution constraints; no snapshot is needed for
+those operations. A readable snapshot's fstat still describes its backing file,
+not the original proc inode. Executable object IDs support later `exe` open/stat
 without a retained guest FD, even after unlink, name reuse and close_range.
 The original dentry for descriptor-exec readlink is not retained. `AT_EXECFN`
 preserves the invocation spelling independently of executable inode identity.

@@ -251,9 +251,22 @@ static void group(int divergent,int protected) {
     close(ready[0]); close(ready[1]); close(release[0]); close(release[1]);
     assert(!munmap(shared,sizeof(*shared)));
 }
+static void syscall_page_instruction(uint32_t *code,int replaced) {
+    code[1]=replaced ? 0xd4200000 : 0xd4000001;
+    __builtin___clear_cache((char *)code,(char *)(code+3));
+}
+static uint32_t *syscall_page(unsigned nr) {
+    size_t page=(size_t)sysconf(_SC_PAGESIZE);
+    uint32_t *code_page=mmap(NULL,page,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_SHARED|MAP_ANONYMOUS,-1,0);
+    assert(code_page!=MAP_FAILED);
+    code_page[0]=0xd2800008|(nr<<5); code_page[2]=0xd65f03c0;
+    syscall_page_instruction(code_page,0); return code_page;
+}
 static void pending_call(int boundary,int denied,int protected) {
     struct shared *shared=mmap(NULL,sizeof(*shared),PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
     assert(shared!=MAP_FAILED);
+    uint32_t *code_page=syscall_page(SYS_write);
+    uintptr_t remote_written=(uintptr_t)(code_page+2);
     int start[2],data[2]; assert(!pipe2(start,O_CLOEXEC) && !pipe2(data,O_CLOEXEC|O_NONBLOCK));
     pid_t pid=fork(); assert(pid>=0);
     if (!pid) {
@@ -266,7 +279,13 @@ static void pending_call(int boundary,int denied,int protected) {
         assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
         struct sock_filter code[]={
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
-            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_write,0,1),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_write,0,7),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(uintptr_t)remote_written,1,0),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_PROCESS),
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uintptr_t)remote_written>>32,1,0),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_PROCESS),
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|123),
             BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_seccomp,0,1),
             BPF_STMT(BPF_RET|BPF_K,denied ? SECCOMP_RET_ERRNO|EPERM : SECCOMP_RET_TRACE|MD_INTERCEPT_TASK),
@@ -275,7 +294,7 @@ static void pending_call(int boundary,int denied,int protected) {
         struct sock_fprog p={sizeof(code)/sizeof(*code),code};
         assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&p));
         shared->waiting=1;
-        assert(write(data[1],"q",1)==1);
+        assert(((long (*)(int,const void *,size_t))code_page)(data[1],"q",1)==1);
         assert(!sigaction(SIGTRAP,NULL,&action) && action.sa_handler==SIG_IGN);
         assert(!sigprocmask(SIG_SETMASK,NULL,&mask) && sigismember(&mask,SIGTRAP));
         shared->completed=1; _exit(0);
@@ -300,7 +319,11 @@ static void pending_call(int boundary,int denied,int protected) {
     struct md_task_quiesce_stop borrowed;
     assert(!md_task_quiesce_borrow(barrier,pid,&borrowed)
         && borrowed.kind==MD_TASK_QUIESCE_EVENT && borrowed.status==original_status);
+    /* The executing syscall is already stopped. Its source page no longer
+     * contains SVC, as after lazy publication; replay must not fetch it again. */
+    syscall_page_instruction(code_page,1);
     install_at(pid,data[1],shared,&saved,denied==1 ? -EPERM : 0,boundary,denied==2);
+    syscall_page_instruction(code_page,0);
     assert(!md_task_quiesce_return(barrier,pid) && !md_task_quiesce_release(barrier));
     int replay;
     assert(md_task_quiesce_take(barrier,&replay,&usage)==pid && replay==original_status && usage.ru_maxrss==123);
@@ -314,6 +337,7 @@ static void pending_call(int boundary,int denied,int protected) {
     char byte[2]; assert(shared->completed && read(data[0],byte,2)==1 && byte[0]=='q');
     assert(read(data[0],byte,2)==-1 && errno==EAGAIN);
     close(start[0]); close(start[1]); close(data[0]); close(data[1]);
+    assert(!munmap(code_page,(size_t)sysconf(_SC_PAGESIZE)));
     assert(!munmap(shared,sizeof(*shared)));
 }
 struct call_events { int foreign_interrupts,group_stops,writer,interrupted; long number; };
@@ -453,6 +477,7 @@ static void caught_signal(int signal) { assert(signal==SIGUSR2); }
 static void restart_exit(int protected,int interrupted) {
     struct shared *shared=mmap(NULL,sizeof(*shared),PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
     assert(shared!=MAP_FAILED);
+    uint32_t *code_page=syscall_page(SYS_read);
     int start[2],data[2]; assert(!pipe2(start,O_CLOEXEC) && !pipe2(data,O_CLOEXEC));
     pid_t pid=fork(); assert(pid>=0);
     if (!pid) {
@@ -461,7 +486,7 @@ static void restart_exit(int protected,int interrupted) {
         struct sigaction action={.sa_handler=caught_signal,.sa_flags=SA_RESTART};
         sigemptyset(&action.sa_mask); assert(!sigaction(SIGUSR2,&action,NULL));
         shared->waiting=1;
-        assert(read(data[0],&byte,1)==1 && byte=='q');
+        assert(((long (*)(int,void *,size_t))code_page)(data[0],&byte,1)==1 && byte=='q');
         shared->completed=1; _exit(0);
     }
     assert(!ptrace(PTRACE_SEIZE,pid,0,(void *)(PTRACE_O_TRACESYSGOOD|PTRACE_O_TRACESECCOMP|PTRACE_O_EXITKILL)));
@@ -480,6 +505,8 @@ static void restart_exit(int protected,int interrupted) {
     int status=stop(pid); assert(WIFSTOPPED(status) && WSTOPSIG(status)==(SIGTRAP|0x80));
     struct user_pt_regs saved=get(pid);
     assert((long)saved.regs[0]==-512);
+    assert(saved.pc==(uintptr_t)(code_page+2));
+    syscall_page_instruction(code_page,1);
     uint64_t before,after;
     assert(!ptrace(PTRACE_GETSIGMASK,pid,(void *)sizeof(before),&before));
     struct md_task_call call={0};
@@ -494,6 +521,7 @@ static void restart_exit(int protected,int interrupted) {
     assert(call.result==pid);
     struct user_pt_regs unchanged=get(pid); assert(!memcmp(&saved,&unchanged,sizeof(saved)));
     assert(!ptrace(PTRACE_GETSIGMASK,pid,(void *)sizeof(after),&after) && before==after);
+    syscall_page_instruction(code_page,0);
     if (interrupted) assert(write(data[1],"q",1)==1);
     assert(!ptrace(PTRACE_CONT,pid,0,0));
     status=stop(pid);
@@ -509,6 +537,7 @@ static void restart_exit(int protected,int interrupted) {
     }
     assert(WIFEXITED(status) && !WEXITSTATUS(status) && shared->completed);
     close(start[0]); close(start[1]); close(data[0]); close(data[1]);
+    assert(!munmap(code_page,(size_t)sysconf(_SC_PAGESIZE)));
     assert(!munmap(shared,sizeof(*shared)));
 }
 static void killed_injection(int protected,int boundary) {
@@ -586,7 +615,7 @@ int main(void) {
         for (int interrupted=3;interrupted<6;++interrupted) task_context(protected,interrupted,MD_TASK_CALL_ENTRY);
     puts("PASS remote FD filter: protected tasks, native interrupt/restart, signal masks and seccomp policy");
     puts("PASS group FD filter: TSYNC reaches every sibling; incompatible filter leaves both unchanged");
-    puts("PASS FD filter continuation: syscall entry, seccomp and exit execute the original write exactly once");
+    puts("PASS FD filter continuation: replaced source, original seccomp PC and exact-once write at entry/seccomp/exit");
     puts("PASS restart-exit calls: recovered kernel arguments, restored registers/mask and native signal restart");
     puts("PASS task-context call: protected signalfd readiness, repeated syscall, SIG_IGN and exact register/mask restoration");
     puts("PASS task-context job control: STOP/LISTEN/CONT, read/ppoll/timer restart and original SIGCONT siginfo");

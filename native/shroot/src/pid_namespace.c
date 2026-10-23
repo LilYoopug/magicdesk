@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "pid_namespace.h"
 #include "namespace_identity.h"
+#include "guest_identity.h"
 #include <assert.h>
 #include <errno.h>
 #include <limits.h>
@@ -122,26 +123,33 @@ static struct pid_number **slot(struct md_pid_namespace *n,pid_t number) {
     while (*p && (*p)->number!=number) p=&(*p)->next;
     return p;
 }
-static int reserve(struct md_pid_namespace *n, struct pid_number *number) {
+static int reserve(struct md_pid_namespace *n, struct pid_number *number,pid_t selected) {
     pthread_mutex_lock(&n->lock);
     int error=0;
     if (md_pid_namespace_dead(n)) error=-ENOMEM;
-    pid_t start=!n->initialized && !*slot(n,1) ? 1 : n->next, next=start;
+    if (!error && selected && selected!=1 && !n->initialized) error=-EINVAL;
+    if (!error && selected && *slot(n,selected)) error=-EEXIST;
+    pid_t start=selected ? selected : !n->initialized && !*slot(n,1) ? 1 : n->next<2 ? 2 : n->next, next=start;
     if (!error) {
         do {
             if (!*slot(n,next)) break;
-            next=next==INT_MAX ? 2 : next+1;
+            next=next==MD_PID_MAX-1 ? 2 : next+1;
         } while (next!=start);
         if (*slot(n,next)) error=-EAGAIN;
     }
     if (!error) {
         number->space=n; number->number=next; *slot(n,next)=number;
-        n->next=next==INT_MAX ? 2 : next+1;
+        if (!selected) n->next=next==MD_PID_MAX-1 ? 2 : next+1;
     }
     pthread_mutex_unlock(&n->lock); return error;
 }
 int md_pid_identity_prepare(struct md_pid_namespace *space, struct md_pid_identity **out) {
+    return md_pid_identity_prepare_selected(space,NULL,NULL,0,out);
+}
+int md_pid_identity_prepare_selected(struct md_pid_namespace *space,const struct md_identity *id,
+        const pid_t *selected,unsigned count,struct md_pid_identity **out) {
     *out=NULL;
+    if (count>md_pid_namespace_depth(space) || (count && (!selected || !id))) return -EINVAL;
     if (!space) return 0;
     struct md_pid_identity *p=calloc(1,sizeof(*p)+space->depth*sizeof(*p->numbers));
     if (!p) return -ENOMEM;
@@ -151,7 +159,14 @@ int md_pid_identity_prepare(struct md_pid_namespace *space, struct md_pid_identi
     p->space=md_pid_namespace_retain(space);
     for (struct md_pid_namespace *n=space;n;n=n->parent) {
         struct pid_number *number=p->numbers+p->count; number->identity=p;
-        int error=reserve(n,number);
+        pid_t requested=p->count<count ? selected[p->count] : 0;
+        int error=0;
+        if (p->count<count) {
+            if (requested<1 || requested>=MD_PID_MAX) error=-EINVAL;
+            else if (!md_identity_capable_in(id,n->owner,CAP_CHECKPOINT_RESTORE)
+                    && !md_identity_capable_in(id,n->owner,CAP_SYS_ADMIN)) error=-EPERM;
+        }
+        if (!error) error=reserve(n,number,requested);
         if (error) { md_pid_identity_release(p); return error; }
         ++p->count;
     }
@@ -182,14 +197,18 @@ static struct md_pid_identity *try_retain(struct md_pid_identity *p) {
     }
     return NULL;
 }
-void md_pid_identity_release(struct md_pid_identity *p) {
-    if (!p || atomic_fetch_sub_explicit(&p->references,1,memory_order_acq_rel)!=1) return;
+static void unreserve(struct md_pid_identity *p) {
     for (unsigned i=0;i<p->count;++i) {
         struct pid_number *number=p->numbers+i; struct md_pid_namespace *n=number->space;
         pthread_mutex_lock(&n->lock);
-        struct pid_number **link=slot(n,number->number); assert(*link==number); *link=number->next;
+        struct pid_number **link=slot(n,number->number);
+        if (*link==number) *link=number->next;
         pthread_mutex_unlock(&n->lock);
     }
+}
+void md_pid_identity_release(struct md_pid_identity *p) {
+    if (!p || atomic_fetch_sub_explicit(&p->references,1,memory_order_acq_rel)!=1) return;
+    unreserve(p);
     md_pid_namespace_release(p->space); free(p);
 }
 struct md_pid_namespace *md_pid_identity_namespace(const struct md_pid_identity *p) { return p ? p->space : NULL; }
@@ -222,7 +241,10 @@ int md_pid_identity_exit(struct md_pid_identity *p) {
     pthread_mutex_unlock(&n->lock); return last;
 }
 void md_pid_identity_reap(struct md_pid_identity *p) {
-    if (p && !md_pid_identity_live(p)) atomic_store_explicit(&p->reaped,1,memory_order_release);
+    if (p && !md_pid_identity_live(p)) {
+        atomic_store_explicit(&p->reaped,1,memory_order_release);
+        unreserve(p);
+    }
 }
 void md_pid_identity_exec(struct md_pid_identity *thread,struct md_pid_identity *group) {
     if (!thread || !group || thread==group) return;

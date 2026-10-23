@@ -2,6 +2,7 @@
 #include "provider_tree.h"
 #include "temporary_directory.h"
 #include "directory_record.h"
+#include "user_namespace.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -19,6 +20,8 @@ struct md_provider_tree {
     unsigned opaque_count;
     const struct md_provider_tree_ops *ops;
     void *context;
+    struct md_user_namespace *owner;
+    struct md_mount_policy super_policy;
 };
 static int fdpath(int fd,char *out,size_t size) {
     char proc[64]; snprintf(proc,sizeof(proc),"/proc/self/fd/%d",fd);
@@ -79,12 +82,23 @@ int md_provider_tree_matches(const struct md_provider_tree *tree,const struct md
 void md_provider_tree_release(struct md_provider_tree *tree) {
     if (!tree || atomic_fetch_sub_explicit(&tree->references,1,memory_order_acq_rel)!=1) return;
     if (tree->ops && tree->ops->release) tree->ops->release(tree->context);
+    md_user_namespace_release(tree->owner);
+    md_mount_policy_close(&tree->super_policy);
     if (tree->lower>=0) close(tree->lower);
     if (tree->upper>=0) md_temporary_directory_release(tree->upper);
     for (unsigned i=0;i<tree->opaque_count;++i) free(tree->opaque[i]);
     free(tree->opaque); free(tree);
 }
 int md_provider_tree_root(struct md_provider_tree *tree) { return tree->upper; }
+void md_provider_tree_set_owner(struct md_provider_tree *tree,const struct md_user_namespace *owner) {
+    struct md_user_namespace *previous=tree->owner;
+    tree->owner=md_user_namespace_retain((struct md_user_namespace *)owner); md_user_namespace_release(previous);
+}
+struct md_user_namespace *md_provider_tree_owner(const struct md_provider_tree *tree) { return tree->owner; }
+struct md_mount_policy *md_provider_tree_super_policy(struct md_provider_tree *tree) { return &tree->super_policy; }
+unsigned md_provider_tree_super_flags(const struct md_provider_tree *tree) {
+    return tree ? md_mount_policy_flags(&tree->super_policy) : 0;
+}
 void *md_provider_tree_context(struct md_provider_tree *tree,const struct md_provider_tree_ops *ops) {
     return tree && tree->ops==ops ? tree->context : NULL;
 }

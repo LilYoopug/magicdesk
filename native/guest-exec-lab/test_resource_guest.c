@@ -6,6 +6,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/stat.h>
 #include <linux/close_range.h>
 #include <linux/audit.h>
 #include <linux/filter.h>
@@ -1279,6 +1280,9 @@ static void buffer_return(int guest) {
             assert(errno==EMFILE && last>=0);
             if (slots) assert(!close(last));
             fd=open(return_paths[0],O_PATH|O_NOFOLLOW|O_CLOEXEC);
+            if ((guest || !slots) && !(fd==-1 && errno==EMFILE))
+                fprintf(stderr,"cold protected return guest=%d slots=%d fd=%d errno=%d last=%d\n",
+                    guest,slots,fd,errno,last);
             if (guest || !slots) assert(fd==-1 && errno==EMFILE);
             else assert(fd==last && !close(fd));
             _exit(0);
@@ -1507,9 +1511,29 @@ static void proc_snapshot(int argc, char **argv) {
                     if (!slots) { assert(fd==-1 && errno==EMFILE); continue; }
                     assert(fd==last && fcntl(fd,F_GETFD)==(cloexec ? FD_CLOEXEC : 0));
                     struct stat snapshot;
-                    assert(!fstat(fd,&snapshot) && S_ISREG(snapshot.st_mode) && snapshot.st_size==(off_t)size);
-                    if (path) assert(fcntl(fd,F_GETFL)&O_PATH);
+                    assert(!fstat(fd,&snapshot) && S_ISREG(snapshot.st_mode));
+                    if (path) {
+                        /* O_PATH pins the proc inode, not the readable snapshot. */
+                        struct stat named; assert(!stat("/proc/self/cmdline",&named));
+                        assert(snapshot.st_size==0 && snapshot.st_dev==named.st_dev
+                            && snapshot.st_ino==named.st_ino && snapshot.st_mode==named.st_mode);
+                        assert(!fstatat(fd,"",&snapshot,AT_EMPTY_PATH) && snapshot.st_ino==named.st_ino);
+                        struct statx descriptor_info,named_info;
+                        assert(!syscall(SYS_statx,fd,"",AT_EMPTY_PATH,STATX_BASIC_STATS|STATX_MNT_ID,&descriptor_info));
+                        assert(!syscall(SYS_statx,AT_FDCWD,"/proc/self/cmdline",0,STATX_BASIC_STATS|STATX_MNT_ID,&named_info));
+                        if (descriptor_info.stx_ino!=named_info.stx_ino || descriptor_info.stx_size
+                                || descriptor_info.stx_mnt_id!=named_info.stx_mnt_id)
+                            fprintf(stderr,"proc statx protected=%d inode=%llu/%llu size=%llu mount=%llu/%llu\n",
+                                protected,(unsigned long long)descriptor_info.stx_ino,(unsigned long long)named_info.stx_ino,
+                                (unsigned long long)descriptor_info.stx_size,(unsigned long long)descriptor_info.stx_mnt_id,
+                                (unsigned long long)named_info.stx_mnt_id);
+                        assert(descriptor_info.stx_ino==named_info.stx_ino && descriptor_info.stx_size==0
+                            && descriptor_info.stx_mnt_id==named_info.stx_mnt_id);
+                        assert(fcntl(fd,F_GETFL)&O_PATH);
+                        assert(read(fd,actual,sizeof(actual))==-1 && errno==EBADF);
+                    }
                     else {
+                        assert(snapshot.st_size==(off_t)size);
                         assert(read(fd,actual,sizeof(actual))==(ssize_t)size && !memcmp(actual,expected,size));
                         assert(lseek(fd,0,SEEK_SET)==0);
                         assert(read(fd,actual,sizeof(actual))==(ssize_t)size && !memcmp(actual,expected,size));

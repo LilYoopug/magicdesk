@@ -13,6 +13,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+enum { MOUNTED_INODE = UINT_MAX };
 struct filesystem_context {
     atomic_uint refs;
     struct md_identity opener;
@@ -70,6 +71,17 @@ static int capable(struct md_filesystem *fs) {
     return fs->mounts && fs->store->identity && md_identity_capable_in(fs->store->identity,
         md_mount_namespace_owner(fs->mounts),CAP_SYS_ADMIN);
 }
+static int publish_context(struct filesystem_context *c,const struct md_fs_request *q,
+        struct md_fs_result *result,const struct md_fs_output *out) {
+    int fd=memfd_create("fscontext",MFD_CLOEXEC|MFD_ALLOW_SEALING);
+    int r=fd<0 ? -errno : fstat(fd,&c->stat) ? -errno : 0;
+    if (!r && fcntl(fd,F_ADD_SEALS,F_SEAL_SEAL|F_SEAL_WRITE|F_SEAL_GROW|F_SEAL_SHRINK)) r=-errno;
+    c->stat.st_mode=S_IFREG|0600; c->stat.st_uid=c->opener.uid.fs; c->stat.st_gid=c->opener.gid.fs;
+    if (r) { if (fd>=0) close(fd); }
+    else r=md_fs_control_publish(fd,(struct md_control_file){&context_ops,c},NULL,
+        &c->opener,(int)q->flags,result,out);
+    return r;
+}
 static int open_context(struct md_filesystem *fs,const struct md_fs_request *q,
         struct md_fs_result *result,const struct md_fs_output *out) {
     if (!capable(fs)) return -EPERM;
@@ -91,15 +103,57 @@ static int open_context(struct md_filesystem *fs,const struct md_fs_request *q,
     c->cgroup_namespace=md_cgroup_namespace_retain(fs->actor ? fs->actor->cgroup_namespace : NULL);
     c->network=md_network_namespace_retain(fs->actor ? fs->actor->network : NULL);
     c->ipc=md_ipc_namespace_retain(fs->actor ? fs->actor->ipc : NULL);
-    int fd=memfd_create("fscontext",MFD_CLOEXEC|MFD_ALLOW_SEALING);
-    int r=fd<0 ? -errno : fstat(fd,&c->stat) ? -errno : 0;
-    if (!r && fcntl(fd,F_ADD_SEALS,F_SEAL_SEAL|F_SEAL_WRITE|F_SEAL_GROW|F_SEAL_SHRINK)) r=-errno;
-    c->stat.st_mode=S_IFREG|0600; c->stat.st_uid=c->opener.uid.fs; c->stat.st_gid=c->opener.gid.fs;
-    if (r) { if (fd>=0) close(fd); }
-    else r=md_fs_control_publish(fd,(struct md_control_file){&context_ops,c},NULL,
-        &c->opener,(int)q->flags,result,out);
+    int r=publish_context(c,q,result,out);
     release(c);
     return r;
+}
+static unsigned mounted_type(const struct md_view_mount *mount) {
+    if (md_view_inode(mount)) return mount && mount->storage
+        && mount->storage->filesystem_kind==MD_FILESYSTEM_TMPFS ? MD_FS_MOUNT_TMPFS : MOUNTED_INODE;
+    unsigned long magic=mount && mount->provider ? md_provider_tree_filesystem(mount->provider) : 0;
+    return magic==SYSFS_MAGIC ? MD_FS_MOUNT_SYSFS : magic==PROC_SUPER_MAGIC ? MD_FS_MOUNT_PROC : 0;
+}
+static int pick_context(struct md_filesystem *fs,const struct md_fs_request *q,
+        struct md_fs_result *result,const struct md_fs_output *out) {
+    if (!capable(fs)) return -EPERM;
+    if (!out || !out->control) return -EOPNOTSUPP;
+    struct md_view_location location={.fd=-1,.parent=-1};
+    int r=*q->path[0] ? md_view_walk(fs,q->directory[0],q->origin[0],q->path[0],
+        !(q->mode&AT_SYMLINK_NOFOLLOW),0,MD_VIEW_TASK_PATH,&location)
+        : md_view_descriptor(fs,q->directory[0],q->origin[0],&location);
+    if (!r) r=md_view_require_root(fs,&location);
+    unsigned type=r ? 0 : mounted_type(location.mount);
+    if (!r && !type) r=-EOPNOTSUPP;
+    struct filesystem_context *c=r ? NULL : calloc(1,sizeof(*c));
+    if (!r && !c) r=-ENOMEM;
+    if (!r) {
+        atomic_init(&c->refs,1); c->type=type; c->phase=MOUNTED;
+        c->opener=md_identity_copy(fs->store->identity);
+        c->source=(struct md_mount_source){.fd=location.fd,.backing=location.mount->backing,
+            .storage=md_inode_lifetime_retain(location.mount->storage ? location.mount->storage
+                : md_view_inode(location.mount) ? md_inode_store_lifetime(fs->store) : NULL),
+            .provider=md_provider_tree_retain(location.mount->provider)};
+        location.fd=-1;
+        r=publish_context(c,q,result,out);
+        release(c);
+    }
+    md_view_location_close(&location); return r;
+}
+int md_fs_super_reconfigure(struct md_filesystem *fs,const struct md_view_mount *mount,int readonly) {
+    if (md_view_inode(mount)) {
+        struct md_inode_lifetime *storage=mount && mount->storage
+            ? mount->storage : md_inode_store_lifetime(fs->store);
+        if (!md_identity_capable_in(fs->store->identity,storage->owner,CAP_SYS_ADMIN)) return -EPERM;
+        struct md_inode_store *store;
+        int r=md_fs_storage_get(fs,mount,&store);
+        return r ? r : md_inode_store_reconfigure(store,readonly);
+    }
+    if (mounted_type(mount)) {
+        if (!md_identity_capable_in(fs->store->identity,
+                md_provider_tree_owner(mount->provider),CAP_SYS_ADMIN)) return -EPERM;
+        return md_mount_policy_set(md_provider_tree_super_policy(mount->provider),readonly ? MD_MOUNT_READONLY : 0);
+    }
+    return -EOPNOTSUPP;
 }
 static int parameter(struct filesystem_context *c,const struct md_fs_request *q) {
     /* No current provider takes an FD-valued parameter. Validate the captured
@@ -127,7 +181,9 @@ static int parameter(struct filesystem_context *c,const struct md_fs_request *q)
         known=!strcmp(key,"mode") || !strcmp(key,"ptmxmode") || !strcmp(key,"uid") || !strcmp(key,"gid")
             || !strcmp(key,"max") || !strcmp(key,"newinstance");
         expect_string=strcmp(key,"newinstance")!=0; break;
-    case MD_FS_MOUNT_CGROUP: known=!strcmp(key,"devices"); expect_string=0; break;
+    case MD_FS_MOUNT_CGROUP:
+        known=!strcmp(key,"devices") || !strcmp(key,"none") || !strcmp(key,"name");
+        expect_string=!strcmp(key,"name"); break;
     case MD_FS_MOUNT_CGROUP2: {
         unsigned flags;
         known=*key && !strchr(key,',') && !md_cgroup_parse_options(key,&flags);
@@ -155,12 +211,14 @@ static int configure(struct md_filesystem *fs,struct filesystem_context *c,const
     if (c->phase==MOUNTED) {
         if (q->mode==FSCONFIG_CMD_CREATE) return -EBUSY;
         if (q->mode!=FSCONFIG_CMD_RECONFIGURE) return parameter(c,q);
-        if (!md_identity_capable_in(fs->store->identity,c->opener.user_namespace,CAP_SYS_ADMIN)) return -EPERM;
-        if (c->type!=MD_FS_MOUNT_TMPFS || c->size) return -EOPNOTSUPP;
-        struct md_inode_store *store;
-        struct md_view_mount source={.backing=MD_MOUNT_INODE,.storage=c->source.storage};
-        int r=md_fs_storage_get(fs,&source,&store);
-        if (!r && c->flags_mask) r=md_inode_store_reconfigure(store,!!(c->flags&MS_RDONLY));
+        if (c->size) return -EOPNOTSUPP;
+        struct md_view_mount source={.backing=c->source.backing,.storage=c->source.storage,
+            .provider=c->source.provider};
+        if (!mounted_type(&source)) return -EOPNOTSUPP;
+        int r=0;
+        if (c->flags_mask) r=md_fs_super_reconfigure(fs,&source,!!(c->flags&MS_RDONLY));
+        else if (!md_identity_capable_in(fs->store->identity,c->source.storage
+                ? c->source.storage->owner : md_provider_tree_owner(c->source.provider),CAP_SYS_ADMIN)) r=-EPERM;
         if (!r) { c->flags=0; c->flags_mask=0; }
         return r;
     }
@@ -181,7 +239,7 @@ static int configure(struct md_filesystem *fs,struct filesystem_context *c,const
     struct md_fs_request create={.mode=c->type,.flags=c->flags,
         .value=c->options,.value_size=(unsigned)c->size+1};
     r=md_mount_source_create(fs,&create,&c->source);
-    if (!r && c->type==MD_FS_MOUNT_TMPFS) c->source.policy&=~MD_MOUNT_READONLY;
+    if (!r && (c->type==MD_FS_MOUNT_TMPFS || c->source.provider)) c->source.policy&=~MD_MOUNT_READONLY;
     fs->store->identity=identity; fs->actor=actor;
     c->phase=r ? FAILED : CREATED;
     return r;
@@ -219,6 +277,10 @@ void md_fs_context_mount(struct md_filesystem *fs,const struct md_fs_request *q,
     *result=(struct md_fs_result){.fd=-1};
     if (q->operation==MD_FS_FSOPEN) {
         result->error=open_context(fs,q,result,out);
+        return;
+    }
+    if (q->operation==MD_FS_FSPICK) {
+        result->error=pick_context(fs,q,result,out);
         return;
     }
     if (q->control.ops!=&context_ops) { result->error=-EINVAL; return; }

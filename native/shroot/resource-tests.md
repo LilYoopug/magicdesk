@@ -40,7 +40,9 @@ The same mount-namespace suite's `user-limits` case checks live
 `max_user_namespaces` control files in initial and freshly mounted proc views:
 ancestor quotas, child-limit escalation denial, clone/unshare rollback, retained
 namespace FDs, final-release reuse, readonly mounts and write authorization. It
-also verifies the read-only inotify limit values. Repeated quota-one creation and
+also verifies inotify limit read/write and restoration by the initial root
+identity, and write denial for root mapped to an unprivileged parent UID.
+Repeated quota-one creation and
 final-FD release cover kernel-reaped tasks left by native fast waits; fixtures set
 their own root/tmp permissions and remove their temporary proc mountpoints.
 Native `test_user_namespace`
@@ -650,7 +652,10 @@ does not establish general application FD-transfer support.
 killed by filters at the former task-local write/read points. Ordinary and
 nondumpable callers leave the peer's exact FD set unchanged. Large-argv checks
 cover chunking, rejected copying, O_PATH, CLOEXEC, read-only data, native seek and
-zero/one available result slots with RPC socket calls forbidden. The native
+zero/one available result slots with RPC socket calls forbidden. O_PATH keeps
+the native proc inode and zero size, while readable snapshots retain all image
+bytes. Protected full-table fstat/fstatat/statx checks include path/FD identity
+and the translated mount ID. The native
 nondumpable auxv control reports EACCES on this device; the positive guest check
 remains required. Worker checks additionally cancel construction at every stage
 and require its own descriptor count to return to baseline.

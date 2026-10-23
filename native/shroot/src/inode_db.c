@@ -317,8 +317,13 @@ int mdi_query_acquire(struct md_inode_store *s, enum mdi_query slot, sqlite3_stm
         [MDI_EVENT_SCAN] = "SELECT sequence,parent,object,name,mask,cookie FROM events WHERE sequence>?1 ORDER BY sequence",
         [MDI_EVENT_BIRTH] = "SELECT sequence FROM events WHERE object=?1 AND sequence>?2 AND (mask&256)!=0 ORDER BY sequence LIMIT 1",
         [MDI_EVENT_NAMES] = "SELECT n.parent,n.name FROM names n JOIN backings b ON b.object=n.object WHERE b.backing=?1 AND b.source=?2 AND b.scope=?3",
-        [MDI_BACKING_OBJECT] = "SELECT object FROM backings WHERE backing=?1 AND source=?2 AND scope=?3",
+        [MDI_BACKING_OBJECT] = "SELECT b.object,o.kind FROM backings b JOIN objects o ON o.object=b.object "
+            "WHERE b.backing=?1 AND b.source=?2 AND b.scope=?3",
         [MDI_FILE_PATH] = "SELECT parent,name,ambiguous FROM file_paths WHERE object=?1",
+        [MDI_DENTRY_CAPTURE] = "SELECT d.id FROM names n JOIN dentry_paths d ON d.cookie=n.cookie "
+            "WHERE n.parent=?1 AND n.name=?2 AND n.object=?3",
+        [MDI_DENTRY_PATH] = "SELECT parent,name,cookie IS NULL FROM dentry_paths WHERE id=?1 AND object=?2",
+        [MDI_DENTRY_BIRTH] = "SELECT parent,name,cookie IS NULL FROM dentry_paths WHERE object=?2 ORDER BY id LIMIT 1",
         [MDI_ACL] = "SELECT value FROM inode_acls WHERE object=?1 AND type=?2",
         [MDI_OVERLAY_LINK] = "SELECT upper,lower FROM overlay_links WHERE object=?1",
         [MDI_OVERLAY_NATIVE_NAME] = "SELECT 1 FROM overlay_links l JOIN objects u ON u.object=l.upper "

@@ -48,25 +48,25 @@ static void *limit_thread(void *data) {
 }
 static void namespace_limits(void) {
     unsigned before=descriptors();
-    assert(!md_user_namespace_set_limit(NULL,2));
+    assert(!md_user_namespace_set_limit(NULL,MD_USER_NAMESPACES,2));
     struct md_user_namespace *a=md_user_namespace_new(NULL,0,0,1); assert(a);
     struct md_id_extent map={0,0,10000};
     assert(!publish(a,0,NULL,0,0,UINT64_MAX,&map,1));
     assert(!publish(a,1,NULL,0,0,UINT64_MAX,&map,1));
-    assert(!md_user_namespace_set_limit(a,1));
+    assert(!md_user_namespace_set_limit(a,MD_USER_NAMESPACES,1));
     struct md_user_namespace *b=md_user_namespace_new(a,1000,1000,1); assert(b);
-    assert(md_user_namespace_limit(b)==INT_MAX);
+    assert(md_user_namespace_limit(b,MD_USER_NAMESPACES)==INT_MAX);
     assert(!md_user_namespace_new(a,1000,1000,1) && errno==ENOSPC);
     /* Another UID still charges the same creator of the ancestor. */
     assert(!md_user_namespace_new(a,2000,2000,1) && errno==ENOSPC);
-    assert(!md_user_namespace_set_limit(NULL,3));
+    assert(!md_user_namespace_set_limit(NULL,MD_USER_NAMESPACES,3));
     struct md_user_namespace *c=md_user_namespace_new(a,2000,2000,1); assert(c);
     md_user_namespace_release(c);
     int fds[2]; assert(md_user_namespace_export(b,fds,2)==2);
     struct md_user_namespace *copy=NULL;
     assert(!md_user_namespace_import(fds,2,&copy)); close(fds[0]); close(fds[1]);
-    assert(!md_user_namespace_set_limit(b,7) && md_user_namespace_limit(copy)==7);
-    assert(md_user_namespace_set_limit(copy,0)==-EPERM);
+    assert(!md_user_namespace_set_limit(b,MD_USER_NAMESPACES,7) && md_user_namespace_limit(copy,MD_USER_NAMESPACES)==7);
+    assert(md_user_namespace_set_limit(copy,MD_USER_NAMESPACES,0)==-EPERM);
     md_user_namespace_release(copy);
     struct md_control_file control=md_user_sysctl_new(b,NULL); assert(control.ops);
     md_user_namespace_release(b);
@@ -74,8 +74,8 @@ static void namespace_limits(void) {
     md_control_file_release(control);
     b=md_user_namespace_new(a,1000,1000,1); assert(b);
     md_user_namespace_release(b); md_user_namespace_release(a);
-    assert(md_user_namespace_set_limit(NULL,UINT32_MAX)==-EINVAL);
-    assert(!md_user_namespace_set_limit(NULL,4));
+    assert(md_user_namespace_set_limit(NULL,MD_USER_NAMESPACES,UINT32_MAX)==-EINVAL);
+    assert(!md_user_namespace_set_limit(NULL,MD_USER_NAMESPACES,4));
     for (unsigned round=0;round<4;++round) {
         pthread_t threads[8]; pthread_barrier_t barrier;
         assert(!pthread_barrier_init(&barrier,NULL,9));
@@ -94,7 +94,35 @@ static void namespace_limits(void) {
         for (unsigned i=0;i<8;++i) assert(!pthread_join(threads[i],NULL));
         assert(!pthread_barrier_destroy(&barrier));
     }
-    assert(!md_user_namespace_set_limit(NULL,INT_MAX));
+    assert(!md_user_namespace_set_limit(NULL,MD_USER_NAMESPACES,INT_MAX));
+    assert(descriptors()==before);
+}
+static void resource_limits(void) {
+    unsigned before=descriptors();
+    struct md_user_namespace *space=md_user_namespace_new(NULL,1000,1000,0); assert(space);
+    assert(!md_user_namespace_set_limit(NULL,MD_USER_INOTIFY_INSTANCES,2));
+    assert(!md_user_namespace_set_limit(NULL,MD_USER_INOTIFY_WATCHES,1));
+    struct md_user_charge *a=NULL,*b=NULL,*c=NULL;
+    assert(!md_user_charge_acquire(space,1000,MD_USER_INOTIFY_INSTANCES,&a));
+    assert(!md_user_charge_acquire(space,2000,MD_USER_INOTIFY_INSTANCES,&b));
+    /* A different UID in the child still charges the parent's creator. */
+    assert(md_user_charge_acquire(space,3000,MD_USER_INOTIFY_INSTANCES,&c)==-ENOSPC && !c);
+    assert(!md_user_charge_add(a,MD_USER_INOTIFY_WATCHES));
+    assert(md_user_charge_add(b,MD_USER_INOTIFY_WATCHES)==-ENOSPC);
+    md_user_charge_release(a,MD_USER_INOTIFY_WATCHES);
+    assert(!md_user_charge_add(b,MD_USER_INOTIFY_WATCHES));
+    assert(!md_user_namespace_set_limit(space,MD_USER_INOTIFY_INSTANCES,0));
+    assert(md_user_charge_add(a,MD_USER_INOTIFY_INSTANCES)==-ENOSPC);
+    md_user_namespace_release(space);
+    md_user_charge_release(a,MD_USER_INOTIFY_INSTANCES);
+    md_user_charge_release(b,MD_USER_INOTIFY_INSTANCES);
+    /* A retained watch keeps its creator chain valid after the instance charge. */
+    assert(md_user_charge_acquire(NULL,1000,MD_USER_INOTIFY_WATCHES,&c)==-ENOSPC);
+    md_user_charge_release(b,MD_USER_INOTIFY_WATCHES);
+    assert(!md_user_charge_acquire(NULL,1000,MD_USER_INOTIFY_WATCHES,&c));
+    md_user_charge_release(c,MD_USER_INOTIFY_WATCHES);
+    assert(!md_user_namespace_set_limit(NULL,MD_USER_INOTIFY_INSTANCES,MD_USER_DEFAULT_INOTIFY_INSTANCES));
+    assert(!md_user_namespace_set_limit(NULL,MD_USER_INOTIFY_WATCHES,MD_USER_DEFAULT_INOTIFY_WATCHES));
     assert(descriptors()==before);
 }
 static void credential_snapshot(void) {
@@ -383,6 +411,7 @@ static void proc_files(void) {
 }
 void test_user_namespace(void) {
     namespace_limits();
+    resource_limits();
     credential_snapshot();
     custody();
     selectors();

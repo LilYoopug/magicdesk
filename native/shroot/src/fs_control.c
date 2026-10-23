@@ -65,7 +65,7 @@ int md_fs_control_operation(struct md_filesystem *fs,struct md_mount_namespace *
         break;
     }
     case MD_FS_STATFS:
-        md_fs_statfs_result(fd,md_mount_policy_flags(&mount->policy),NULL,out,output);
+        md_fs_statfs_result(fd,md_view_policy_flags(mount),NULL,out,output);
         if (!out->error) {
             struct md_fs_statfs *st=output->data; st->type=source->filesystem;
             st->blocks=st->free_blocks=st->available_blocks=st->files=st->free_files=0;

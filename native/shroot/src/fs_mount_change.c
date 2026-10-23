@@ -7,16 +7,18 @@
 #include "fs_mount_propagation.h"
 #include "fs_continuation.h"
 #include "host_fs_view.h"
+#include "fs_context.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <linux/mount.h>
+#include <linux/magic.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
 
-static int require_root(struct md_filesystem *fs,const struct md_view_location *p) {
+int md_view_require_root(struct md_filesystem *fs,const struct md_view_location *p) {
     if (!p->mount) return -EINVAL;
     /* The initial inode mount has no materialized source until relocation.
      * Its logical root identity is independent of path spelling and chroot. */
@@ -109,7 +111,7 @@ static int attribute_check(const struct mount_attr *a) {
 static int attributes(struct md_filesystem *fs, const struct md_fs_request *q,
         const struct md_view_location *target, const struct mount_attr *a) {
     struct md_view_mount *root=target->mount ? target->mount : &fs->mounts->base;
-    int error=require_root(fs,target);
+    int error=md_view_require_root(fs,target);
     if (error) return error;
     /* A detached fsmount root has no parent. An unmounted old placement is not
      * a detached construction tree and must not regain namespace authority. */
@@ -506,7 +508,7 @@ int md_view_attach_source(struct md_filesystem *fs, const struct md_mount_source
 static int unmount(struct md_filesystem *fs, const struct md_fs_request *q,
         const struct md_view_location *target) {
     if (q->flags&~(MNT_DETACH|UMOUNT_NOFOLLOW)) return -ENOTSUP;
-    int error=require_root(fs,target);
+    int error=md_view_require_root(fs,target);
     if (error) return error;
     if (target->mount->detached) return -EINVAL;
     if (target->mount->locked) return -EINVAL;
@@ -536,7 +538,7 @@ static int move(struct md_filesystem *fs, const struct md_fs_request *q,
             |MOVE_MOUNT_F_SYMLINKS|MOVE_MOUNT_T_SYMLINKS))) return -EOPNOTSUPP;
     struct md_view_location source={.fd=-1,.parent=-1};
     int r=operand(fs,q,1,&source,resolved);
-    if (!r) r=source.view!=fs->mounts ? -EINVAL : require_root(fs,&source);
+    if (!r) r=source.view!=fs->mounts ? -EINVAL : md_view_require_root(fs,&source);
     /* Only an unplaced mount-FD root may be attached. An already unmounted
      * tree is not an anonymous mount namespace and cannot be resurrected. */
     if (!r && source.mount->detached && (!by_fd || source.mount->parent)) r=-EINVAL;
@@ -611,7 +613,7 @@ static int pivot(struct md_filesystem *fs, struct md_guest_domain *context,
     if (q->flags) return -EINVAL;
     if (!context) return -EINVAL;
     struct md_view_mount *old=md_view_root_mount(fs);
-    int error=require_root(fs,next);
+    int error=md_view_require_root(fs,next);
     if (error) return error;
     if (old->detached || next->mount->detached) return -EINVAL;
     if (next->mount->locked) return -EINVAL;
@@ -741,15 +743,19 @@ static int mount_change(struct md_filesystem *fs, struct md_guest_domain *contex
         else if (q->value_size && *(const char *)q->value) r=-EOPNOTSUPP;
         else {
             struct md_view_mount *mount=target.mount;
-            r=require_root(fs,&target);
+            r=md_view_require_root(fs,&target);
             if (!r) r=policy_check(fs,mount,md_fs_mount_flags(q->flags));
+            unsigned long type=mount->provider ? md_provider_tree_filesystem(mount->provider) : 0;
+            if (!r && !(q->flags&MS_BIND) && (type==SYSFS_MAGIC || type==PROC_SUPER_MAGIC
+                    || (mount->storage && mount->storage->filesystem_kind==MD_FILESYSTEM_TMPFS)))
+                r=md_fs_super_reconfigure(fs,mount,!!(q->flags&MS_RDONLY));
             if (!r) r=md_mount_policy_set(&mount->policy,md_fs_mount_flags(q->flags));
         }
         break;
     case MD_FS_MOUNT_PROPAGATION: {
         unsigned kind=q->flags&~MS_REC;
         if (!kind || (kind&(kind-1)) || (kind&~(MS_PRIVATE|MS_SLAVE|MS_SHARED|MS_UNBINDABLE))) r=-EINVAL;
-        else if ((r=require_root(fs,&target))) break;
+        else if ((r=md_view_require_root(fs,&target))) break;
         else r=md_view_mount_propagation(fs,target.mount,kind,!!(q->flags&MS_REC));
         break;
     }

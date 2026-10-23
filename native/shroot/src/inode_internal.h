@@ -41,7 +41,8 @@ enum mdi_query { MDI_NODE, MDI_FD, MDI_LOOKUP, MDI_DIRECTORY_NAME, MDI_READDIR,
     MDI_BEGIN_WRITE, MDI_COMMIT, MDI_ROLLBACK, MDI_EVENT, MDI_EVENT_TRIM,
     MDI_EVENT_END, MDI_EVENT_SCAN, MDI_EVENT_BIRTH, MDI_EVENT_NAMES, MDI_BACKING_OBJECT, MDI_FILE_PATH, MDI_ACL,
     MDI_OVERLAY_LINK, MDI_OVERLAY_NATIVE_NAME, MDI_DATA_VERSION, MDI_ADD_NAME, MDI_DELETE_NAME, MDI_REPARENT,
-    MDI_EMPTY, MDI_CREATE_OBJECT, MDI_METADATA, MDI_RESERVE_FIRST, MDI_RESERVE_ADD, MDI_RESERVE_TAKE, MDI_QUERY_COUNT };
+    MDI_EMPTY, MDI_CREATE_OBJECT, MDI_METADATA, MDI_RESERVE_FIRST, MDI_RESERVE_ADD, MDI_RESERVE_TAKE,
+    MDI_DENTRY_CAPTURE, MDI_DENTRY_PATH, MDI_DENTRY_BIRTH, MDI_QUERY_COUNT };
 struct mdi_read_cache;
 struct mdi_stat_location {
     char path[PATH_MAX];
@@ -68,7 +69,7 @@ struct md_inode_store {
     struct md_inode_lifetime *lifetime;
     const struct md_identity *identity;
     const struct md_landlock_policy *landlock;
-    int landlock_execute;
+    int image_open;
     const char *root_id;
     unsigned creation_mask;
     struct md_inode_boundary *boundary;
@@ -136,6 +137,8 @@ struct mdi_cache_key {
 struct mdi_path_name { char parent[33], name[NAME_MAX+1]; int ambiguous; };
 int mdi_cache_name_get(struct md_inode_store *, const struct mdi_cache_key *, struct mdi_path_name *);
 void mdi_cache_name_put(struct md_inode_store *, const struct mdi_cache_key *, const struct mdi_path_name *);
+int mdi_cache_number_get(struct md_inode_store *, const struct mdi_cache_key *, uint64_t *);
+void mdi_cache_number_put(struct md_inode_store *, const struct mdi_cache_key *, uint64_t);
 /* A NULL node stores/reads only the query's result, e.g. catalogue emptiness. */
 int mdi_cache_get(struct md_inode_store *, const struct mdi_cache_key *, struct mdi_node *, int *result);
 void mdi_cache_put(struct md_inode_store *, const struct mdi_cache_key *, const struct mdi_node *, int result);
@@ -217,6 +220,8 @@ int mdi_walk_pinned(struct md_inode_store *, int, const char *, enum mdi_follow,
         uint64_t resolve, struct mdi_location *, struct mdi_path_pin *);
 int mdi_location_path(struct md_inode_store *, const struct mdi_location *, char *, size_t);
 int mdi_node_path(struct md_inode_store *, const struct mdi_node *, char *, size_t);
+int mdi_dentry_capture(struct md_inode_store *,const struct mdi_location *,uint64_t *);
+int mdi_dentry_move(struct md_inode_store *,uint64_t,const char *,const char *);
 int mdi_parent_writable(struct md_inode_store *, const struct mdi_node *);
 int mdi_ancestor(struct md_inode_store *, const char *ancestor, const char *child);
 int mdi_add_name(struct md_inode_store *, const char *parent, const char *name, const char *object);

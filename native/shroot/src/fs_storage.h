@@ -21,7 +21,7 @@ struct md_fs_storage_scope {
     struct md_inode_store *store;
     const struct md_identity *identity;
     const struct md_landlock_policy *landlock;
-    int landlock_execute;
+    int image_open;
     const char *root;
     struct md_inode_boundary *boundary;
     unsigned mask;

@@ -30,7 +30,7 @@ struct md_watch_queue {
 int md_watch_queue_create(unsigned limit, int flags, struct md_watch_queue **out, int *reader) {
     if (!out || !reader) return -EFAULT;
     *out = NULL; *reader = -1;
-    if (!limit || limit > INT_MAX / RECORD_BYTES || flags & ~(IN_NONBLOCK | IN_CLOEXEC)) return -EINVAL;
+    if (limit > INT_MAX || flags & ~(IN_NONBLOCK | IN_CLOEXEC)) return -EINVAL;
     struct md_watch_queue *q = calloc(1, sizeof(*q));
     if (!q) return -ENOMEM;
     int pipefd[2];

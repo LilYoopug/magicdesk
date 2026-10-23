@@ -67,12 +67,13 @@ def main():
         check("native memfd metadata", root + "/libmagicdesk_guest_resource_guest.so native-metadata", "PASS native metadata:")
         check("guest memfd metadata", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
               + root + "/store --deadline-seconds 90 -- /bin/test native-metadata", "PASS native metadata:")
-        check("guest cgroup", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
-              + root + "/store --deadline-seconds 90 -- /bin/test cgroup", "PASS guest cgroup:")
-        check("guest PID-scoped cgroup", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
-              + root + "/store --deadline-seconds 90 -- /bin/test cgroup-pid", "PASS guest cgroup: PID namespace")
-        check("guest cgroup namespace", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
-              + root + "/store --deadline-seconds 90 -- /bin/test cgroup-namespace", "PASS guest cgroup namespace:")
+        for entry in (0, 1):
+            for case, message in (("cgroup", "PASS guest cgroup:"),
+                                  ("cgroup-pid", "PASS guest cgroup: PID namespace"),
+                                  ("cgroup-namespace", "PASS guest cgroup namespace:")):
+                check(f"guest {case} entry={entry}", root + "/libmagicdesk_guest_run.so --user 0:0"
+                      + f" --env SHROOT_MACHINE_ENTRY={entry} --diagnostics --store "
+                      + root + "/store --deadline-seconds 90 -- /bin/test " + case, message)
         check("guest private devpts", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
               + root + "/store --deadline-seconds 90 -- /bin/test devpts", "PASS guest devpts:")
         check("guest PID-scoped devpts", root + "/libmagicdesk_guest_run.so --user 0:0 --diagnostics --store "
@@ -276,10 +277,12 @@ def main():
     def check_exec_custody():
         check("native foreign executable", root + "/libmagicdesk_guest_resource_guest.so proc-exec direct " + root + "/native",
               "PASS foreign executable selection")
-        for image in ("direct", "memfd", "pid"):
-            check("guest foreign executable " + image, root + "/libmagicdesk_guest_run.so --diagnostics --store " + root
-                  + "/store" + (" --user 0" if image == "pid" else "")
-                  + " --deadline-seconds 90 -- /bin/test proc-exec " + image + " /tmp", "PASS foreign executable selection")
+        for entry in (0, 1):
+            for image in ("direct", "memfd", "pid"):
+                check(f"guest foreign executable {image} entry={entry}", root
+                      + f"/libmagicdesk_guest_run.so --env SHROOT_MACHINE_ENTRY={entry} --diagnostics --store " + root
+                      + "/store" + (" --user 0" if image == "pid" else "")
+                      + " --deadline-seconds 90 -- /bin/test proc-exec " + image + " /tmp", "PASS foreign executable selection")
         check("native exec preparation control", root + "/libmagicdesk_guest_resource_guest.so exec-custody-native "
               + root + "/native", "PASS exec preparation custody")
         check("guest exec preparation custody", root + "/libmagicdesk_guest_run.so --diagnostics --store " + root
@@ -343,8 +346,10 @@ def main():
     def check_returns():
         check("native protected return control", root + "/libmagicdesk_guest_resource_guest.so buffer-return-native "
               + root + "/native", "PASS protected return")
-        check("guest protected descriptor return", root + "/libmagicdesk_guest_run.so --diagnostics --store " + root
-              + "/store --bind /dev /attached --deadline-seconds 90 -- /bin/test buffer-return /tmp", "PASS protected return")
+        for entry in (0, 1):
+            check(f"guest protected descriptor return entry={entry}", root
+                  + f"/libmagicdesk_guest_run.so --env SHROOT_MACHINE_ENTRY={entry} --diagnostics --store " + root
+                  + "/store --bind /dev /attached --deadline-seconds 90 -- /bin/test buffer-return /tmp", "PASS protected return")
 
     def check_directories():
         check("native directory copy", root + "/libmagicdesk_guest_resource_guest.so buffer-directory "
@@ -410,7 +415,7 @@ def main():
         if args.case in ("all", "fs-buffer"):
             names += ("test_interception_memory", "test_interception_buffers")
         if args.case == "all":
-            names += ("test_open_job", "fs_dispatch", "test_launch_registry", "ipc_credentials_guest", "ipc_io_job", "fd_observation", "task_helper_fd", "test_native_mounts", "file_metadata", "event_signal")
+            names += ("test_open_job", "fs_dispatch", "test_launch_registry", "ipc_credentials_guest", "ipc_io_job", "fd_observation", "task_helper_fd", "test_native_mounts", "file_metadata", "event_signal", "test_svc_machine_signal")
             names += ("control_event", "wait_guest")
         if args.case == "control-event":
             names = ("control_event", "fd_filter_remote", "wait_guest", "bootstrap", "supervisor", "run", "service")
@@ -562,6 +567,8 @@ def main():
         if args.case == "all":
             check("file metadata ABI", root + "/libmagicdesk_guest_file_metadata.so", "PASS file metadata:")
             check("event signals", root + "/libmagicdesk_guest_event_signal.so", "PASS event signal:")
+            check("native alias signal continuation", root + "/libmagicdesk_guest_test_svc_machine_signal.so",
+                  "PASS native alias signal commit:")
         if args.case in ("all", "event-fairness"):
             check("pending continuations", root + "/libmagicdesk_guest_pending.so",
                   "PASS pending continuations")

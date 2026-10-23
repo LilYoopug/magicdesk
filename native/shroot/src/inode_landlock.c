@@ -52,7 +52,7 @@ int md_inode_landlock_fd(struct md_inode_store *s,int fd,int flags) {
     if (r) return r;
     struct mdi_node node;
     r=mdi_fd(s,fd,&node);
-    if (!r) r=mdi_landlock_object(s,&node,s->landlock_execute ? MD_LL_EXECUTE
+    if (!r) r=mdi_landlock_object(s,&node,s->image_open ? MD_LL_EXECUTE
         : md_landlock_open_access(flags,node.kind));
     return mdi_finish(s,r);
 }

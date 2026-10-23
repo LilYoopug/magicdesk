@@ -50,8 +50,9 @@ static int realtime_event(struct md_signal_delivery *q,pid_t tid,int signal,int 
         struct md_signal_delivery_node *node=*at;
         info=node->info; *at=node->next; free(node);
         if (ptrace(PTRACE_SETSIGINFO,tid,NULL,&info)<0) return -errno;
-    } else if (carrier) { *deliver=0; return 1; }
-    return 0;
+        return MD_SIGNAL_RESTORED;
+    } else if (carrier) { *deliver=0; return MD_SIGNAL_CARRIER; }
+    return MD_SIGNAL_NEW;
 }
 static int job_control(int signal) {
     return signal==SIGCONT || signal==SIGTSTP || signal==SIGTTIN || signal==SIGTTOU;
@@ -112,10 +113,10 @@ int md_signal_delivery_publish(struct md_signal_delivery *q,pid_t tid,pid_t grou
 int md_signal_delivery_event(struct md_signal_delivery *q,pid_t tid,int signal,int *deliver) {
     if (signal>=SIGRTMIN && signal<NSIG && (q->realtime || q->carriers[signal]))
         return realtime_event(q,tid,signal,deliver);
-    if (!q->active || signal!=q->first->info.si_signo) return 0;
+    if (!q->active || signal!=q->first->info.si_signo) return MD_SIGNAL_NEW;
     siginfo_t observed;
     if (ptrace(PTRACE_GETSIGINFO,tid,NULL,&observed)<0) return -errno;
-    if (observed.si_code>0) return 0;
+    if (observed.si_code>0) return MD_SIGNAL_NEW;
     struct md_signal_delivery_node *n=q->first;
     if (ptrace(PTRACE_SETSIGINFO,tid,NULL,&n->info)<0) return -errno;
     *deliver=signal;
@@ -126,10 +127,12 @@ int md_signal_delivery_event(struct md_signal_delivery *q,pid_t tid,int signal,i
          * kernel get_signal invocation. Do not execute a userspace checkpoint:
          * it would discard the pending SA_RESTART decision. */
         int error=arm(q,tid);
-        return error ? error : 1;
+        return error ? error : MD_SIGNAL_CARRIER;
     }
     if (ptrace(PTRACE_SETSIGMASK,tid,(void *)sizeof(q->mask),&q->mask)<0) return -errno;
-    q->active=0; return 1;
+    /* This is now the original delivery stop. Keep debugger admission and
+     * recipient-namespace translation in the ordinary signal path. */
+    q->active=0; return MD_SIGNAL_RESTORED;
 }
 void md_signal_delivery_clear(struct md_signal_delivery *q) {
     while (q->first) {

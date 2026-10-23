@@ -16,6 +16,56 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 
+def guest_root():
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+
+    def call(number, *args, error=0):
+        values = [ctypes.c_char_p(value.encode()) if isinstance(value, str)
+                  else ctypes.c_long(value) for value in args]
+        result = libc.syscall(ctypes.c_long(number), *values)
+        assert (ctypes.get_errno() if result < 0 else 0) == error, (number, args, result, ctypes.get_errno())
+        return result
+
+    context = call(433, -100, '/', 1)
+    call(431, context, 0, 'rw', 0, 0)
+    call(431, context, 7, 0, 0, 0)
+    assert not os.statvfs('/').f_flag & os.ST_RDONLY
+    call(431, context, 0, 'mode', 0, 0, error=errno.EINVAL)
+    trace = subprocess.run(['strace', '-e', 'trace=fspick,fsconfig,mount_setattr',
+                            'mount', '-o', 'remount,rw', '/'], capture_output=True, text=True)
+    print(trace.stderr, end='', flush=True)
+    assert trace.returncode == 0, trace
+    assert 'fspick(' in trace.stderr and 'FSCONFIG_CMD_RECONFIGURE' in trace.stderr, trace.stderr
+    # Superblock confirmation must not clear a readonly mount placement.
+    call(40, 0, '/', 0, 4096 | 32 | 1, 0)
+    call(431, context, 0, 'rw', 0, 0)
+    call(431, context, 7, 0, 0, 0)
+    assert os.statvfs('/').f_flag & os.ST_RDONLY
+    call(40, 0, '/', 0, 4096 | 32, 0)
+    assert not os.statvfs('/').f_flag & os.ST_RDONLY
+    child = os.fork()
+    if child == 0:
+        try:
+            call(97, 0x10000000 | 0x20000)
+            Path('/proc/self/uid_map').write_text('0 0 1\n')
+            Path('/proc/self/setgroups').write_text('deny\n')
+            Path('/proc/self/gid_map').write_text('0 0 1\n')
+            selected = call(433, -100, '/', 1)
+            for descriptor in (context, selected):
+                call(431, descriptor, 0, 'rw', 0, 0)
+                call(431, descriptor, 7, 0, 0, 0, error=errno.EPERM)
+            os._exit(0)
+        except BaseException:
+            import traceback
+            traceback.print_exc()
+            os._exit(1)
+    # EVENT_WAIT: child proves inherited/fresh context admission; suite bounds hangs.
+    assert os.waitpid(child, 0)[1] == 0
+    os.close(context)
+    print('PASS fspick persistent root: stock remount, mount policy and namespace authority', flush=True)
+
+
 def guest():
     libc = ctypes.CDLL(None, use_errno=True)
     libc.syscall.restype = ctypes.c_long
@@ -618,6 +668,77 @@ if sys.argv[-1] == '0':
         os.close(context)
         print('PASS fsconfig reconfigure: writers, unlinked files, mmap, aliases, namespace and per-mount policy', flush=True)
 
+        # A fresh context selects the mounted filesystem, not the fsopen FD.
+        call(40, 'tmpfs', str(root), 'tmpfs', 0, 0)
+        (root / 'subdir').mkdir()
+        (root / 'value').write_bytes(b'kept')
+        link = root / 'root-link'
+        link.symlink_to(root)
+        call(433, -100, str(root), 16, error=errno.EINVAL)
+        call(433, -100, str(root / 'subdir'), 0, error=errno.EINVAL)
+        call(433, -100, str(link), 2, error=errno.EINVAL)
+        picked = call(433, -100, str(link), 1)
+        assert fcntl.fcntl(picked, fcntl.F_GETFD) & fcntl.FD_CLOEXEC
+        call(431, picked, 6, 0, 0, 0, error=errno.EBUSY)
+        root_fd = os.open(root, os.O_PATH)
+        call(433, root_fd, '', 0, error=errno.ENOENT)
+        retained = call(433, root_fd, '', 8 | 4)
+        assert not fcntl.fcntl(retained, fcntl.F_GETFD) & fcntl.FD_CLOEXEC
+        config(picked, 'ro')
+        call(431, picked, 7, 0, 0, 0)
+        write_denied(root / 'value')
+        assert os.fstatvfs(root_fd).f_flag & os.ST_RDONLY
+        config(retained, 'rw')
+        call(431, retained, 7, 0, 0, 0)
+        (root / 'value').write_bytes(b'new')
+        call(39, str(root), 2)
+        config(retained, 'ro')
+        call(431, retained, 7, 0, 0, 0)
+        assert os.fstatvfs(root_fd).f_flag & os.ST_RDONLY
+        os.close(root_fd)
+        os.close(picked)
+        os.close(retained)
+        print('PASS fspick: mount root, symlinks, EMPTY_PATH, context lifetime and superblock policy', flush=True)
+
+        # Provider policy must cover aliases and an already-open control FD.
+        call(40, 'proc', str(root), 'proc', 0, 0)
+        picked = call(433, -100, str(root), 1)
+        domain = root / 'sys/kernel/domainname'
+        previous = domain.read_bytes()
+        control = os.open(domain, os.O_WRONLY)
+        config(picked, 'ro')
+        call(431, picked, 7, 0, 0, 0)
+        write_denied(domain)
+        try:
+            os.write(control, previous)
+            raise AssertionError('retained control ignored readonly superblock')
+        except OSError as error:
+            assert error.errno == errno.EROFS, error
+        assert os.statvfs(root).f_flag & os.ST_RDONLY
+        child = os.fork()
+        if child == 0:
+            call(97, 0x20000)
+            write_denied(domain)
+            call(97, 0x10000000 | 0x20000)
+            Path('/proc/self/uid_map').write_text('0 0 1\n')
+            Path('/proc/self/setgroups').write_text('deny\n')
+            Path('/proc/self/gid_map').write_text('0 0 1\n')
+            restricted = call(433, -100, str(root), 1)
+            config(restricted, 'rw')
+            call(431, restricted, 7, 0, 0, 0, error=errno.EPERM)
+            config(picked, 'rw')
+            call(431, picked, 7, 0, 0, 0, error=errno.EPERM)
+            os.close(restricted)
+            os._exit(0)
+        assert os.waitpid(child, 0)[1] == 0
+        config(picked, 'rw')
+        call(431, picked, 7, 0, 0, 0)
+        assert os.write(control, previous) == len(previous)
+        os.close(control)
+        os.close(picked)
+        call(39, str(root), 2)
+        print('PASS fspick provider: live controls, readonly and namespace copies', flush=True)
+
         # Real SCM_RIGHTS transfers retain authority, not the carrier inode.
         left, right = socket.socketpair()
         context = create(mode='0751')
@@ -819,8 +940,14 @@ if sys.argv[-1] == '0':
         call(437, -100, str(root), 1, 24, error=errno.EFAULT)
         print('PASS shared structure reader: openat2 zero extension and invalid buffers', flush=True)
 
+        mount_trace = ['strace', '-e', 'trace=fsopen,fspick,fsconfig,fsmount,move_mount,mount_setattr,open_tree,mount']
         for kind, options in [('tmpfs', 'mode=0755,size=65536k,strictatime'), ('cgroup2', None), ('cgroup', 'devices'),
-                              ('proc', None), ('devpts', 'newinstance,ptmxmode=0666,mode=0620,max=1028')]:
+                              ('proc', None), ('sysfs', None), ('devpts', 'newinstance,ptmxmode=0666,mode=0620,max=1028')]:
+            if kind == 'sysfs':
+                # The inherited network namespace belongs to the parent user
+                # namespace. A new user namespace cannot mount its sysfs.
+                call(430, 'sysfs', 1, error=errno.EPERM)
+                call(97, 0x40000000)  # CLONE_NEWNET owned by this user namespace.
             command = ['strace', '-e', 'trace=fsopen,fsconfig,fsmount,move_mount,mount_setattr',
                        'mount', '-t', kind]
             if options:
@@ -842,6 +969,21 @@ if sys.argv[-1] == '0':
                 entries = Path('/proc/self/mountinfo').read_text().splitlines()
                 entry = next(line for line in entries if line.split()[4] == str(root))
                 assert 'devices' in entry.split(' - ')[1].split()[2].split(','), entry
+            if kind in ('tmpfs', 'proc', 'sysfs'):
+                for mode in ('ro', 'rw'):
+                    result = subprocess.run(mount_trace + ['mount', '-o', 'remount,' + mode, str(root)],
+                                            capture_output=True, text=True)
+                    print(result.stderr, end='', flush=True)
+                    assert result.returncode == 0, result
+                    assert 'fspick(' in result.stderr and 'FSCONFIG_CMD_RECONFIGURE' in result.stderr, result.stderr
+                    assert bool(os.statvfs(root).f_flag & os.ST_RDONLY) == (mode == 'ro'), (kind, mode)
+                    if kind == 'proc':
+                        control_path = root / 'sys/kernel/domainname'
+                    elif kind == 'sysfs':
+                        control_path = root / 'class/net/lo/mtu'
+                    else:
+                        control_path = root
+                    assert bool(os.statvfs(control_path).f_flag & os.ST_RDONLY) == (mode == 'ro'), (kind, mode, control_path)
             call(39, str(root), 2)
         print('PASS stock util-linux mount using new API', flush=True)
 
@@ -875,15 +1017,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build', type=Path)
     parser.add_argument('store')
+    parser.add_argument('--base', action='store_true')
     args = parser.parse_args()
     from test_oci_services import Suite
     suite = Suite(args.build, args.build)
     target = '/tmp/md-mount-api-' + suite.report['id']
     prefix = [suite.runner, '--store', args.store, '--user', '0:0', '--network', 'routed']
+    if args.base:
+        prefix += ['--env', 'SHROOT_MACHINE_ENTRY=0']
+    suite.report['entry'] = 'base' if args.base else 'default'
     try:
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/test.py')
         suite.command(['/system/bin/ln', '-s', 'test.py', suite.base + '/linked.py'])
         suite.command(prefix + ['--', '/bin/mkdir', target])
+        suite.command(prefix + ['--bind-ro', suite.base, target, '--deadline-seconds', '30', '--',
+                              '/usr/bin/unshare', '--mount', '/usr/bin/python3',
+                              target + '/test.py', '--guest-root'], timeout=45)
         command = prefix + ['--bind-ro', suite.base, target, '--deadline-seconds', '100', '--',
                             '/usr/bin/unshare', '--user', '--map-users=0:0:65536', '--map-groups=0:0:65536',
                             '--mount', '--pid', '--fork', '/usr/bin/python3', target + '/test.py', '--guest']
@@ -899,5 +1048,7 @@ def main():
 if __name__ == '__main__':
     if sys.argv[1:] == ['--guest']:
         guest()
+    elif sys.argv[1:] == ['--guest-root']:
+        guest_root()
     else:
         main()

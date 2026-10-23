@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #define DATA_EVENTS (IN_ACCESS | IN_MODIFY | IN_ATTRIB | IN_OPEN | IN_CLOSE)
+enum { PROVIDER_EVENT_BUDGET=16384 };
 struct subscription {
     struct subscription *next;
     int wd, native;
@@ -28,12 +29,14 @@ struct subscription {
     struct watch_source *source;
     struct provider_source *provider;
     struct md_watch_interest *interest;
+    struct md_user_charge *charge;
     uint64_t provider_object,provider_after;
 };
 struct instance {
     struct instance *next;
     struct subscription *subscriptions;
     struct md_watch_queue *queue;
+    struct md_user_charge *charge;
     dev_t device;
     ino_t inode;
     int last_wd;
@@ -51,7 +54,6 @@ struct md_inode_watches {
     struct instance *instances;
     struct watch_source *sources;
     int epoll;
-    unsigned instance_count, subscription_count;
     struct provider_source *providers;
 };
 struct provider_source {
@@ -60,6 +62,15 @@ struct provider_source {
     struct md_watch_listener *listener;
     unsigned subscriptions;
 };
+static atomic_uint queue_limit=16384;
+unsigned md_inode_watch_queue_limit(void) {
+    return atomic_load_explicit(&queue_limit,memory_order_relaxed);
+}
+int md_inode_watch_set_queue_limit(unsigned limit) {
+    if (limit>INT_MAX) return -EINVAL;
+    atomic_store_explicit(&queue_limit,limit,memory_order_relaxed);
+    return 0;
+}
 static int epoll_add(int epoll, int fd, unsigned events) {
     struct epoll_event event = {.events = events, .data.fd = fd};
     return epoll_ctl(epoll, EPOLL_CTL_ADD, fd, &event) ? -errno : 0;
@@ -103,7 +114,55 @@ static int valid_mask(unsigned mask) {
     return (mask&IN_ALL_EVENTS) && !(mask&~valid)
         && !((mask&IN_MASK_ADD) && (mask&IN_MASK_CREATE));
 }
-static int link_subscription(struct md_inode_watches *w,struct instance *i,struct subscription *p) {
+static void logical_source_stop(struct md_inode_watches *w,struct watch_source *source) {
+    int descriptors[MDI_SOURCES+2];
+    for (unsigned n=0;n<MDI_SOURCES;++n) {
+        descriptors[n]=source->sources[n]; source->sources[n]=-1;
+    }
+    descriptors[MDI_SOURCES]=source->database; source->database=-1;
+    descriptors[MDI_SOURCES+1]=source->control; source->control=-1;
+    source->objects=-1;
+    for (unsigned n=0;n<MDI_SOURCES+2;++n) retire_native(w,source,descriptors[n]);
+    if (source->presence>=0) close(source->presence);
+    source->presence=-1; source->publishing=0; source->birth_cookie=0;
+}
+static int logical_source_refresh(struct md_inode_watches *w,struct watch_source *source,
+        const struct subscription *extra) {
+    unsigned mask=extra && *extra->object ? extra->mask : 0;
+    for (struct instance *i=w->instances;i;i=i->next)
+        for (struct subscription *p=i->subscriptions;p;p=p->next)
+            if (p->source==source && *p->object) mask|=p->mask;
+    if (!mask) { logical_source_stop(w,source); return 0; }
+    struct md_inode_store *s=source->store;
+    int error=0;
+    if (source->presence<0) {
+        source->presence=openat(s->lifetime->root,"watch.lock",O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+        if (source->presence<0 || flock(source->presence,LOCK_SH|LOCK_NB)) error=-errno;
+        if (!error && (source->database=watch_path(source->native,s->lifetime->root,"/namespace.db-wal",IN_MODIFY))<0)
+            error=source->database;
+        if (!error && (source->control=watch_path(source->native,s->lifetime->root,"",IN_CREATE))<0)
+            error=source->control;
+    }
+    /* Storage-wide data observation exists only for interested logical
+     * subscribers. Native/provider watches must not collect unrelated IO. */
+    unsigned data=mask&DATA_EVENTS;
+    if (!error) {
+        source->objects=watch_path(source->native,s->objects,"",data|IN_CREATE|IN_MOVED_FROM|IN_MOVED_TO);
+        source->sources[0]=source->objects;
+        if (source->objects<0) error=source->objects;
+    }
+    for (unsigned n=1;!error && n<MDI_SOURCES;++n) if (s->lifetime->sources[n]>=0) {
+        if (data) {
+            source->sources[n]=watch_path(source->native,s->lifetime->sources[n],"",data);
+            if (source->sources[n]<0) error=source->sources[n];
+        } else {
+            int wd=source->sources[n]; source->sources[n]=-1; retire_native(w,source,wd);
+        }
+    }
+    if (error && !source->logical_subscriptions) logical_source_stop(w,source);
+    return error;
+}
+static int link_subscription(struct instance *i,struct subscription *p) {
     if (p->source) {
         ++p->source->subscriptions;
         if (*p->object) {
@@ -115,7 +174,7 @@ static int link_subscription(struct md_inode_watches *w,struct instance *i,struc
     }
     if (p->provider) ++p->provider->subscriptions;
     p->wd=++i->last_wd;
-    p->next=i->subscriptions; i->subscriptions=p; ++w->subscription_count;
+    p->next=i->subscriptions; i->subscriptions=p;
     return p->wd;
 }
 static void unlink_subscription(struct md_inode_watches *w,struct subscription **link) {
@@ -131,14 +190,17 @@ static void unlink_subscription(struct md_inode_watches *w,struct subscription *
         --p->provider->subscriptions;
         md_watch_listener_forget(p->provider->listener,p->interest);
     }
-    free(p); --w->subscription_count;
+    md_user_charge_release(p->charge,MD_USER_INOTIFY_WATCHES);
+    free(p);
     retire_native(w,source,native);
+    if (source) logical_source_refresh(w,source,NULL);
 }
 static void free_instance(struct md_inode_watches *w, struct instance *i) {
     while (i->subscriptions) unlink_subscription(w,&i->subscriptions);
     epoll_ctl(w->epoll, EPOLL_CTL_DEL, md_watch_queue_lifetime(i->queue), NULL);
     md_watch_queue_destroy(i->queue);
-    free(i); --w->instance_count;
+    md_user_charge_release(i->charge,MD_USER_INOTIFY_INSTANCES);
+    free(i);
 }
 static void source_close(struct watch_source *p) {
     if (p->native>=0) close(p->native);
@@ -184,25 +246,15 @@ static int source_get(struct md_inode_store *owner, struct md_inode_store *store
         if (md_inode_lifetime_same(p->store->lifetime,store->lifetime)) { *out=p; return 0; }
     struct watch_source *p=calloc(1,sizeof(*p));
     if (!p) return -ENOMEM;
-    p->native=p->presence=-1;
+    p->native=p->presence=p->database=p->objects=p->control=-1;
     for (unsigned i=0;i<MDI_SOURCES;++i) p->sources[i]=-1;
     int r=0;
     if (store==owner) p->store=owner;
     else { r=md_inode_store_reconnect(store->lifetime,&p->store); p->owned=1; }
     struct md_inode_store *s=p->store;
     if (!r) r=mdi_begin(s,0);
-    if (!r && (p->presence=openat(s->lifetime->root,"watch.lock",O_RDONLY|O_CLOEXEC|O_NOFOLLOW))<0) r=-errno;
-    if (!r && flock(p->presence,LOCK_SH|LOCK_NB)) r=-errno;
     if (!r && (p->native=inotify_init1(IN_NONBLOCK|IN_CLOEXEC))<0) r=-errno;
     if (!r) r=epoll_add(w->epoll,p->native,EPOLLIN);
-    if (!r && (p->database=watch_path(p->native,s->lifetime->root,"/namespace.db-wal",IN_MODIFY))<0) r=p->database;
-    if (!r && (p->objects=watch_path(p->native,s->objects,"",DATA_EVENTS|IN_CREATE|IN_MOVED_FROM|IN_MOVED_TO))<0) r=p->objects;
-    if (!r && (p->control=watch_path(p->native,s->lifetime->root,"",IN_CREATE))<0) r=p->control;
-    p->sources[0]=p->objects;
-    for (unsigned i = 1; !r && i < MDI_SOURCES; ++i) if (s->lifetime->sources[i] >= 0) {
-        p->sources[i] = watch_path(p->native, s->lifetime->sources[i], "", DATA_EVENTS);
-        if (p->sources[i] < 0) r = p->sources[i];
-    }
     if (!r) r=journal_end(s,&p->cursor);
     if (s && s->locked) r=mdi_finish(s,r);
     if (r) source_close(p);
@@ -223,25 +275,29 @@ static int start(struct md_inode_store *s) {
 }
 int md_inode_watch_create(struct md_inode_store *s, int flags) {
     if (flags & ~(IN_NONBLOCK | IN_CLOEXEC)) return -EINVAL;
-    int r = start(s);
+    int r = md_inode_watch_pump(s);
+    if (!r) r = start(s);
     if (r) return r;
     struct md_inode_watches *w = s->watches;
-    if (w->instance_count == MD_INOTIFY_MAX_INSTANCES) return -EMFILE;
     struct instance *i = calloc(1, sizeof(*i));
     if (!i) { if (!w->instances) md_inode_watch_close(s); return -ENOMEM; }
     int fd = -1;
-    r = md_watch_queue_create(MD_INOTIFY_QUEUE_LIMIT, flags, &i->queue, &fd);
+    r = md_user_charge_acquire(s->identity ? s->identity->user_namespace : NULL,
+        s->identity ? s->identity->uid.real : 0,MD_USER_INOTIFY_INSTANCES,&i->charge);
+    if (r==-ENOSPC) r=-EMFILE;
+    if (!r) r = md_watch_queue_create(md_inode_watch_queue_limit(), flags, &i->queue, &fd);
     struct stat st;
     if (!r && fstat(fd, &st)) r = -errno;
     if (!r) r = epoll_add(w->epoll, md_watch_queue_lifetime(i->queue), 0);
     if (r) {
         if (fd >= 0) close(fd);
-        md_watch_queue_destroy(i->queue); free(i);
+        md_watch_queue_destroy(i->queue);
+        md_user_charge_release(i->charge,MD_USER_INOTIFY_INSTANCES); free(i);
         if (!w->instances) md_inode_watch_close(s);
         return r;
     }
     i->device = st.st_dev; i->inode = st.st_ino;
-    i->next = w->instances; w->instances = i; ++w->instance_count;
+    i->next = w->instances; w->instances = i;
     return fd;
 }
 static int remove_subscription(struct md_inode_watches *w, struct instance *i, struct subscription **link) {
@@ -261,8 +317,11 @@ static int publish(struct md_inode_watches *w, struct instance *i, struct subscr
     }
     return r == -EPIPE ? 0 : r;
 }
-static int overflow(struct md_inode_watches *w) {
+static int overflow(struct md_inode_watches *w,struct watch_source *source,int logical) {
     for (struct instance *i = w->instances; i; i = i->next) {
+        struct subscription *p=i->subscriptions;
+        while (p && (p->source!=source || (logical && !*p->object))) p=p->next;
+        if (!p) continue;
         int r = md_watch_queue_emit(i->queue, -1, IN_Q_OVERFLOW, 0, NULL);
         if (r && r != -EPIPE) return r;
     }
@@ -278,7 +337,7 @@ static int journal(struct md_inode_watches *w, struct watch_source *source,int64
         if (rc != SQLITE_ROW) { r = mdi_sql_error(rc); break; }
         int64_t sequence = sqlite3_column_int64(q, 0);
         if (sequence>through) break;
-        if (sequence != source->cursor + 1) r = overflow(w);
+        if (sequence != source->cursor + 1) r = overflow(w,source,1);
         const char *parent = (const char *)sqlite3_column_text(q, 1);
         const char *object = (const char *)sqlite3_column_text(q, 2);
         int n = sqlite3_column_bytes(q, 3);
@@ -304,7 +363,7 @@ static int journal(struct md_inode_watches *w, struct watch_source *source,int64
 }
 static int native_event(struct md_inode_watches *w, struct watch_source *backend, const struct inotify_event *event) {
     struct md_inode_store *s=backend->store;
-    if (event->mask & IN_Q_OVERFLOW) { backend->publishing=0; backend->birth_cookie=0; return overflow(w); }
+    if (event->mask & IN_Q_OVERFLOW) { backend->publishing=0; backend->birth_cookie=0; return overflow(w,backend,0); }
     if (event->wd==backend->control) {
         if (event->len && !strcmp(event->name,"publication-v1.begin")) backend->publishing=1;
         if (event->len && !strcmp(event->name,"publication-v1.end")) backend->publishing=0;
@@ -338,14 +397,22 @@ static int native_event(struct md_inode_watches *w, struct watch_source *backend
         if (!r) r = mdi_bind_id(object, 1, event->name);
         if (!r) r = mdi_sql_error(sqlite3_bind_int(object, 2, source));
         char id[33] = {0};
+        int directory=0;
         if (!r) {
             int rc = mdi_step(s, object);
-            if (rc == SQLITE_ROW && sqlite3_column_bytes(object, 0) == 32)
+            if (rc == SQLITE_ROW && sqlite3_column_bytes(object, 0) == 32) {
                 memcpy(id, sqlite3_column_text(object, 0), 32);
+                directory=sqlite3_column_int(object,1)==S_IFDIR;
+            }
             else if (rc != SQLITE_DONE) r = mdi_sql_failure(rc);
         }
         r = mdi_query_release(object, r);
         if (r || !*id) return r;
+        /* Directory attributes are published by the logical mutation. Native
+         * timestamps also change for child namespace operations, with no
+         * corresponding parent MODIFY/ATTRIB notification in Linux. */
+        if (directory) mask&=~(IN_MODIFY|IN_ATTRIB);
+        if (!mask || (mask==IN_ISDIR)) return 0;
         if ((event->mask&IN_CREATE) || birth) {
             /* Allocation opens its backing before catalogue commit. Publish
              * the committed birth at this position, before that native OPEN,
@@ -440,8 +507,9 @@ static int drain_native(struct md_inode_watches *w, struct watch_source *source,
 int md_inode_watch_pump(struct md_inode_store *s) {
     struct md_inode_watches *w = s->watches;
     if (!w) return 0;
-    struct epoll_event events[MD_INOTIFY_MAX_INSTANCES+1];
-    int n = epoll_wait(w->epoll, events, MD_INOTIFY_MAX_INSTANCES+1, 0);
+    /* Bounded dispatch batch, independent of the configurable user quota. */
+    struct epoll_event events[128];
+    int n = epoll_wait(w->epoll, events, 128, 0);
     if (n < 0) return errno == EINTR ? 0 : -errno;
     for (int j = 0; j < n; ++j) if (events[j].events & (EPOLLERR | EPOLLHUP)) {
         struct instance **link = &w->instances;
@@ -470,7 +538,7 @@ int md_inode_watch_pump(struct md_inode_store *s) {
     }
     for (struct provider_source *p=w->providers;p;p=p->next) {
         struct md_watch_event event;
-        for (unsigned budget=0;budget<MD_INOTIFY_QUEUE_LIMIT && md_watch_listener_next(p->listener,&event);++budget) {
+        for (unsigned budget=0;budget<PROVIDER_EVENT_BUDGET && md_watch_listener_next(p->listener,&event);++budget) {
             if (event.mask&IN_Q_OVERFLOW) {
                 for (struct instance *i=w->instances;i;i=i->next) {
                     struct subscription *s=i->subscriptions;
@@ -531,26 +599,33 @@ static int add(struct md_inode_store *owner, struct md_inode_store *selected,
             : *p->object || p->device != st.st_dev || p->inode != st.st_ino))) p = p->next;
     if (p) {
         if (mask & IN_MASK_CREATE) return -EEXIST;
+        unsigned previous=p->mask;
         p->mask = mask & IN_MASK_ADD ? p->mask | mask : mask;
+        r=logical_source_refresh(owner->watches,source,NULL);
+        if (r) { p->mask=previous; logical_source_refresh(owner->watches,source,NULL); return r; }
         return p->wd;
     }
     struct md_inode_watches *w = owner->watches;
-    if (w->subscription_count == MD_INOTIFY_MAX_WATCHES) return -ENOSPC;
     if (i->last_wd == INT_MAX) return -ENOSPC;
     p = calloc(1, sizeof(*p));
     if (!p) return -ENOMEM;
-    r = mdi_begin(s, 0);
+    r=md_user_charge_add(i->charge,MD_USER_INOTIFY_WATCHES);
     if (r) { free(p); return r; }
+    p->charge=i->charge;
+    r = mdi_begin(s, 0);
+    if (r) { md_user_charge_release(p->charge,MD_USER_INOTIFY_WATCHES); free(p); return r; }
+    struct mdi_node node;
+    r = mdi_fd(s, object, &node);
+    if (!r && !node.native) memcpy(p->object, node.id, sizeof(p->object));
+    else if (r == -EXDEV) r = 0;
+    p->mask=mask;
     /* Registration excludes already queued native data, just as the journal
      * cursor excludes earlier commits. Snapshot the finite backlog so writers
      * cannot extend registration indefinitely. */
     int backlog = 0;
-    if (ioctl(source->native, FIONREAD, &backlog)) r = -errno;
+    if (!r && ioctl(source->native, FIONREAD, &backlog)) r = -errno;
     if (!r) r = drain_native(w, source, (size_t)backlog);
-    struct mdi_node node;
-    if (!r) r = mdi_fd(s, object, &node);
-    if (!r && !node.native) memcpy(p->object, node.id, sizeof(p->object));
-    else if (r == -EXDEV) r = 0;
+    if (!r) r=logical_source_refresh(w,source,p);
     if (!r) r = journal_end(s, &p->after);
     if (!r) {
         if (*p->object && node.kind!=S_IFDIR) {
@@ -561,9 +636,12 @@ static int add(struct md_inode_store *owner, struct md_inode_store *selected,
         }
     }
     r = mdi_finish(s, r);
-    if (r) { free(p); return r; }
+    if (r) {
+        logical_source_refresh(w,source,NULL);
+        md_user_charge_release(p->charge,MD_USER_INOTIFY_WATCHES); free(p); return r;
+    }
     p->mask = mask; p->device = st.st_dev; p->inode = st.st_ino; p->source=source;
-    return link_subscription(w,i,p);
+    return link_subscription(i,p);
 }
 int md_inode_watch_add_from(struct md_inode_store *owner, struct md_inode_store *selected,
         int fd, int object, unsigned mask) {
@@ -592,22 +670,27 @@ int md_inode_watch_add_provider(struct md_inode_store *owner,int fd,struct md_wa
         md_watch_listener_update(p->listener,s->interest,s->mask);
         return s->wd;
     }
-    if (w->subscription_count==MD_INOTIFY_MAX_WATCHES || i->last_wd==INT_MAX) return -ENOSPC;
+    if (i->last_wd==INT_MAX) return -ENOSPC;
     struct subscription *sub=calloc(1,sizeof(*sub));
     if (!sub) return -ENOMEM;
+    error=md_user_charge_add(i->charge,MD_USER_INOTIFY_WATCHES);
+    if (error) { free(sub); return error; }
+    sub->charge=i->charge;
     if (!p) {
         p=calloc(1,sizeof(*p));
-        if (!p) { free(sub); return -ENOMEM; }
+        if (!p) { error=-ENOMEM; goto fail; }
         error=md_watch_source_subscribe(source,&p->listener);
         if (!error) error=epoll_add(w->epoll,md_watch_listener_descriptor(p->listener),EPOLLIN);
-        if (error) { md_watch_source_unsubscribe(p->listener); free(p); free(sub); return error; }
+        if (error) { md_watch_source_unsubscribe(p->listener); free(p); goto fail; }
         p->source=source; p->next=w->providers; w->providers=p;
     }
     error=md_watch_listener_admit(p->listener,object,mask,&sub->interest,&sub->provider_after);
-    if (error) { free(sub); source_collect(w); return error; }
+    if (error) { source_collect(w); goto fail; }
     sub->provider=p; sub->provider_object=object;
     sub->native=-1; sub->mask=mask;
-    return link_subscription(w,i,sub);
+    return link_subscription(i,sub);
+fail:
+    md_user_charge_release(sub->charge,MD_USER_INOTIFY_WATCHES); free(sub); return error;
 }
 int md_inode_watch_remove(struct md_inode_store *s, int fd, int wd) {
     int r = md_inode_watch_pump(s);

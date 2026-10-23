@@ -111,9 +111,17 @@ rechecks retired tasks only on `ENOSPC`. The existing PID-observation barrier
 protects in-flight wait translations. Ordinary creation and native waits gain no
 periodic scans or extra completion interception.
 
-The proc provider also publishes the implemented fixed inotify instance, watch
-and queue limits under `/proc/sys/fs/inotify`. These values share constants with
-`inode_watch`; writes fail instead of pretending to reconfigure its limits.
+The proc provider publishes writable launch-local inotify limits under
+`/proc/sys/fs/inotify`. Instance and watch quotas share `user_namespace`'s
+per-canonical-UID accounting and ancestor-creator charging, across filesystem
+workers. Each descriptor retains its original account through credential changes
+and descriptor transfers. Registration failure, removal, one-shot retirement and
+last close release their charges. The default limits are 128 instances and 8192
+watches per UID; lowering either limit affects new admissions, not live objects.
+Queue capacity (default 16384 events) is captured when an instance is created;
+zero capacity emits overflow notifications. Global-root DAC protects sysctl
+writes, independently of UTS/mount namespaces. Neither ordinary file IO nor
+event delivery takes the quota lock. Host resource exhaustion remains an error.
 
 Proc control files share descriptor ownership, offsets, copying and cancellation
 through `proc_file`. Their lazy selector is armed only in tables receiving those
@@ -398,6 +406,21 @@ an open writer promotes its retained backing before unlink, so a later remount
 cannot overlook it. This lease-based check is confined to temporary tmpfs stores;
 persistent-file deletion keeps its native fast path.
 
+`fspick` retains a mounted inode/proc/sysfs superblock independently of its
+placement and the original `fsopen` descriptor. It requires a mount root, honors
+nofollow/empty-path selection, and checks the superblock's user namespace when
+reconfiguring. Read-only provider policy is separate from each mount's flags:
+bind aliases and namespace copies observe it, including already-open typed
+controls. Portable host projections carry the same live sealed policy to peers;
+an imported observer cannot change it. Ordinary inode-backed paths do not acquire
+a provider-policy mapping or an additional syscall. Unsupported filesystem
+options and other reconfiguration providers still fail explicitly. Persistent
+inode stores accept confirmation of their existing superblock mode, including
+stock util-linux's `remount,rw` during boot. This does not clear per-mount readonly
+policy or authorize a child user namespace. Changing a writable persistent
+superblock to readonly remains unsupported: it needs writer tracking beyond the
+tmpfs owner, not an unconditional successful acknowledgement.
+
 Bind operands can be exact retained files or directories, including proc-FD
 aliases. Their mount provenance survives detach/rebind; selecting a regular
 file does not substitute its parent directory. Named readlink on a non-link
@@ -514,7 +537,13 @@ fails explicitly for private devpts.
 ## Permissive Cgroups
 
 `cgroup` owns a launch-local world with a cgroup2 hierarchy and a cgroup v1
-`devices` hierarchy. Tasks retain membership independently of mount views;
+`devices` hierarchy, plus independently named v1 membership hierarchies
+(`none,name=NAME`). Both legacy mount and fsopen/fsconfig use the same owner;
+remounting a name shares its groups, not another name's membership. Named
+hierarchies expose procs/tasks and release controls, not fictitious resource
+controllers. Their slots are allocated only when such a hierarchy is used;
+unified-only launches retain the small inline membership representation.
+Tasks retain membership independently of mount views;
 fork inherits it, exec preserves it, exit removes live membership. Proc cgroup
 paths use the reader's cgroup namespace; control-file PID lists use the caller's
 PID namespace. Mounting the same hierarchy again retains its existing state.

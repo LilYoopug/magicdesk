@@ -18,6 +18,8 @@ long md_namespace_relative_mount(const struct md_fs *, int, char *);
 long md_namespace_native_descriptor(int);
 long md_namespace_inspect(const struct md_fs *, struct md_namespace_operand, const char *, int, unsigned, struct md_fs_response *);
 long md_namespace_native_statx(const struct md_fs *, const unsigned long *);
+struct statx;
+long md_namespace_native_statx_result(const struct md_fs *, const unsigned long *, struct statx *);
 long md_namespace_host_open_resolved(const struct md_fs *,int,const char *,const char *,const struct open_how *,uint64_t);
 long md_namespace_memory_open(pid_t,long,const unsigned long *);
 long md_namespace_proc_link_metadata(long,const unsigned long *,const char *,uint64_t);

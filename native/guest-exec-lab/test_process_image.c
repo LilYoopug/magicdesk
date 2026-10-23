@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/auxv.h>
 #include <sys/prctl.h>
@@ -67,7 +68,58 @@ static void protected_image(int argc,char **argv,int other_user) {
     close(ready[0]); close(ready[1]); close(finish[0]); close(finish[1]);
     puts("PASS protected process image: self exe and live cmdline readable; foreign auxv/exe stay denied");
 }
+static void title_snapshot(const char *path,const char *expected,size_t size) {
+    int fd=open(path,O_RDONLY|O_CLOEXEC); assert(fd>=0);
+    size_t offset=0;
+    char bytes[127];
+    while (offset<size) {
+        ssize_t n=read(fd,bytes,sizeof(bytes));
+        assert(n>0 && (size_t)n<=size-offset && !memcmp(bytes,expected+offset,(size_t)n));
+        offset+=(size_t)n;
+    }
+    assert(read(fd,bytes,1)==0);
+    assert(pread(fd,bytes,1,(off_t)size)==0);
+    if (size>1) assert(pread(fd,bytes,1,1)==1 && bytes[0]==expected[1]);
+    close(fd);
+}
+static void process_title(int argc,char **argv) {
+    extern char **environ;
+    char *start=argv[0], *end=argv[argc-1]+strlen(argv[argc-1])+1;
+    assert(environ[0]==end);
+    size_t arguments=(size_t)(end-start);
+    for (unsigned i=0;environ[i];++i) end=environ[i]+strlen(environ[i])+1;
+    size_t total=(size_t)(end-start), page=(size_t)sysconf(_SC_PAGESIZE);
+    assert(total>page && total>arguments+64);
+    char *backup=malloc(total); assert(backup); memcpy(backup,start,total);
+    for (unsigned mode=0;mode<4;++mode) {
+        memset(start,'T',total);
+        size_t size;
+        if (mode==0) { size=arguments+64; start[size-1]=0; if (size>page) size=page; }
+        else if (mode==1) { memcpy(start,"new title",10); size=10; }
+        else if (mode==2) size=page;
+        else { start[arguments-1]=0; start[1]=0; size=arguments; }
+        title_snapshot("/proc/self/cmdline",start,size);
+        int ready[2],finish[2]; assert(!pipe(ready) && !pipe(finish));
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            assert(!prctl(PR_SET_DUMPABLE,0,0,0,0));
+            title_snapshot("/proc/self/cmdline",start,size);
+            assert(write(ready[1],"!",1)==1);
+            char byte; assert(read(finish[0],&byte,1)==1);
+            _exit(0);
+        }
+        char byte; assert(read(ready[0],&byte,1)==1);
+        char path[64]; snprintf(path,sizeof(path),"/proc/%d/cmdline",child);
+        title_snapshot(path,start,size);
+        assert(write(finish[1],"!",1)==1);
+        int status; assert(waitpid(child,&status,0)==child && !status);
+        close(ready[0]); close(ready[1]); close(finish[0]); close(finish[1]);
+    }
+    memcpy(start,backup,total); free(backup);
+    puts("PASS process title: extended argv/environment, first NUL, page bound and protected foreign views");
+}
 int main(int argc, char **argv) {
+    if (argc==2 && !strcmp(argv[1],"title")) { process_title(argc,argv); return 0; }
     if (argc==2 && (!strcmp(argv[1],"protected") || !strcmp(argv[1],"protected-other-user"))) {
         protected_image(argc,argv,!strcmp(argv[1],"protected-other-user")); return 0;
     }

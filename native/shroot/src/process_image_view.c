@@ -5,6 +5,7 @@
 #include "control_file.h"
 #include "program_files.h"
 #include "arguments.h"
+#include "process_arguments.h"
 #include "task_memory.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -72,6 +73,11 @@ static int copy(pid_t pid, uintptr_t address, void *data, size_t size,int memory
     ssize_t n=md_task_read_memory(pid,address,data,size,memory);
     return n==(ssize_t)size ? 0 : n==-EPERM || n==-EACCES ? -EACCES : -EFAULT;
 }
+struct argument_source { pid_t pid; int memory; };
+static long read_arguments(void *context,uintptr_t address,void *out,size_t size) {
+    struct argument_source *source=context;
+    return md_task_read_memory(source->pid,address,out,size,source->memory);
+}
 ssize_t md_process_image_link(pid_t pid, uintptr_t image, int memory, char *out, size_t capacity) {
     if (!image) return -ENOENT;
     if (!out || !capacity || image>UINTPTR_MAX-sizeof(struct md_process_image)) return -EINVAL;
@@ -102,7 +108,8 @@ int md_process_image_view(pid_t pid, uintptr_t image, int memory, unsigned kind,
      * this retained authority to auxv or executable inspection. */
     if (kind!=MD_PROC_CMDLINE) memory=-1;
     int r=copy(pid,image,view,sizeof(*view),memory);
-    if (!r && (view->argument_bytes>MD_EXEC_BYTES || view->auxv_bytes>sizeof(view->auxv) || view->executable_object[32])) r=-EPROTO;
+    if (!r && (view->argument_bytes>MD_EXEC_BYTES || view->environment_bytes>MD_EXEC_BYTES
+            || view->auxv_bytes>sizeof(view->auxv) || view->executable_object[32])) r=-EPROTO;
     struct md_fs_request q={.actor=caller,.operation=kind==MD_PROC_EXE ? MD_FS_OPEN_OBJECT : MD_FS_TEMPORARY,
         .directory={-1,-1},.path={view->executable_object,NULL}};
     if (q.operation==MD_FS_TEMPORARY) q.path[0]=NULL;
@@ -116,14 +123,13 @@ int md_process_image_view(pid_t pid, uintptr_t image, int memory, unsigned kind,
             if (write(fd,view->auxv,view->auxv_bytes)!=(ssize_t)view->auxv_bytes) r=-EIO;
         } else {
             char bytes[4096];
-            for (size_t offset=0; !r && offset<view->argument_bytes;) {
-                size_t count=view->argument_bytes-offset;
-                if (count>sizeof(bytes)) count=sizeof(bytes);
-                uintptr_t address=(uintptr_t)view->arguments;
-                if (address>UINTPTR_MAX-offset) { r=-EFAULT; break; }
-                r=copy(pid,address+offset,bytes,count,memory);
-                if (!r && write(fd,bytes,count)!=(ssize_t)count) r=-EIO;
-                offset+=count;
+            struct argument_source source={pid,memory};
+            size_t page_size=(size_t)sysconf(_SC_PAGESIZE);
+            for (size_t offset=0; !r;) {
+                long count=md_process_arguments_read(view,page_size,read_arguments,&source,bytes,sizeof(bytes),offset);
+                if (count<=0) { r=(int)count; break; }
+                if (write(fd,bytes,(size_t)count)!=count) r=-EIO;
+                offset+=(size_t)count;
             }
         }
         if (!r) {

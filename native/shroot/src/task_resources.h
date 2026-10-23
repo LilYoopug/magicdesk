@@ -62,6 +62,8 @@ int md_resources_unshare_prepare(const struct md_task_resources *, unsigned long
 int md_resources_unshare_finish(struct md_task_resources *,
         struct md_identity *, struct md_resource_change *, long result);
 int md_resources_clone_supported(unsigned long flags);
+int md_resources_clone_cgroup_prepare(const struct md_task_resources *,unsigned long flags,struct md_fs_anchor *,
+    const struct md_identity *,struct md_resource_change *);
 /* Namespace flags whose effects belong to retained guest resources, not the
  * host clone/unshare call. Admission and native flag removal share this set. */
 unsigned long md_resources_namespace_flags(unsigned long flags);

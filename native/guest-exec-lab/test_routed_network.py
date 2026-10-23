@@ -148,7 +148,82 @@ def datagram_lifetime():
     print('PASS private UDP lifetime: queued source after close, receiver rebind and fresh reply mapping', flush=True)
 
 
+def device_binding():
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server:
+        assert server.getsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, 16) == b''
+        try:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'no-such-device')
+        except OSError as error:
+            assert error.errno == errno.ENODEV, error
+        else:
+            raise AssertionError('Missing device was accepted')
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'lo\0')
+        with server.dup() as shared:
+            assert shared.getsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, 16) == b'lo\0'
+            shared.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'')
+            assert server.getsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, 16) == b''
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'lo')
+        server.bind(('0.0.0.0', 0))
+        server.settimeout(5)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+            client.settimeout(5)
+            client.sendto(b'DEVICE', ('127.0.0.1', server.getsockname()[1]))
+            data, peer = server.recvfrom(100)
+            assert data == b'DEVICE'
+            server.sendto(b'REPLY', peer)
+            assert client.recvfrom(100)[0] == b'REPLY'
+        try:
+            server.sendto(b'WRONG', ('192.0.2.1', 9))
+        except OSError as error:
+            assert error.errno == errno.ENETUNREACH, error
+        else:
+            raise AssertionError('Bound socket escaped its interface')
+    with socket.socket() as server, socket.socket() as client:
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'lo')
+        server.bind(('127.0.0.1', 0))
+        server.listen(1)
+        server.settimeout(5)
+        client.settimeout(5)
+        client.connect(server.getsockname())
+        accepted, _ = server.accept()
+        with accepted:
+            accepted.settimeout(5)
+            assert accepted.getsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, 16) == b'lo\0'
+            client.sendall(b'INHERITED')
+            assert accepted.recv(100) == b'INHERITED'
+            accepted.sendall(b'REPLY')
+            assert client.recv(100) == b'REPLY'
+    print('PASS device-bound sockets: options, dup, UDP, routing exclusion and accepted TCP inheritance', flush=True)
+
+
+def legacy_route_dump():
+    # Older netlink clients reuse their mutation header for a route dump.
+    # Only NETLINK_GET_STRICT_CHK makes these fields dump selectors.
+    body = struct.pack('=BBBBBBBBI', socket.AF_INET, 0, 0, 0, 254, 3, 0, 1, 0)
+    with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 0) as netlink:
+        netlink.bind((0, 0))
+        netlink.settimeout(5)
+        netlink.sendto(struct.pack('=IHHII', 16 + len(body), 26, 0x301, 17, 0) + body, (0, 0))
+        routes = 0
+        while True:
+            # EVENT_WAIT: complete multipart dump; timeout is failure.
+            packet = netlink.recv(65536)
+            offset = 0
+            while offset < len(packet):
+                length, kind, flags, sequence, port = struct.unpack_from('=IHHII', packet, offset)
+                assert length >= 16 and offset + length <= len(packet) and sequence == 17
+                if kind == 3:
+                    assert routes >= 2 and (length == 16 or struct.unpack_from('=i', packet, offset + 16)[0] == 0)
+                    print('PASS legacy IPv4 route dump with mutation-header defaults', flush=True)
+                    return
+                assert kind == 24, (kind, packet[offset:offset + length])
+                routes += 1
+                offset += (length + 3) & ~3
+
+
 def guest():
+    device_binding()
+    legacy_route_dump()
     def run(*args):
         # EVENT_WAIT: tool completion; timeout fails a stalled netlink exchange.
         result = subprocess.run(args, capture_output=True, text=True, timeout=15)
@@ -161,6 +236,8 @@ def guest():
     assert {link['ifname'] for link in links} == {'lo', 'eth0'}, links
     addresses = json.loads(run('ip', '-j', 'addr', 'show'))
     assert any(info['local'] == '10.0.2.100' for link in addresses for info in link['addr_info'])
+    inet_addresses = json.loads(run('ip', '-4', '-j', 'addr', 'show'))
+    assert any(info['local'] == '10.0.2.100' for link in inet_addresses for info in link['addr_info'])
     routes = json.loads(run('ip', '-j', 'route', 'show'))
     assert any(route.get('gateway') == '10.0.2.2' for route in routes), routes
     lookup = json.loads(run('ip', '-j', 'route', 'get', '1.1.1.1'))

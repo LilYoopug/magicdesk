@@ -22,15 +22,20 @@ static long call(long nr, long a, long b, long c, long d, long e, long f) {
 #endif
 #define C(n,a,b,c,d,e,f) call(SYS_##n,(long)(a),(long)(b),(long)(c),(long)(d),(long)(e),(long)(f))
 
+static const struct { unsigned major,minor; const char *path; int caller; } devices[]={
+    {1,3,"/dev/null",0},{1,5,"/dev/zero",0},{1,7,"/dev/full",0},
+    {1,8,"/dev/random",0},{1,9,"/dev/urandom",0},{5,0,"/dev/tty",1}
+};
+int md_open_device_node(unsigned index,const char **path,uint64_t *device) {
+    if (index>=sizeof(devices)/sizeof(*devices)) return 0;
+    *path=devices[index].path; *device=makedev(devices[index].major,devices[index].minor);
+    return 1;
+}
 int md_open_device(unsigned mode,uint64_t device,int flags,struct md_open_completion *completion) {
     *completion=(struct md_open_completion){0};
     if (!S_ISCHR(mode)) return -ENXIO;
     /* Only explicitly supported native endpoints. Metadata-only nodes do not
      * grant arbitrary host device access, even under a root executor. */
-    static const struct { unsigned major,minor; const char *path; int caller; } devices[]={
-        {1,3,"/dev/null",0},{1,5,"/dev/zero",0},{1,7,"/dev/full",0},
-        {1,8,"/dev/random",0},{1,9,"/dev/urandom",0},{5,0,"/dev/tty",1}
-    };
     for (unsigned i=0;i<sizeof(devices)/sizeof(*devices);++i) {
         if (major(device)!=devices[i].major || minor(device)!=devices[i].minor) continue;
         long fd=C(openat,AT_FDCWD,devices[i].path,O_PATH|O_CLOEXEC|O_NOFOLLOW,0,0,0);

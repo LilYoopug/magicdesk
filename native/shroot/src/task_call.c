@@ -88,7 +88,10 @@ int md_task_call_begin(struct md_task_call *f,long (*operation)(int,pid_t,void *
     f->stage=CALL_ENTRY;
     if (restarting) {
         /* EVENT_WAIT: stop at the kernel's restarted entry before it executes.
-         * orig_x0 is not exposed by GETREGSET; the entry is authoritative. */
+         * orig_x0 is not exposed by GETREGSET; the entry is authoritative.
+         * Redirect the restart to a stable SVC without fetching source code. */
+        struct user_pt_regs restart=f->saved; restart.pc=f->returned;
+        error=regs(f,PTRACE_SETREGSET,&restart); if (error) return error;
         f->restarting=1; f->stage=RECOVERING;
         return trace(f,PTRACE_SYSCALL,NULL,NULL);
     }
@@ -175,8 +178,8 @@ int md_task_call_event(struct md_task_call *f,int status) {
         if (f->stage==RECOVERING) {
             unsigned long nr=(long)f->saved.regs[0]==-516 ? SYS_restart_syscall : f->saved.regs[8];
             if (observed.op!=PTRACE_SYSCALL_INFO_ENTRY || observed.entry.nr!=nr
-                    || current.pc!=f->saved.pc) return -EPROTO;
-            f->entry=current;
+                    || current.pc!=f->returned) return -EPROTO;
+            f->entry=current; f->entry.pc=f->saved.pc;
             return replace_entry(f);
         }
         if (f->stage==EXIT_SKIPPING) {
@@ -185,8 +188,12 @@ int md_task_call_event(struct md_task_call *f,int status) {
             return error ? error : finish(f,1);
         }
         if (observed.op!=PTRACE_SYSCALL_INFO_ENTRY || observed.entry.nr!=f->entry.regs[8]
-                || current.pc!=f->entry.pc
+                || current.pc!=f->returned
                 || memcmp(observed.entry.args,f->entry.regs,sizeof(observed.entry.args))) return -EPROTO;
+        /* Replay through the stable gate, then restore the original PC before
+         * seccomp evaluates the entry. The source instruction may have been
+         * patched or unmapped while its syscall was stopped. */
+        error=regs(f,PTRACE_SETREGSET,&f->entry); if (error) return error;
         if (f->stage==EXIT_REENTERING) {
             /* SYSEMU captured this entry before seccomp. Its exit restores
              * orig_x0 without re-executing a completed application call or
@@ -242,7 +249,7 @@ int md_task_call_event(struct md_task_call *f,int status) {
         f->stage=USER_RESTORING;
         return trace(f,PTRACE_CONT,NULL,NULL);
     }
-    struct user_pt_regs replay=f->entry; replay.pc-=4;
+    struct user_pt_regs replay=f->entry; replay.pc=f->call;
     error=regs(f,PTRACE_SETREGSET,&replay); if (error) return error;
     f->stage=f->boundary==MD_TASK_CALL_EXIT ? EXIT_REENTERING : REENTERING;
     return trace(f,f->boundary==MD_TASK_CALL_EXIT ? PTRACE_SYSEMU : PTRACE_SYSCALL,NULL,NULL);

@@ -64,6 +64,7 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
             out.tail=p; out.anchor_length=(size_t)(p-path); return out;
         }
         if (word(&p,"net")) {
+            out.ordinary_link=!*p;
             out.kind=network_table(&p); out.process=tid;
             out.tail=p; out.anchor_length=(size_t)(p-path); return out;
         }
@@ -72,6 +73,7 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
             out.tail=p; out.anchor_length=(size_t)(p-path); return out;
         }
         if (word(&p,"mounts")) {
+            out.ordinary_link=!*p;
             out.kind=MD_PROC_MOUNTS; out.tail=p; out.anchor_length=(size_t)(p-path); return out;
         }
         if (word(&p,"sys")) {
@@ -100,6 +102,9 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
                 else if (word(&p,"ping_group_range")) out.kind=MD_PROC_NET_PING_GROUPS;
                 else if (word(&p,"ip_local_port_range")) out.kind=MD_PROC_NET_LOCAL_PORTS;
                 else if (word(&p,"ip_forward")) out.kind=MD_PROC_NET_IPV4_FORWARD;
+                else if (word(&p,"tcp_keepalive_time")) out.kind=MD_PROC_NET_TCP_KEEPIDLE;
+                else if (word(&p,"tcp_keepalive_intvl")) out.kind=MD_PROC_NET_TCP_KEEPINTVL;
+                else if (word(&p,"tcp_keepalive_probes")) out.kind=MD_PROC_NET_TCP_KEEPCNT;
                 else if (word(&p,"conf")) {
                     const char *name=component(p);
                     size_t length=0;
@@ -125,6 +130,7 @@ struct md_proc_path md_proc_path_for(const char *path,int tid,int tgid) {
             else if (word(&p,"overflowuid")) out.kind=MD_PROC_OVERFLOWUID;
             else if (word(&p,"overflowgid")) out.kind=MD_PROC_OVERFLOWGID;
             else if (word(&p,"cap_last_cap")) out.kind=MD_PROC_CAP_LAST;
+            else if (word(&p,"pid_max")) out.kind=MD_PROC_PID_MAX;
             else return out;
             out.process=tid;
             out.tail=p; out.anchor_length=(size_t)(p-path); return out;

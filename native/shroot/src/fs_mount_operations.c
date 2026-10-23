@@ -192,7 +192,7 @@ static void mount_metadata(const struct md_view_mount *mount,int fd,
 }
 static int anchor_path(struct md_filesystem *fs,const struct md_fs_anchor *origin,void *data,size_t capacity) {
     if (!data || !capacity) return -ERANGE;
-    int error=md_view_path(fs,origin->fd,origin->mount,data,capacity);
+    int error=md_view_dentry_path(fs,origin->fd,origin->mount,origin->dentry,origin->native_leaf,data,capacity);
     if (!error && origin->child) {
         char *path=data;
         size_t length=strlen(path);
@@ -771,9 +771,7 @@ static void mounts_execute(struct md_filesystem *fs, const struct md_fs_request 
         if (out->error==-EXDEV && q->operation==MD_FS_FSTAT) {
             /* Anonymous native objects have no mount/inode-store placement.
              * Inspect the retained FD, not the proc name which may be reused. */
-            struct stat st;
-            out->error=fstat(q->directory[0],&st) ? -errno : 0;
-            if (!out->error) md_fs_stat_info(&st,&out->info);
+            md_fs_native_descriptor(fs,q,out,output);
         }
         return;
     }
@@ -828,6 +826,8 @@ paths:;
             else if (special(result.info.mode)) r=0;
         }
     }
+    if (!r && (q->operation == MD_FS_UNLINK || q->operation == MD_FS_RENAME)
+            && (mounted_root(&a) || (pair && mounted_root(&b)))) r = -EBUSY;
     /* Data opens and typed sysfs mutations are authorized by their owner below.
      * Generic private-tree mutations must be rejected before native dispatch. */
     if (!r && mutates(q,&a) && q->operation!=MD_FS_OPEN && q->operation!=MD_FS_REOPEN
@@ -840,8 +840,6 @@ paths:;
         }
     }
     if (!r && q->operation==MD_FS_ACCESS) r=execute_access(a.mount,a.fd,q->mode);
-    if (!r && (q->operation == MD_FS_UNLINK || q->operation == MD_FS_RENAME)
-            && (mounted_root(&a) || (pair && mounted_root(&b)))) r = -EBUSY;
     if (!r && q->operation==MD_FS_REALPATH) {
         out->error=!output || !output->data ? -EINVAL
             : a.view!=fs->mounts ? -ENOENT : md_view_path(fs,a.fd,a.mount,output->data,output->capacity);

@@ -49,7 +49,7 @@ static int capture(void *context,const struct md_control_file_ops *ops,void *nod
         struct md_fs_anchor *origin) {
     (void)id; (void)origin;
     struct md_control_file *file=context;
-    void *opened=flags&O_PATH ? ops->retain(node) : ops->open(node,flags);
+    void *opened=(flags&O_PATH) || !ops->open ? ops->retain(node) : ops->open(node,flags);
     if (!opened) return -errno;
     *file=(struct md_control_file){ops,opened}; return 0;
 }
@@ -83,7 +83,7 @@ static void initial_sysfs(struct md_filesystem *fs) {
     assert(!stats.walk_components && !stats.walk_materializations);
     md_inode_measure(fs->store,NULL);
     assert(!request(fs,MD_FS_UNLINK,"/ordinary",0,NULL,NULL).error);
-    assert(request(fs,MD_FS_UNLINK,"/sys",AT_REMOVEDIR,NULL,NULL).error==-EROFS);
+    assert(request(fs,MD_FS_UNLINK,"/sys",AT_REMOVEDIR,NULL,NULL).error==-EBUSY);
     /* Another namespace may rename the covered dentry. Admission uses its
      * inode identity, never the old spelling of the pathname. */
     assert(!md_inode_rename(fs->store,-1,"/sys",-1,"/moved-sys",0));
@@ -182,6 +182,50 @@ static void initial_devices(struct md_filesystem *fs) {
     fs->store->identity=NULL; md_identity_release(&identity);
     puts("PASS implicit dev recursive bind, guest shm, nested mounts and graph custody");
 }
+static struct md_control_file sysfs_trigger(struct md_filesystem *fs,int monitor) {
+    const char *path="/sys/class/input/event0/uevent";
+    struct md_identity root=md_identity_new(0,0),user=md_identity_new(1000,1000);
+    fs->store->identity=&root;
+    struct md_fs_result st=request(fs,MD_FS_STAT,path,0,NULL,NULL);
+    assert(!st.error && st.info.mode==(S_IFREG|0644) && !st.info.uid && st.info.size==4096);
+    mount_request(fs,MD_FS_MOUNT_REMOUNT,MS_REMOUNT|MS_BIND|MS_RDONLY,"/sys",NULL);
+    struct md_control_file file={0};
+    assert(request(fs,MD_FS_OPEN,path,O_WRONLY,&file,NULL).error==-EROFS && !file.ops);
+    mount_request(fs,MD_FS_MOUNT_REMOUNT,MS_REMOUNT|MS_BIND|MS_NODEV,"/sys",NULL);
+    struct md_fs_result opened=request(fs,MD_FS_OPEN,path,O_RDWR|O_TRUNC,&file,NULL);
+    if (opened.error) fprintf(stderr,"uevent open: %d\n",opened.error);
+    assert(!opened.error && opened.fd>=0 && file.ops); close(opened.fd);
+    char original[512],after[512],packet[4096];
+    struct md_control_actor actor={.identity=&root};
+    long bytes=file.ops->read(file.context,&actor,original,sizeof(original),0);
+    assert(bytes>0 && memmem(original,(size_t)bytes,"DEVNAME=input/event0\n",21));
+    assert(file.ops->access(file.context,&user,W_OK)==-EACCES);
+    assert(!file.ops->access(file.context,&user,R_OK));
+    struct md_control_actor unprivileged={.identity=&user};
+    assert(file.ops->write(file.context,&unprivileged,"change",6,0)==-EACCES);
+    assert(file.ops->write(file.context,&actor,"change\0forged",13,0)==-EINVAL);
+    for (unsigned i=0;i<2;++i) {
+        assert(file.ops->write(file.context,&actor,"change\n",7,i*7)==7);
+        ssize_t n=recv(monitor,packet,sizeof(packet),MSG_DONTWAIT);
+        assert(n>40 && !memcmp(packet,"libudev",8));
+        assert(memmem(packet,(size_t)n,"ACTION=change",14));
+        assert(memmem(packet,(size_t)n,"SUBSYSTEM=input",16));
+        assert(memmem(packet,(size_t)n,"DEVPATH=/devices/virtual/input/input0/event0",43));
+        assert(memmem(packet,(size_t)n,"DEVNAME=input/event0",20));
+        assert(memmem(packet,(size_t)n,"SYNTH_UUID=0",sizeof("SYNTH_UUID=0")));
+    }
+    static const char synthetic[]="change 01234567-89ab-cdef-0123-456789abcdef KEY=Value";
+    assert(file.ops->write(file.context,&actor,synthetic,sizeof(synthetic),0)==sizeof(synthetic));
+    ssize_t n=recv(monitor,packet,sizeof(packet),MSG_DONTWAIT);
+    static const char uuid[]="SYNTH_UUID=01234567-89ab-cdef-0123-456789abcdef";
+    assert(n>0 && memmem(packet,(size_t)n,uuid,sizeof(uuid)));
+    assert(memmem(packet,(size_t)n,"SYNTH_ARG_KEY=Value",sizeof("SYNTH_ARG_KEY=Value")));
+    assert(file.ops->write(file.context,&actor,"change invalid",14,0)==-EINVAL);
+    assert(file.ops->read(file.context,&actor,after,sizeof(after),0)==bytes && !memcmp(original,after,(size_t)bytes));
+    assert(request(fs,MD_FS_OPEN,"/sys/class/input/event0/dev",O_WRONLY,NULL,NULL).error==-EROFS);
+    fs->store->identity=NULL; md_identity_release(&root); md_identity_release(&user);
+    return file;
+}
 void md_test_input_session(const char *path) {
     alarm(30); setbuf(stdout,NULL);
     struct md_inode_store *store=NULL; assert(!md_inode_store_open(path,1,&store));
@@ -203,6 +247,7 @@ void md_test_input_session(const char *path) {
     initial_sysfs(&fs);
     initial_devices(&fs);
     struct md_device_events *bus=md_device_events_new(); assert(bus);
+    fs.device_events=bus;
     assert(!md_input_session_start(&fs,NULL,bus,sysfs,&session) && !session);
     fs.tasks=md_task_registry_create(); assert(fs.tasks);
     int error=md_input_session_start(&fs,&launch,bus,sysfs,&session);
@@ -284,6 +329,7 @@ void md_test_input_session(const char *path) {
     struct sockaddr_nl address_nl={.nl_family=AF_NETLINK,.nl_groups=2};
     unsigned long args[6]={0};
     assert(!md_device_events_call(monitor,SYS_bind,args,&address_nl,sizeof(address_nl),sizeof(address_nl),getpid()));
+    struct md_control_file trigger=sysfs_trigger(&fs,monitor_fd);
     send_frame(server.connection,2,NULL,0);
     /* EVENT_WAIT: removal is published only after device metadata is retired. */
     assert(md_event_wait_fd(monitor_fd,POLLIN,md_event_now()+1000000000LL)>=0);
@@ -295,6 +341,9 @@ void md_test_input_session(const char *path) {
     assert(address_nl.nl_groups==2 && address_nl.nl_pid==(unsigned)getpid());
     close(server.connection); close(server.listener); close(server.ready);
     md_input_session_stop(session); close(wake);
+    struct stat retired;
+    assert(trigger.ops->stat(trigger.context,&retired)==-ENODEV);
+    md_control_file_release(trigger);
     md_provider_tree_release(sysfs);
     while (recv(monitor_fd,notification,sizeof(notification),MSG_DONTWAIT)>0) {}
     assert(errno==EAGAIN);
@@ -305,4 +354,5 @@ void md_test_input_session(const char *path) {
     close(monitor_fd); md_fd_object_release(monitor);
     md_fs_mounts_close(&fs); md_fs_storage_close(&storage); md_inode_store_close(store);
     puts("PASS input transport, discovery, controlled opens, sysfs composition and cleanup");
+    puts("PASS sysfs uevent: authoritative properties, repeated triggers, DAC, readonly mounts, nodev and unplug lifetime");
 }

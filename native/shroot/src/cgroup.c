@@ -24,15 +24,16 @@
 enum { PROCS, THREADS, EVENTS, CONTROLLERS, SUBTREE, TYPE, FREEZE,
     ALLOW, DENY, LIST, TASKS, NOTIFY, RELEASE, PIDS_MAX, PIDS_CURRENT, PIDS_EVENTS, FILES };
 enum { NS_DELEGATE=1, MEMORY_RECURSIVE_PROT=2 };
+enum { UNIFIED, DEVICES, NAMED };
 struct control { const char *name; mode_t mode; unsigned views; };
 static const struct control controls[FILES]={
-    [PROCS]={"cgroup.procs",0644,3}, [THREADS]={"cgroup.threads",0644,1},
+    [PROCS]={"cgroup.procs",0644,7}, [THREADS]={"cgroup.threads",0644,1},
     [EVENTS]={"cgroup.events",0444,1}, [CONTROLLERS]={"cgroup.controllers",0444,1},
     [SUBTREE]={"cgroup.subtree_control",0644,1}, [TYPE]={"cgroup.type",0644,1},
     [FREEZE]={"cgroup.freeze",0644,1}, [ALLOW]={"devices.allow",0200,2},
     [DENY]={"devices.deny",0200,2}, [LIST]={"devices.list",0444,2},
-    [TASKS]={"tasks",0644,2}, [NOTIFY]={"notify_on_release",0644,2},
-    [RELEASE]={"release_agent",0644,2},
+    [TASKS]={"tasks",0644,6}, [NOTIFY]={"notify_on_release",0644,6},
+    [RELEASE]={"release_agent",0644,6},
     [PIDS_MAX]={"pids.max",0644,1}, [PIDS_CURRENT]={"pids.current",0444,1},
     [PIDS_EVENTS]={"pids.events",0444,1}
 };
@@ -54,24 +55,35 @@ struct world {
     pthread_mutex_t lock;
     struct md_cgroup_member *members;
     struct md_cgroup_view *views[2];
+    struct md_cgroup_view *named;
+    unsigned next_hierarchy;
     struct md_cgroup_programs *programs;
     int namespace_created;
 };
 struct md_cgroup_view {
     struct world *world;
-    int devices,storage;
+    struct md_cgroup_view *next;
+    int kind,storage;
+    unsigned hierarchy;
+    char name[64];
     struct group *groups,*root;
     struct md_watch_source *events;
     uint64_t next_event_id;
     unsigned options;
+};
+struct named_group {
+    struct named_group *next;
+    struct md_cgroup_view *view;
+    struct group *group;
 };
 struct md_cgroup_member {
     atomic_uint refs;
     struct md_cgroup_member *next;
     struct world *world;
     struct group *groups[2];
+    struct named_group *named;
     pid_t tid,tgid;
-    int departed;
+    int departed,reserved;
     struct md_pid_identity *pid,*pid_group;
 };
 struct md_cgroup_namespace {
@@ -83,6 +95,7 @@ struct md_cgroup_namespace {
     /* NULL captures the hierarchy root before its first mount, not the
      * member's future position. Groups live as long as their world. */
     struct group *roots[2];
+    struct named_group *named;
 };
 struct opened {
     atomic_uint refs;
@@ -98,6 +111,32 @@ struct opened {
     uint64_t observed;
     int sampled;
 };
+static void named_free(struct named_group *list) {
+    while (list) { struct named_group *next=list->next; free(list); list=next; }
+}
+static int named_copy(struct named_group **out,const struct named_group *from) {
+    struct named_group *list=NULL;
+    for (;from;from=from->next) {
+        struct named_group *entry=malloc(sizeof(*entry));
+        if (!entry) { named_free(list); return -ENOMEM; }
+        *entry=*from; entry->next=list; list=entry;
+    }
+    *out=list; return 0;
+}
+static struct group **member_group(struct md_cgroup_member *m,const struct md_cgroup_view *v) {
+    if (v->kind!=NAMED) return &m->groups[v->kind];
+    for (struct named_group *entry=m->named;entry;entry=entry->next)
+        if (entry->view==v) return &entry->group;
+    /* Every live member receives a slot before a hierarchy is published. */
+    abort();
+}
+static struct group *namespace_root(const struct md_cgroup_namespace *ns,const struct md_cgroup_view *v) {
+    struct group *root=NULL;
+    if (v->kind!=NAMED) root=ns->roots[v->kind];
+    else for (struct named_group *entry=ns->named;entry;entry=entry->next)
+        if (entry->view==v) { root=entry->group; break; }
+    return root ? root : v->root;
+}
 static void group_event(struct md_cgroup_view *v,struct group *g,unsigned mask) {
     ++g->generation;
     if (v->events) md_watch_source_emit(v->events,g->event_id,mask,0,NULL,0);
@@ -105,7 +144,7 @@ static void group_event(struct md_cgroup_view *v,struct group *g,unsigned mask) 
 /* Membership changes touch only the two branches below their common ancestor.
  * Fork/exit in a populated branch cannot manufacture an empty notification. */
 static void membership_change(struct md_cgroup_view *v,struct group *old,struct group *next) {
-    if (!v || v->devices || old==next) return;
+    if (!v || v->kind!=UNIFIED || old==next) return;
     struct group *common=old;
     while (common) {
         struct group *at=next;
@@ -125,8 +164,10 @@ static void clear_programs(struct group *g) {
 }
 static void release(struct world *w) {
     if (atomic_fetch_sub(&w->refs,1)!=1) return;
-    for (unsigned i=0;i<2;++i) if (w->views[i]) {
-        struct md_cgroup_view *v=w->views[i];
+    struct md_cgroup_view *views=w->named;
+    for (unsigned i=0;i<2;++i) if (w->views[i]) { w->views[i]->next=views; views=w->views[i]; }
+    while (views) {
+        struct md_cgroup_view *v=views; views=v->next;
         while (v->groups) { struct group *g=v->groups; v->groups=g->next; clear_programs(g); if (g->fd>=0) close(g->fd); free(g); }
         md_watch_source_release(v->events); md_temporary_directory_release(v->storage); free(v);
     }
@@ -149,6 +190,11 @@ struct md_cgroup_namespace *md_cgroup_namespace_new(struct md_cgroup_member *m,s
     if (r) { free(ns); errno=-r; return NULL; }
     atomic_init(&ns->refs,1); ns->owner=md_user_namespace_retain(owner); ns->world=retain(m->world);
     pthread_mutex_lock(&m->world->lock);
+    r=named_copy(&ns->named,m->named);
+    if (r) {
+        pthread_mutex_unlock(&m->world->lock);
+        md_cgroup_namespace_release(ns); errno=-r; return NULL;
+    }
     ns->initial=!m->world->namespace_created;
     m->world->namespace_created=1;
     memcpy(ns->roots,m->groups,sizeof(ns->roots));
@@ -159,13 +205,14 @@ struct md_cgroup_namespace *md_cgroup_namespace_retain(struct md_cgroup_namespac
 }
 void md_cgroup_namespace_release(struct md_cgroup_namespace *ns) {
     if (!ns || atomic_fetch_sub(&ns->refs,1)!=1) return;
-    md_user_namespace_release(ns->owner); release(ns->world); free(ns);
+    named_free(ns->named); md_user_namespace_release(ns->owner); release(ns->world); free(ns);
 }
 uint64_t md_cgroup_namespace_inode(const struct md_cgroup_namespace *ns) { return ns ? ns->inode : 0; }
 const struct md_user_namespace *md_cgroup_namespace_owner(const struct md_cgroup_namespace *ns) { return ns ? ns->owner : NULL; }
 struct md_cgroup_member *md_cgroup_member_new(void) {
     struct world *w=calloc(1,sizeof(*w)); if (!w) return NULL;
     atomic_init(&w->refs,1);
+    w->next_hierarchy=2;
     int error=pthread_mutex_init(&w->lock,NULL);
     if (error) { free(w); errno=error; return NULL; }
     struct md_cgroup_member *m=calloc(1,sizeof(*m));
@@ -177,6 +224,10 @@ struct md_cgroup_member *md_cgroup_member_fork(struct md_cgroup_member *old) {
     struct md_cgroup_member *m=calloc(1,sizeof(*m)); if (!m) return NULL;
     atomic_init(&m->refs,1); m->world=retain(old->world);
     pthread_mutex_lock(&m->world->lock);
+    int r=named_copy(&m->named,old->named);
+    if (r) {
+        pthread_mutex_unlock(&m->world->lock); release(m->world); free(m); errno=-r; return NULL;
+    }
     memcpy(m->groups,old->groups,sizeof(m->groups));
     m->next=m->world->members; m->world->members=m;
     pthread_mutex_unlock(&m->world->lock); return m;
@@ -192,7 +243,7 @@ void md_cgroup_member_release(struct md_cgroup_member *m) {
     while (*at!=m) at=&(*at)->next;
     *at=m->next;
     pthread_mutex_unlock(&w->lock);
-    md_pid_identity_release(m->pid); md_pid_identity_release(m->pid_group); free(m); release(w);
+    md_pid_identity_release(m->pid); md_pid_identity_release(m->pid_group); named_free(m->named); free(m); release(w);
 }
 void md_cgroup_member_publish(struct md_cgroup_member *m,pid_t tid,pid_t tgid,
         struct md_pid_identity *pid,struct md_pid_identity *group) {
@@ -201,7 +252,7 @@ void md_cgroup_member_publish(struct md_cgroup_member *m,pid_t tid,pid_t tgid,
     struct md_pid_identity *old=m->pid,*old_group=m->pid_group;
     if (!m->tid && tid) membership_change(m->world->views[0],NULL,m->groups[0]);
     else if (m->tid && !tid) membership_change(m->world->views[0],m->groups[0],NULL);
-    m->tid=tid; m->tgid=tgid; m->departed=0; m->pid=md_pid_identity_retain(pid);
+    m->tid=tid; m->tgid=tgid; m->departed=0; m->reserved=0; m->pid=md_pid_identity_retain(pid);
     m->pid_group=md_pid_identity_retain(group);
     pthread_mutex_unlock(&m->world->lock); md_pid_identity_release(old); md_pid_identity_release(old_group);
 }
@@ -237,7 +288,7 @@ static int populate(struct md_cgroup_view *v,struct group *g) {
     if (v->next_event_id==UINT64_MAX) return -EOVERFLOW;
     g->event_id=++v->next_event_id;
     g->pids_max=UINT64_MAX;
-    for (unsigned i=0;i<FILES;++i) if (controls[i].views&(1U<<v->devices)) {
+    for (unsigned i=0;i<FILES;++i) if (controls[i].views&(1U<<v->kind)) {
         if ((i==RELEASE && g->parent) || !enabled(g,i)) continue;
         int error=control_create(g,i); if (error) return error;
     }
@@ -266,39 +317,83 @@ int md_cgroup_options(struct md_cgroup_view *v,char *out,size_t size) {
     pthread_mutex_lock(&v->world->lock);
     unsigned flags=v->options;
     pthread_mutex_unlock(&v->world->lock);
-    int length=snprintf(out,size,"%s%s%s",v->devices ? ",devices" : "",
+    int length=snprintf(out,size,"%s%s%s%s",v->kind==DEVICES ? ",devices" : v->kind==NAMED ? ",name=" : "",
+        v->name,
         flags&NS_DELEGATE ? ",nsdelegate" : "",
         flags&MEMORY_RECURSIVE_PROT ? ",memory_recursiveprot" : "");
     return length<0 ? -EIO : (size_t)length>=size ? -ENAMETOOLONG : 0;
 }
-struct md_cgroup_view *md_cgroup_mount(struct md_cgroup_member *member,int parent,int devices,const struct md_identity *id,
+static int legacy_options(const char *options,char name[64]) {
+    int devices=0,none=0;
+    for (const char *at=options;at && *at;) {
+        size_t size=strcspn(at,",");
+        if (size==7 && !memcmp(at,"devices",7)) devices=1;
+        else if (size==4 && !memcmp(at,"none",4)) none=1;
+        else if (size>5 && !memcmp(at,"name=",5)) {
+            size_t n=size-5;
+            if (*name || n>=64 || strspn(at+5,"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")!=n)
+                return -EINVAL;
+            memcpy(name,at+5,n); name[n]=0;
+        } else return -EINVAL;
+        at+=size; if (*at) ++at;
+    }
+    if (devices && none) return -EINVAL;
+    if (devices && *name) return -EOPNOTSUPP;
+    return *name ? NAMED : devices ? DEVICES : -EINVAL;
+}
+/* Allocate before publication so an allocation failure cannot leave some
+ * tasks in an otherwise invisible hierarchy. Unified-only launches allocate
+ * no additional membership records. */
+static int named_publish(struct md_cgroup_view *v,struct group *g) {
+    struct named_group *pending=NULL;
+    for (struct md_cgroup_member *m=v->world->members;m;m=m->next) {
+        struct named_group *entry=malloc(sizeof(*entry));
+        if (!entry) { named_free(pending); return -ENOMEM; }
+        *entry=(struct named_group){.next=pending,.view=v,.group=g}; pending=entry;
+    }
+    for (struct md_cgroup_member *m=v->world->members;m;m=m->next) {
+        struct named_group *entry=pending; pending=entry->next;
+        entry->next=m->named; m->named=entry;
+    }
+    return 0;
+}
+struct md_cgroup_view *md_cgroup_mount(struct md_cgroup_member *member,int parent,int legacy,const struct md_identity *id,
         const struct md_cgroup_namespace *ns,const char *options) {
-    if (!member || !id || !ns || ns->world!=member->world || devices<0 || devices>1) { errno=EINVAL; return NULL; }
+    if (!member || !id || !ns || ns->world!=member->world || legacy<0 || legacy>1) { errno=EINVAL; return NULL; }
     unsigned flags=0;
-    int parsed=devices ? options && !strcmp(options,"devices") ? 0 : -EINVAL
-        : md_cgroup_parse_options(options,&flags);
-    if (parsed) { errno=-parsed; return NULL; }
+    char name[64]={0};
+    int kind=legacy ? legacy_options(options,name) : md_cgroup_parse_options(options,&flags);
+    if (kind<0) { errno=-kind; return NULL; }
     struct world *w=member->world; pthread_mutex_lock(&w->lock);
-    if (w->views[devices]) {
-        struct md_cgroup_view *v=md_cgroup_retain(w->views[devices]);
+    struct md_cgroup_view *existing=kind==NAMED ? w->named : w->views[kind];
+    if (kind==NAMED) while (existing && strcmp(existing->name,name)) existing=existing->next;
+    if (existing) {
+        struct md_cgroup_view *v=md_cgroup_retain(existing);
         if (ns->initial) v->options=flags;
         pthread_mutex_unlock(&w->lock); return v;
     }
     struct md_cgroup_view *v=calloc(1,sizeof(*v));
     struct group *g=calloc(1,sizeof(*g));
     int error=(!v || !g) ? -ENOMEM : 0;
-    if (v) { v->world=w; v->storage=-1; v->devices=devices; }
+    if (kind==NAMED && w->next_hierarchy>INT32_MAX) error=-ENOSPC;
+    if (v) { v->world=w; v->storage=-1; v->kind=kind; memcpy(v->name,name,sizeof(name)); }
     if (g) g->fd=-1;
     if (!error && (v->storage=md_temporary_directory_new(parent))<0) error=v->storage;
     if (!error && mkdirat(v->storage,"cgroup",0700)) error=-errno;
     if (!error && (g->fd=openat(v->storage,"cgroup",O_RDONLY|O_DIRECTORY|O_CLOEXEC))<0) error=-errno;
     if (!error) { g->uid=id->uid.fs; g->gid=id->gid.fs; error=populate(v,g); }
+    if (!error && kind==NAMED) error=named_publish(v,g);
     if (!error) {
         if (ns->initial) v->options=flags;
-        v->root=v->groups=g; w->views[devices]=v;
-        for (struct md_cgroup_member *m=w->members;m;m=m->next) {
-            m->groups[devices]=g;
-            if (!devices && m->tid) ++g->populated;
+        v->root=v->groups=g;
+        if (kind==NAMED) {
+            v->hierarchy=w->next_hierarchy++; v->next=w->named; w->named=v;
+        } else {
+            v->hierarchy=(unsigned)kind; w->views[kind]=v;
+            for (struct md_cgroup_member *m=w->members;m;m=m->next) {
+                m->groups[kind]=g;
+                if (kind==UNIFIED && m->tid) ++g->populated;
+            }
         }
         md_cgroup_retain(v);
     } else {
@@ -313,14 +408,14 @@ void md_cgroup_release(struct md_cgroup_view *v) { if (v) release(v->world); }
 int md_cgroup_open_root(struct md_cgroup_view *v,const struct md_cgroup_namespace *ns) {
     if (!ns || ns->world!=v->world) { errno=EXDEV; return -1; }
     pthread_mutex_lock(&v->world->lock);
-    struct group *g=ns->roots[v->devices] ? ns->roots[v->devices] : v->root;
+    struct group *g=namespace_root(ns,v);
     int fd;
     if (g->removed) { errno=ENOENT; fd=-1; }
     else fd=openat(g->fd,".",O_PATH|O_DIRECTORY|O_CLOEXEC);
     int error=errno; pthread_mutex_unlock(&v->world->lock); errno=error; return fd;
 }
-int md_cgroup_devices(const struct md_cgroup_view *v) { return v->devices; }
-unsigned long md_cgroup_filesystem(struct md_cgroup_view *v) { return v->devices ? CGROUP_SUPER_MAGIC : CGROUP2_SUPER_MAGIC; }
+int md_cgroup_legacy(const struct md_cgroup_view *v) { return v->kind!=UNIFIED; }
+unsigned long md_cgroup_filesystem(struct md_cgroup_view *v) { return md_cgroup_legacy(v) ? CGROUP_SUPER_MAGIC : CGROUP2_SUPER_MAGIC; }
 static struct group *lookup(struct md_cgroup_view *v,const struct stat *st,unsigned *file) {
     for (struct group *g=v->groups;g;g=g->next) {
         if (st->st_dev!=g->identity.st_dev) continue;
@@ -393,7 +488,7 @@ static int capable(const struct md_identity *id,struct group *g) {
 int md_cgroup_program_query(struct md_cgroup_view *v,int fd,struct md_cgroup_member *member,
         const struct md_identity *id,unsigned flags,uint32_t *ids,unsigned capacity,unsigned *count,unsigned *attach_flags) {
     if (!member || member->world!=v->world) return -EXDEV;
-    if (v->devices) return -EINVAL;
+    if (v->kind!=UNIFIED) return -EINVAL;
     if (flags&~BPF_F_QUERY_EFFECTIVE) return -EINVAL;
     struct stat st; if (fstat(fd,&st)) return -errno;
     pthread_mutex_lock(&v->world->lock); unsigned file;
@@ -412,7 +507,7 @@ int md_cgroup_program_query(struct md_cgroup_view *v,int fd,struct md_cgroup_mem
 int md_cgroup_program_attach(struct md_cgroup_view *v,int fd,struct md_cgroup_member *member,
         const struct md_identity *id,struct md_cgroup_program *program,unsigned flags,int detach) {
     if (!member || member->world!=v->world) return -EXDEV;
-    if (v->devices || flags&~BPF_F_ALLOW_MULTI || (detach && flags)) return -EINVAL;
+    if (v->kind!=UNIFIED || flags&~BPF_F_ALLOW_MULTI || (detach && flags)) return -EINVAL;
     if (md_cgroup_program_type(program)!=BPF_PROG_TYPE_CGROUP_DEVICE) return -EINVAL;
     struct stat st; if (fstat(fd,&st)) return -errno;
     pthread_mutex_lock(&v->world->lock); unsigned file;
@@ -473,7 +568,7 @@ int md_cgroup_rmdir(struct md_cgroup_view *v,int fd,const char *name,const struc
     for (struct group *child=v->groups; !r && child; child=child->next)
         if (!child->removed && child->parent==g) r=-EBUSY;
     for (struct md_cgroup_member *m=v->world->members; !r && m; m=m->next)
-        if (m->tid && m->groups[v->devices]==g) r=-EBUSY;
+        if ((m->tid || m->reserved) && *member_group(m,v)==g) r=-EBUSY;
     if (!r) {
         depopulate(g);
         if (unlinkat(fd,name,AT_REMOVEDIR)) r=-errno;
@@ -515,6 +610,47 @@ static int below(struct group *g,struct group *parent) {
     for (;g;g=g->parent) if (g==parent) return 1;
     return 0;
 }
+static int attach_allowed(struct md_cgroup_view *v,struct group *source,struct group *target,
+        const struct md_identity *id,const struct md_cgroup_namespace *ns) {
+    if (v->kind!=UNIFIED) return 0;
+    struct group *common=source;
+    while (common && !below(target,common)) common=common->parent;
+    int r=common ? md_file_permissions(&common->files[PROCS],W_OK,id) : -EXDEV;
+    struct group *boundary=ns->roots[0] ? ns->roots[0] : v->root;
+    if (!r && (v->options&NS_DELEGATE)
+            && (!below(source,boundary) || !below(target,boundary))) r=-ENOENT;
+    if (!r && target->parent && target->subtree) r=-EBUSY;
+    return r;
+}
+int md_cgroup_member_clone(struct md_cgroup_member *parent,struct md_fs_anchor *origin,
+        const struct md_identity *id,const struct md_cgroup_namespace *ns,int thread,
+        struct md_cgroup_member **out) {
+    *out=NULL;
+    struct md_cgroup_view *v=md_fs_anchor_cgroup(origin);
+    if (!v || v->kind!=UNIFIED) return -EINVAL;
+    if (!parent || !ns || parent->world!=v->world || ns->world!=v->world) return -EXDEV;
+    if (md_fs_anchor_policy(origin)&MD_MOUNT_READONLY) return -EROFS;
+    struct stat st;
+    if (fstat(md_fs_anchor_fd(origin),&st)) return -errno;
+    struct md_cgroup_member *m=calloc(1,sizeof(*m));
+    if (!m) return -ENOMEM;
+    pthread_mutex_lock(&v->world->lock);
+    unsigned file;
+    struct group *g=lookup(v,&st,&file);
+    int r=!g || file!=FILES ? -EINVAL : g->removed ? -ENODEV
+        : md_file_permissions(&g->files[PROCS],W_OK,id);
+    if (!r) r=attach_allowed(v,parent->groups[0],g,id,ns);
+    if (!r && thread && parent->groups[0]!=g) r=-EOPNOTSUPP;
+    if (!r) r=named_copy(&m->named,parent->named);
+    if (!r) {
+        atomic_init(&m->refs,1); m->world=retain(v->world); m->reserved=1;
+        memcpy(m->groups,parent->groups,sizeof(m->groups)); m->groups[0]=g;
+        m->next=v->world->members; v->world->members=m; *out=m;
+    }
+    pthread_mutex_unlock(&v->world->lock);
+    if (r) free(m);
+    return r;
+}
 static int subtree_write(struct md_cgroup_view *v,struct group *g,char *text) {
     unsigned next=g->subtree;
     char *cursor=NULL;
@@ -527,7 +663,7 @@ static int subtree_write(struct md_cgroup_view *v,struct group *g,char *text) {
     if (next==g->subtree) return 0;
     if (next) {
         if (g->parent) for (struct md_cgroup_member *m=v->world->members;m;m=m->next)
-            if (m->tid && m->groups[0]==g) return -EBUSY;
+            if ((m->tid || m->reserved) && m->groups[0]==g) return -EBUSY;
         int error=0;
         struct group *failed=NULL;
         unsigned last=PIDS_MAX;
@@ -578,11 +714,11 @@ static long control_read(void *ctx,const struct md_control_actor *actor,void *da
     case PROCS: case THREADS: case TASKS: {
         struct md_pid_namespace *visible=md_pid_identity_namespace(actor->resources->pid);
         for (struct md_cgroup_member *m=v->world->members;m;m=m->next) {
-            if (!m->tid || m->groups[v->devices]!=o->group) continue;
+            if (!m->tid || *member_group(m,v)!=o->group) continue;
             if (o->file==PROCS) {
                 struct md_cgroup_member *previous=v->world->members;
                 while (previous!=m && !(previous->tid && previous->tgid==m->tgid
-                        && previous->groups[v->devices]==o->group)) previous=previous->next;
+                        && *member_group(previous,v)==o->group)) previous=previous->next;
                 if (previous!=m) continue;
             }
             pid_t number=visible ? md_pid_identity_number(o->file==PROCS ? m->pid_group : m->pid,visible)
@@ -638,9 +774,8 @@ static long control_write(void *ctx,const struct md_control_actor *actor,const v
     size_t n=strlen(text); while (n && (text[n-1]==' ' || text[n-1]=='\n' || text[n-1]=='\t')) text[--n]=0;
     pthread_mutex_lock(&v->world->lock);
     int r=retired(o) ? -ENODEV : md_file_permissions(&o->group->files[o->file],W_OK,actor->identity);
-    struct group *boundary=o->namespace->roots[v->devices];
-    if (!boundary) boundary=v->root;
-    if (!r && !v->devices && (v->options&NS_DELEGATE) && !o->namespace->initial
+    struct group *boundary=namespace_root(o->namespace,v);
+    if (!r && v->kind==UNIFIED && (v->options&NS_DELEGATE) && !o->namespace->initial
             && o->group==boundary && o->file!=PROCS && o->file!=THREADS && o->file!=SUBTREE) r=-EPERM;
     if (!r) switch (o->file) {
     case PROCS: case THREADS: case TASKS: {
@@ -656,18 +791,13 @@ static long control_write(void *ctx,const struct md_control_actor *actor,const v
                 target=m; break;
             }
         if (!target) { r=-ESRCH; break; }
-        if (!v->devices) {
-            struct group *source=target->groups[0],*common=source;
-            while (common && !below(o->group,common)) common=common->parent;
-            r=common ? md_file_permissions(&common->files[PROCS],W_OK,&o->opener) : -EXDEV;
-            if (!r && (v->options&NS_DELEGATE) && (!below(source,boundary) || !below(o->group,boundary))) r=-ENOENT;
-            if (r) break;
-        }
-        if (!v->devices && o->group->parent && o->group->subtree) { r=-EBUSY; break; }
+        r=attach_allowed(v,*member_group(target,v),o->group,&o->opener,o->namespace);
+        if (r) break;
         for (struct md_cgroup_member *m=v->world->members;m;m=m->next)
             if (m==target || (o->file==PROCS && m->tid && m->tgid==target->tgid)) {
-                if (m->tid) membership_change(v,m->groups[v->devices],o->group);
-                m->groups[v->devices]=o->group;
+                struct group **slot=member_group(m,v);
+                if (m->tid) membership_change(v,*slot,o->group);
+                *slot=o->group;
             }
         break;
     }
@@ -764,7 +894,7 @@ int md_cgroup_open(struct md_cgroup_view *v,int fd,int flags,const struct md_ide
                 o->namespace=md_cgroup_namespace_retain(ns); o->opener=md_identity_copy(id);
                 o->stat=g->files[file];
                 o->next=g->opened; g->opened=o;
-                o->origin=md_fs_anchor_retain(origin); *out=&ops[file==EVENTS ? 2 : v->devices]; *context=o;
+                o->origin=md_fs_anchor_retain(origin); *out=&ops[file==EVENTS ? 2 : md_cgroup_legacy(v)]; *context=o;
             }
         }
     }
@@ -790,6 +920,18 @@ static int group_path(struct group *g,struct group *root,char *text,size_t size)
     for (size_t i=0;i<up;++i) memcpy(text+i*3,"/..",3);
     return (int)length;
 }
+static int member_text(struct md_cgroup_member *m,const struct md_cgroup_namespace *ns,
+        struct md_cgroup_view *v,char *text,size_t capacity) {
+    struct group *root=v ? namespace_root(ns,v) : NULL;
+    struct group *group=v ? (md_cgroup_legacy(v) && m->departed ? v->root : *member_group(m,v)) : NULL;
+    char path[4096]; int r=group_path(group,root,path,sizeof(path));
+    if (r<0) return r;
+    int n=snprintf(text,capacity,"%u:%s%s:%s%s\n",v ? v->hierarchy : 0,
+        v && v->kind==DEVICES ? "devices" : v && v->kind==NAMED ? "name=" : "",
+        v ? v->name : "",path,
+        v && v->kind==UNIFIED && group && group->removed ? " (deleted)" : "");
+    return n<0 ? -EIO : (size_t)n>=capacity ? -ERANGE : n;
+}
 long md_cgroup_member_text(struct md_cgroup_member *m,const struct md_cgroup_namespace *ns,char *text,size_t capacity) {
     if (!m) return -ESRCH;
     if (!ns || ns->world!=m->world) return -EXDEV;
@@ -797,14 +939,12 @@ long md_cgroup_member_text(struct md_cgroup_member *m,const struct md_cgroup_nam
     pthread_mutex_lock(&m->world->lock); size_t length=0; int r=0;
     for (unsigned i=0;i<2 && !r;++i) {
         if (i && !m->world->views[i]) continue;
-        struct group *root=ns->roots[i] ? ns->roots[i] : m->world->views[i] ? m->world->views[i]->root : NULL;
-        struct group *group=i && m->departed ? m->world->views[i]->root : m->groups[i];
-        char path[4096]; r=group_path(group,root,path,sizeof(path));
-        if (r<0) break;
-        int n=snprintf(text+length,capacity-length,"%s%s%s\n",i ? "1:devices:" : "0::",path,
-            !i && group && group->removed ? " (deleted)" : "");
-        r=n<0 || (size_t)n>=capacity-length ? -ERANGE : 0;
-        if (!r) length+=(size_t)n;
+        int n=member_text(m,ns,m->world->views[i],text+length,capacity-length);
+        if (n<0) r=n; else length+=(size_t)n;
+    }
+    for (struct md_cgroup_view *v=m->world->named;v && !r;v=v->next) {
+        int n=member_text(m,ns,v,text+length,capacity-length);
+        if (n<0) r=n; else length+=(size_t)n;
     }
     pthread_mutex_unlock(&m->world->lock); return r ? r : (long)length;
 }

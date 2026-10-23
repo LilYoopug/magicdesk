@@ -58,6 +58,8 @@ int md_network_parameter_read(struct md_network_namespace *n,enum md_network_par
     case MD_NET_LOCAL_PORTS: memcpy(out,n->local_ports,sizeof(n->local_ports)); break;
     case MD_NET_IPV4_FORWARD: out[0]=n->ipv4_forward; out[1]=0; break;
     case MD_NET_BRIDGE_FILTER: out[0]=1; out[1]=0; break;
+    case MD_NET_TCP_KEEPIDLE: case MD_NET_TCP_KEEPINTVL: case MD_NET_TCP_KEEPCNT:
+        out[0]=n->tcp_keepalive[kind-MD_NET_TCP_KEEPIDLE]; out[1]=0; break;
     case MD_NET_ROUTE_LOCALNET: case MD_NET_RP_FILTER: case MD_NET_ARP_NOTIFY: {
         uint32_t *value=scoped_value(n,kind,scope);
         if (!value) error=-ENODEV;
@@ -96,6 +98,18 @@ int md_network_parameter_write(struct md_network_namespace *n,enum md_network_pa
         if (in[0]>1) error=-EINVAL;
         else if (!in[0]) error=-EOPNOTSUPP;
         break;
+    case MD_NET_TCP_KEEPIDLE: case MD_NET_TCP_KEEPINTVL: case MD_NET_TCP_KEEPCNT: {
+        uint32_t *value=&n->tcp_keepalive[kind-MD_NET_TCP_KEEPIDLE];
+        /* Kernel socket overrides have a narrower domain than these sysctls.
+         * Reject unsupported defaults before publication, not at socket(). */
+        if (in[0]>(kind==MD_NET_TCP_KEEPCNT ? UINT8_MAX : INT32_MAX)) error=-EINVAL;
+        else if (!in[0] || in[0]>(kind==MD_NET_TCP_KEEPCNT ? 127U : 32767U)) error=-EOPNOTSUPP;
+        /* Updating active sockets needs native OFD custody. Retaining their
+         * data FDs would postpone close/EOF; never do that for metadata. */
+        else if (*value!=in[0] && !md_network_endpoint_tcp_idle(n)) error=-EBUSY;
+        else *value=in[0];
+        break;
+    }
     case MD_NET_ROUTE_LOCALNET: case MD_NET_RP_FILTER: case MD_NET_ARP_NOTIFY: {
         uint32_t *value=scoped_value(n,kind,scope);
         if (!value) error=-ENODEV;
@@ -105,7 +119,8 @@ int md_network_parameter_write(struct md_network_namespace *n,enum md_network_pa
     }
     default: error=-EINVAL;
     }
-    if (!error && kind>=MD_NET_IPV4_FORWARD) md_network_forward_changed(n->fabric);
+    if (!error && kind>=MD_NET_IPV4_FORWARD && kind<=MD_NET_BRIDGE_FILTER)
+        md_network_forward_changed(n->fabric);
     pthread_mutex_unlock(&n->fabric->lock); return error;
 }
 struct network_socket {
@@ -245,10 +260,12 @@ void md_network_broadcast(struct md_network_namespace *n,unsigned group,const vo
 static uint32_t supported_groups(const struct network_socket *s) {
     if (s->protocol==NETLINK_NETFILTER) return 0;
     if (s->protocol==NETLINK_GENERIC) return 1U<<(MD_NETWORK_GENERIC_NOTIFY-1);
-    /* The legacy NOTIFY group is a valid subscription even without events. */
+    /* IPv6 observation groups remain valid when the fabric has no IPv6
+     * devices, prefixes or neighbor-discovery state. No mutation is implied. */
     return RTMGRP_LINK|RTMGRP_NOTIFY|RTMGRP_IPV4_IFADDR|RTMGRP_IPV6_IFADDR|RTMGRP_IPV4_ROUTE|RTMGRP_IPV6_ROUTE
-        | RTMGRP_NEIGH|RTMGRP_TC|RTMGRP_IPV4_RULE|(1U<<(RTNLGRP_IPV6_RULE-1))
-        | (1U<<(RTNLGRP_NEXTHOP-1));
+        | RTMGRP_NEIGH|RTMGRP_TC|RTMGRP_IPV4_RULE|RTMGRP_IPV6_IFINFO|(1U<<(RTNLGRP_IPV6_RULE-1))
+        | (1U<<(RTNLGRP_IPV6_PREFIX-1)) | (1U<<(RTNLGRP_ND_USEROPT-1))
+        | (1U<<(RTNLGRP_IPV6_NETCONF-1)) | (1U<<(RTNLGRP_NEXTHOP-1));
 }
 /* Port identity is protocol/namespace scoped and lives with the socket OFD.
  * Dup, fork and SCM_RIGHTS retain it; final release removes its listener. */

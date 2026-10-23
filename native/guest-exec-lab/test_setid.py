@@ -18,7 +18,9 @@ def guest(directory):
     for name, uid, gid, mode in (
             ('plain', 0, 0, 0o755), ('suid', 0, 0, 0o4755),
             ('sgid', 0, 2345, 0o2755), ('both', 0, 2345, 0o6755),
-            ('other', 1234, 2345, 0o6755), ('no-group-x', 0, 2345, 0o2745)):
+            ('other', 1234, 2345, 0o6755), ('no-group-x', 0, 2345, 0o2745),
+            ('execute-only', 0, 0, 0o111), ('suid-execute-only', 0, 1000, 0o4110),
+            ('read-only', 0, 0, 0o444), ('suid-read-only', 0, 1000, 0o4440)):
         path = directory + '/' + name
         shutil.copyfile(source, path)
         os.chown(path, uid, gid)
@@ -26,9 +28,9 @@ def guest(directory):
         paths[name] = path
 
     def check(name, euid, egid, *, fd=False, nnp=False, path=None, unlink=False, traced=False,
-              userns=False, capabilities=None, secure=None, drop=None, error=None):
+              userns=False, capabilities=None, secure=None, drop=None, error=None, unreadable=False):
         path = path or paths[name]
-        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC) if fd else None
+        descriptor = os.open(path, (os.O_PATH if fd == 'path' else os.O_RDONLY) | os.O_CLOEXEC) if fd else None
         if unlink:
             os.unlink(path)
         reader, writer = os.pipe()
@@ -45,8 +47,26 @@ def guest(directory):
                 os.setgroups([])
                 os.setgid(1000)
                 os.setuid(1000)
+                def no_new_privs(expected):
+                    assert libc.prctl(39, 0, 0, 0, 0) == expected
+                    for entry in ('self', 'thread-self'):
+                        values = dict(line.split(':', 1) for line in
+                                      Path('/proc/' + entry + '/status').read_text().splitlines())
+                        assert int(values['NoNewPrivs']) == expected, (entry, values['NoNewPrivs'], expected)
+                no_new_privs(0)
+                if unreadable:
+                    assert not os.access(path, os.R_OK)
+                    assert os.access(path, os.X_OK)
+                    try:
+                        opened = os.open(path, os.O_RDONLY)
+                    except OSError as failure:
+                        assert failure.errno == errno.EACCES, failure
+                    else:
+                        os.close(opened)
+                        raise AssertionError('Execute permission must not grant data read access')
                 if nnp:
                     assert libc.prctl(38, 1, 0, 0, 0) == 0
+                    no_new_privs(1)
                 if userns:
                     assert libc.unshare(0x10000000) == 0
                     Path('/proc/self/uid_map').write_text('0 1000 1\n')
@@ -103,6 +123,14 @@ def guest(directory):
                          ('other', 1234, 2345), ('no-group-x', 1000, 1000)]:
         check(name, uid, gid)
         check(name, uid, gid, fd=True)
+    for name, uid in [('execute-only', 1000), ('suid-execute-only', 0)]:
+        check(name, uid, 1000, unreadable=True)
+        check(name, uid, 1000, fd=True, unreadable=True)
+        check(name, uid, 1000, fd='path', unreadable=True)
+    check('suid-execute-only', 1000, 1000, nnp=True, unreadable=True)
+    for name in ('read-only', 'suid-read-only'):
+        for descriptor in (False, True, 'path'):
+            check(name, 1000, 1000, fd=descriptor, error=errno.EACCES)
     check('both', 1000, 1000, nnp=True)
     check('both', 1000, 1000, nnp=True, fd=True)
     check('both', 1000, 1000, traced=True)
@@ -140,6 +168,9 @@ def guest(directory):
         check('both', 1000, 1000, path=alias + '/both', fd=True)
         check('cap-ep', 1000, 1000, path=alias + '/cap-ep', capabilities=[0, 0], secure=0)
         check('cap-ep', 1000, 1000, path=alias + '/cap-ep', fd=True, capabilities=[0, 0], secure=0)
+        check('execute-only', 1000, 1000, path=alias + '/execute-only', unreadable=True)
+        check('suid-execute-only', 1000, 1000, path=alias + '/suid-execute-only', unreadable=True)
+        check('suid-execute-only', 1000, 1000, path=alias + '/suid-execute-only', fd='path', unreadable=True)
         check('both', 0, 2345)
     finally:
         assert libc.umount2(os.fsencode(alias), 0) == 0

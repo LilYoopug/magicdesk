@@ -331,8 +331,7 @@ int md_inode_plan_reopen(struct md_inode_store *s, int original, int flags, int 
     int device=!r && (node.kind==S_IFCHR || node.kind==S_IFBLK) && !(flags&O_PATH);
     if (device && s->nodev) r=-EACCES;
     if (!r) r = mdi_open_permission(s, &node, flags);
-    if (!r && s->landlock_execute) r=mdi_permission(s,&node,X_OK,0);
-    if (!r) r=mdi_landlock_object(s,&node,s->landlock_execute ? MD_LL_EXECUTE : md_landlock_open_access(flags,node.kind));
+    if (!r) r=mdi_landlock_object(s,&node,s->image_open ? MD_LL_EXECUTE : md_landlock_open_access(flags,node.kind));
     if (!r && mutable && (flags & O_PATH) && s->identity) {
         struct stat st;
         r = mdi_stat(s, &node, &st);

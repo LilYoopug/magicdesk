@@ -1,8 +1,16 @@
 #ifndef MD_PROVIDER_TREE_H
 #define MD_PROVIDER_TREE_H
 #include "control_file.h"
+#include "mount_policy.h"
 #include <sys/types.h>
 struct md_provider_tree;
+struct md_user_namespace;
+/* Superblock policy is shared by aliases; mount policy remains independent.
+ * Imported policies are read-only observers of the original owner. */
+void md_provider_tree_set_owner(struct md_provider_tree *,const struct md_user_namespace *);
+struct md_user_namespace *md_provider_tree_owner(const struct md_provider_tree *);
+struct md_mount_policy *md_provider_tree_super_policy(struct md_provider_tree *);
+unsigned md_provider_tree_super_flags(const struct md_provider_tree *);
 /* One admitted lookup. Completion transfers an O_PATH descriptor; destroying
  * a pending lookup cancels it. No borrowed actor or output survives admission. */
 struct md_provider_lookup {

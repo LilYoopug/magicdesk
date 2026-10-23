@@ -94,11 +94,13 @@ unlink, including stale listeners; existing connections survive unlink/rebind.
 Format 17 is the compatibility baseline. SQLite `application_id=0x53485254`
 identifies Shroot, `user_version=17` identifies the storage family, and the
 `properties` row `schema-revision` identifies the metadata revision (initially 1,
-currently 3). Revision 2 adds native-publication intents and large directory-cookie
+currently 4). Revision 2 adds native-publication intents and large directory-cookie
 mappings. Revision 3 replaces fixed overlay-attribute slots with named logical
 xattrs, preserving existing overlay values and tombstones. Guest `trusted.*`
 attributes use the same inode identity and guest capability checks; they do not
-require Android trusted-xattr permissions. These revisions do not move installed
+require Android trusted-xattr permissions. Revision 4 adds stable directory-entry
+identities for exact descriptor paths, backfilled from the existing namespace.
+These revisions do not move installed
 data or change image import identity.
 Admission validates those markers before current-schema namespace queries or
 journal changes. Unknown families, missing markers and newer revisions fail;
@@ -425,11 +427,15 @@ the filesystem UID/GID and a setgid parent's group; chmod/chown and timestamps
 share this model. The native backing remains caller-owned, without kernel set-ID.
 Trusted offline operations without a credential context use native authority.
 
-`file_paths` retains the parent/name of files that have never had multiple names.
-Descriptor readlink follows parent renames and marks deleted names without
-substituting a newly created object. Once an object has had hardlink aliases,
-the original descriptor dentry is ambiguous even after all but one alias is removed;
-readlink returns ENOTSUP instead of guessing. Data and descriptor operations still work.
+Managed opens capture a stable `dentry_paths` identity in their descriptor
+anchor. Rename moves that identity, including exchanges; unlink retains a
+tombstone until the inode is collected. Descriptor readlink follows parent
+renames and marks the selected name deleted even if another hardlink survives.
+Reopening, fork/exec and descriptor transfer retain the same origin. Native
+leaves need no catalogue entry until promotion; their original name then becomes
+the first managed entry. The existing versioned cache covers entry selection.
+`file_paths` remains the fallback for descriptors without an observed open;
+ambiguous hardlink history still returns ENOTSUP there instead of guessing.
 
 POSIX access/default ACLs are canonical Linux xattr values in `inode_acls`, shared
 by every alias and copied with image metadata. Native leaves keep access ACLs in
@@ -592,6 +598,13 @@ independent of OCI parsing and launch-local directory attachments.
   Names are byte strings, not UTF-8 text or concatenated SQL. A same-inode rename
   preserves both names; NOREPLACE rejects an existing target.
   Directory moves/exchanges change parent edges in the same transaction as names.
+  Guest namespace changes also update the physical parent's mtime/ctime while
+  retaining its atime, independently of watcher registration. Native regular-leaf
+  operations keep the kernel's timestamp updates. Import and representation-only
+  promotion preserve directory times; snapshot directories remain private.
+  Backing times, like explicit utimens and data IO, are not rolled back by SQLite.
+  Watch projection suppresses these internal directory attribute notifications;
+  explicit guest attribute changes still publish their logical events.
 - Eligible native creation, rename and unlink use kernel namespace operations
   under the same gate and a read snapshot, without catalogue writes. Native
   file fsync synchronizes the body; durability of its directory entry requires

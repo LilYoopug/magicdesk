@@ -147,8 +147,14 @@ IPv4 `IP_PKTINFO` uses logical interface and destination addresses on receive,
 including a missing `msg_name` and truncated ancillary buffers. Send accepts
 local source/interface selection consistent with the supported route; unknown
 interfaces, nonlocal sources and unsupported routing return explicit errors.
-Native TTL/TOS ancillary settings remain available. IPv6, raw IP sockets, multicast
-subscriptions/broadcast, device-bound sockets, routed recvmmsg and other outgoing
+Native TTL/TOS ancillary settings remain available. `SO_BINDTODEVICE` belongs to
+the shared endpoint, retains interface identity through rename, and limits route
+selection and incoming endpoint lookup. Accepted TCP sockets inherit it. An idle
+bound socket can change the binding transactionally, releasing or restoring its
+external port reservation; existing direct/relayed flows reject retargeting with
+`EBUSY`. Bound flows use the existing relay so link deletion/down is checked;
+unbound sockets retain their existing fast path. IPv6, raw IP sockets, multicast
+subscriptions/broadcast, routed recvmmsg and other outgoing
 ancillary types are unsupported.
 This is not packet-level isolation: native ephemeral backing ports remain
 reachable, and inherited native descriptions retain authority. Independent
@@ -306,6 +312,20 @@ it. Topology rollback restores the prior policy lifetime alongside its values.
 and loopback-source/destination policy apply at logical routing boundaries.
 The fabric resolves live addresses directly, without an ARP neighbor cache;
 `arp_notify` does not emit packets onto Android's physical network.
+
+`tcp_keepalive_time`, `tcp_keepalive_intvl` and `tcp_keepalive_probes` belong to
+the same namespace owner, with Linux defaults 7200/75/9. Socket creation applies
+them to the native TCP description; accepted sockets inherit the listener's
+options. Explicit per-socket overrides remain kernel-owned. No additional
+read/write interception or retained data FD is introduced.
+Changing a default while that namespace retains TCP endpoints returns `EBUSY`:
+live propagation requires native description custody, not a cached value that
+existing connections ignore. Writing the existing value is allowed. Values
+outside the native TCP option domain (1..32767 seconds, 1..127 probes) return
+`EOPNOTSUPP`; malformed/overflowing sysctl values return `EINVAL`.
+`test_network_endpoint.c` checks namespace independence, native options and
+atomic admission; `test_network_sysctl.py` covers proc IO, accepted sockets,
+explicit overrides and release under Base and lazy entry.
 Mounted proc enumerates only the selected namespace's interfaces and supported
 controls. Unknown controls are not implemented.
 

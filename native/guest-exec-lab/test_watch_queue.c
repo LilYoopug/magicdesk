@@ -177,8 +177,25 @@ static void corrupted_marker(void) {
     close(fd); md_watch_queue_destroy(q);
     puts("PASS watch queue: stolen marker fails without blocking or changing guest flags");
 }
+static void limits(void) {
+    struct md_watch_queue *q; int fd;
+    CHECK(!md_watch_queue_create(0,IN_NONBLOCK,&q,&fd));
+    CHECK(!md_watch_queue_emit(q,1,IN_MODIFY,0,NULL));
+    unsigned char bytes[64];
+    CHECK(md_watch_queue_read(q,fd,bytes,sizeof(bytes),NULL,NULL)==16);
+    record(bytes,-1,IN_Q_OVERFLOW,0,NULL);
+    close(fd); md_watch_queue_destroy(q);
+    /* A large limit is a bound, not a request for eagerly allocated storage. */
+    CHECK(!md_watch_queue_create(INT_MAX,IN_NONBLOCK,&q,&fd));
+    CHECK(!md_watch_queue_emit(q,1,IN_MODIFY,0,NULL));
+    CHECK(md_watch_queue_read(q,fd,bytes,sizeof(bytes),NULL,NULL)==16);
+    record(bytes,1,IN_MODIFY,0,NULL);
+    close(fd); md_watch_queue_destroy(q);
+    CHECK(md_watch_queue_create(UINT32_MAX,0,&q,&fd)==-EINVAL);
+    puts("PASS watch queue limits: zero produces overflow, INT_MAX is lazy, invalid bound rejected");
+}
 int main(void) {
     sigset_t mask; sigemptyset(&mask); sigaddset(&mask, SIGPIPE);
     CHECK(!sigprocmask(SIG_BLOCK, &mask, NULL));
-    records(); descriptors(); transferred(); native_control(); corrupted_marker(); return 0;
+    records(); descriptors(); transferred(); native_control(); corrupted_marker(); limits(); return 0;
 }

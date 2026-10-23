@@ -5,7 +5,9 @@
 #include <sys/types.h>
 struct md_inode_store;
 struct md_watch_source;
-enum { MD_INOTIFY_MAX_INSTANCES=128, MD_INOTIFY_MAX_WATCHES=8192, MD_INOTIFY_QUEUE_LIMIT=16384 };
+/* Launch-local global sysctl, sampled by each newly created instance. */
+unsigned md_inode_watch_queue_limit(void);
+int md_inode_watch_set_queue_limit(unsigned);
 /* Namespace-worker owned. Descriptors are borrowed; identity is verified from
  * the retained kernel object, never a guest descriptor number. */
 int md_inode_watch_create(struct md_inode_store *, int flags);

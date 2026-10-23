@@ -2,6 +2,7 @@
 #include "fs_mount_internal.h"
 #include "fs_control.h"
 #include "host_fs_view.h"
+#include "sysfs_uevent.h"
 #include "inode_internal.h"
 #include "linux_abi.h"
 #include <errno.h>
@@ -12,7 +13,7 @@ int md_fs_provider_mount(struct md_filesystem *fs,struct md_provider_tree *tree,
     struct md_view_location location={.fd=-1,.parent=-1};
     int error=md_view_walk(fs,AT_FDCWD,NULL,path,1,0,MD_VIEW_MOUNT_TARGET,&location);
     struct md_mount_source source={.fd=md_provider_tree_root(tree),.backing=MD_MOUNT_PROVIDER,.provider=tree,
-        .policy=MD_MOUNT_NOSUID|MD_MOUNT_NOEXEC|(md_host_fs_kind(tree)==MD_HOST_FS_SYS ? MD_MOUNT_READONLY : 0)};
+        .policy=MD_MOUNT_NOSUID|MD_MOUNT_NOEXEC};
     if (!error) error=md_view_attach_source(fs,&source,&location,NULL);
     md_view_location_close(&location); return error;
 }
@@ -29,13 +30,23 @@ int md_fs_provider_operation(struct md_filesystem *fs,struct md_mount_namespace 
     default: break;
     }
     if (q->operation==MD_FS_STATFS) {
-        md_fs_statfs_result(fd,md_mount_policy_flags(&mount->policy),NULL,out,output);
+        md_fs_statfs_result(fd,md_view_policy_flags(mount),NULL,out,output);
         unsigned long type=md_provider_tree_filesystem(mount->provider);
         if (!out->error && type) ((struct md_fs_statfs *)output->data)->type=type;
         return 1;
     }
+    if (q->operation==MD_FS_STAT || q->operation==MD_FS_FSTAT) {
+        struct stat st;
+        int projected=md_host_fs_stat(mount->provider,fd,&st);
+        if (projected<0) { out->error=projected; return 1; }
+        if (projected) {
+            md_fs_stat_info(&st,&out->info); out->info.mount_id=mount->id;
+            return 1;
+        }
+    }
     struct md_control_file file={0};
     int managed=md_provider_tree_control(mount->provider,fd,&file);
+    if (!managed) managed=md_sysfs_uevent(mount->provider,fs->device_events,fd,&file);
     if (managed<0) { out->error=managed; return 1; }
     if (!managed) {
         int write_open=(q->operation==MD_FS_OPEN || q->operation==MD_FS_REOPEN)
@@ -59,6 +70,7 @@ int md_fs_provider_operation(struct md_filesystem *fs,struct md_mount_namespace 
     }
     case MD_FS_ACCESS: {
         if (q->flags&~(AT_SYMLINK_NOFOLLOW|MD_AT_EACCESS) || q->mode&~7U) result=-EINVAL;
+        else if ((q->mode&W_OK) && md_view_readonly(mount)) result=-EROFS;
         else {
             struct md_identity actor=md_identity_access(id,!!(q->flags&MD_AT_EACCESS));
             result=file.ops->access(file.context,&actor,q->mode);
@@ -67,10 +79,14 @@ int md_fs_provider_operation(struct md_filesystem *fs,struct md_mount_namespace 
     }
     case MD_FS_OPEN: case MD_FS_REOPEN: {
         unsigned flags=q->flags;
-        if (!(flags&O_PATH) && (md_mount_policy_flags(&mount->policy)&MD_MOUNT_NODEV)) { result=-EACCES; break; }
+        struct stat st; result=file.ops->stat(file.context,&st);
+        if (result) break;
+        if (!(flags&O_PATH) && (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode))
+                && (md_mount_policy_flags(&mount->policy)&MD_MOUNT_NODEV)) { result=-EACCES; break; }
         if (!(flags&O_PATH) && (flags&(O_CREAT|O_EXCL))==(O_CREAT|O_EXCL)) { result=-EEXIST; break; }
-        if (flags&(O_DIRECTORY|O_TRUNC) || (flags&O_ACCMODE)==O_ACCMODE) { result=-EINVAL; break; }
-        if (!(flags&O_PATH) && (flags&O_ACCMODE) && md_view_readonly(mount)) { result=-EROFS; break; }
+        if (flags&O_DIRECTORY || ((flags&O_TRUNC) && !S_ISREG(st.st_mode))
+                || (flags&O_ACCMODE)==O_ACCMODE) { result=-EINVAL; break; }
+        if (!(flags&O_PATH) && (flags&(O_ACCMODE|O_TRUNC)) && md_view_readonly(mount)) { result=-EROFS; break; }
         if (!output || !output->control) { out->requires_control=1; result=-EOPNOTSUPP; break; }
         struct md_fs_anchor *origin=NULL;
         result=md_view_anchor_duplicate(fs,view,mount,fd,&origin);

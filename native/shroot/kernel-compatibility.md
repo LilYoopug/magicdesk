@@ -367,6 +367,24 @@ issue a host mount. No PIDFD_THREAD, PIDFD_SIGNAL_THREAD or newer pidfd ioctl is
 required. `--case mount-namespace`, stock Bubblewrap/GDB and Chromium's automatic
 user/PID route cover these paths under actual UID 2000; the APK's other services
 do not acquire these prerequisites.
+`clone_call` captures the versioned `clone3` ABI in the caller. Ordinary births
+remain kernel-owned; `pid_namespace` reserves `set_tid` numbers in logical PID
+views (including ancestor permissions), and `cgroup` reserves a v2 placement
+before `CLONE_INTO_CGROUP` birth. Failed births release both reservations without
+publishing membership. An explicitly requested native ancestor PID remains
+subject to the host kernel's permission check. These interfaces predate 5.15;
+they introduce no newer kernel prerequisite. `test_clone3.py` compares native
+fork/thread/vfork behavior and tests logical PID reuse, placement, namespace
+capture, rollback, protected callers and pidfd permissions in both entry modes.
+It also checks versioned read-only argument structures ending at a guard page,
+kernel-compatible admission errors, CLONE_SETTLS and CLONE_CLEAR_SIGHAND.
+Pidfds obtained outside `pidfd_open` are admitted on use from an exact captured
+description under the existing file-table turn. The common SCM_RIGHTS capture
+transport preserves kernel object identity without a helper clone or an
+application-side proc open, including protected callers with filtered
+`openat`/`clone`. Capture does not require `pidfd_getfd` or reading protected
+caller memory from the supervisor. Retained logical identities do not block
+reuse of a reaped PID.
 Nested debugger waits use baseline ppoll, PTRACE_INTERRUPT and ptrace register/
 signal-mask operations. Kernel-owned syscall restart is shared with socket IO;
 there is no new kernel requirement or permanent helper. Native-versus-guest
@@ -573,6 +591,11 @@ protocols return explicit errors. `test_network_{model,route,endpoint}.c`,
 `test_routed_network.py` and `probe_docker_runtime.py --profile routed
 --exercise-ports` cover mutation rollback, namespace moves, TCP/UDP, independent
 port observation, outbound DNS/HTTP and cleanup under actual UID 2000.
+`SO_BINDTODEVICE` uses the Linux 5.15 name/length and namespace-capability
+contract against the logical endpoint/interface catalogue. It never binds an
+Android interface. Unit and routed guest tests cover dup, accepted inheritance,
+route/ingress restrictions, rename/removal and transactional idle rebind;
+active-flow retargeting fails explicitly with `EBUSY`.
 
 Managed netlink control also implements the baseline nlctrl family catalogue,
 strict route query validation, kernel-peer connect, policy-rule queries and
@@ -608,6 +631,12 @@ or newer syscall is required. `--case mount-namespace` covers relative proc path
 mounted proc, clone/unshare/setns, retained handles, removed roots, owner checks
 and `fsopen` capture under UID 2000.
 
+Named v1 membership hierarchies (`none,name=NAME`) use the same `cgroup` owner,
+typed controls and pre-5.15 mount/fsconfig ABI. They require no host cgroup
+mount or newer kernel. The guest cgroup tests cover name validation, independent
+memberships, repeated legacy/FD mounts, fork, namespace-root capture and retired
+controls. Release agents and unsupported controller combinations fail explicitly.
+
 Logical cgroup-device BPF uses the userspace ABI available before 5.15, sealed
 memfd carriers and the existing control-FD delivery/ownership contract. It never
 calls host bpf or requires CAP_BPF, native cgroup hooks, BTF or a newer kernel.
@@ -628,12 +657,21 @@ warmed descriptor cleanup under UID 2000, plus map capacity/flags, key iteration
 bad-pointer returns, shared descriptor identity, program-held map lifetime and
 two-stage instruction queries with short buffers, short ABI and invalid pointers.
 
-The descriptor mount API (`fsopen`, `fsconfig`, `fsmount`, `move_mount`,
+The descriptor mount API (`fsopen`, `fspick`, `fsconfig`, `fsmount`, `move_mount`,
 `mount_setattr`) follows
 the Linux 5.15 userspace contract through `fs_context`, `mount_source` and the
 existing mount graph. It does not issue these privileged syscalls on the host.
 Context carriers use sealed memfds; mount FDs use O_PATH and the common retained
 origin/ADDFD/SCM_RIGHTS delivery mechanisms. No newer kernel interface is needed.
+`fspick` (5.2) selects a retained mount root, with empty-path and symlink policy,
+for inode, proc and sysfs filesystems. Tmpfs/proc/sysfs support readonly changes;
+persistent inode stores support confirmation of their existing superblock mode.
+It never forwards privileged mount operations to Android. Other filesystem
+reconfiguration is explicitly unsupported.
+Provider superblock read-only policy follows aliases, namespace copies, live
+control descriptors and exported host projections through the existing sealed
+policy mapping. The imported mapping grants observation, not remount authority.
+This is an ephemeral mount-graph protocol change, not a persistent store revision.
 `test_mount_api.py` covers stock util-linux callers under UID 2000, and the
 transient-store fixture covers detached graph custody and exact FD retirement.
 Attribute changes use the existing single-writer policy, including recursive
@@ -862,6 +900,19 @@ The integrated cooperative suite, stock Go with and without seccomp, glibc
 signal/churn fixtures and deterministic instruction-boundary fixture cover it.
 Application filters revoke admission; passing their fallback tests does not
 prove continued acceleration in a sandbox.
+
+Interrupted native aliases use baseline PTRACE_INTERRUPT at a signal-delivery
+stop. `svc_machine` translates the continuation only after ARM64 `do_signal`
+has made its restart/EINTR decision and constructed the signal frame, before
+the handler executes. Early PC replacement would bypass the kernel's restart-PC
+comparison, including on [Linux 5.15](https://github.com/torvalds/linux/blob/v5.15/arch/arm64/kernel/signal.c#L849-L917).
+`test_svc_machine_signal` covers read/futex restart classes, SA_RESTART,
+altstack, filters, ignored/suppressed delivery, longjmp and a concurrent entry
+drain. Stock glibc/musl signal storms and real document-portal shutdown exercise
+the integrated owner. Device execution remains 6.12/4 KiB, not a 5.15 claim.
+Inherited no_new_privs conservatively selects restricted service checkpoints
+before bootstrap probes; `test_capabilities` verifies denied required syscalls
+produce admission errors instead of falling through a rejected marker.
 
 Bootstrap supplies exact program/interpreter FDs and `/proc/PID/maps` ranges to
 `interception_memory` before closing them. Initial ELF text therefore uses the

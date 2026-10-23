@@ -1,9 +1,11 @@
 #define _GNU_SOURCE
 #include "process_limits.h"
+#include "task_status.h"
 #include <assert.h>
 #include <errno.h>
 #include <sched.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 enum { BUCKETS=127 };
 struct scope {
@@ -158,12 +160,18 @@ int md_process_limit(struct md_process_member *m,const struct md_identity *actor
     if (!m) return -ESRCH;
     struct rlimit *value=resource==RLIMIT_NPROC ? &m->limits->value.nproc
         : resource==RLIMIT_NOFILE ? &m->limits->value.nofile : NULL;
-    if (!value) return -EINVAL;
+    if (resource>=RLIM_NLIMITS || (!value && next)) return -EINVAL;
     if (next && next->rlim_cur>next->rlim_max) return -EINVAL;
     if (!same_group && !md_identity_capable_in(actor,target->user_namespace,CAP_SYS_RESOURCE)
             && !(actor->uid.real==target->uid.real && actor->uid.real==target->uid.effective
                 && actor->uid.real==target->uid.saved && actor->gid.real==target->gid.real
                 && actor->gid.real==target->gid.effective && actor->gid.real==target->gid.saved)) return -EPERM;
+    if (!value) {
+        struct rlimit native;
+        int error=(int)md_task_limit(native_pid ? native_pid : getpid(),resource,&native);
+        if (!error && old) *old=native;
+        return error;
+    }
     if (next && resource==RLIMIT_NOFILE && next->rlim_max>MD_PROCESS_NOFILE_MAX) return -EPERM;
     if (next && next->rlim_max>value->rlim_max
             && !md_identity_capable_in(actor,NULL,CAP_SYS_RESOURCE)) return -EPERM;

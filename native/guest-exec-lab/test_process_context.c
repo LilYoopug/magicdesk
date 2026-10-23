@@ -56,11 +56,10 @@ int main(int argc, char **argv) {
     struct md_socket_routes connections[2] = {0};
     struct md_fs fs[2] = {{.image = &images[0], .connections = &connections[0]},
         {.image = &images[1], .connections = &connections[1]}};
-    char first[] = "first", second[] = "other";
-    char *args1[] = {first, "a"}, *args2[] = {second, "b"};
+    char first[] = "first\0a", second[] = "other\0b";
     uint64_t aux1[] = {6, 4096, 0, 0}, aux2[] = {6, 16384, 0, 0};
-    md_proc_image_init(&images[0], 2, args1, aux1, sizeof(aux1));
-    md_proc_image_init(&images[1], 2, args2, aux2, sizeof(aux2));
+    md_proc_image_init(&images[0], first, sizeof(first), 0, aux1, sizeof(aux1));
+    md_proc_image_init(&images[1], second, sizeof(second), 0, aux2, sizeof(aux2));
     for (unsigned i = 0; i < 2; i++) assert(!md_copy(fs[i].root, sizeof(fs[i].root), argv[1]));
     snapshot(&fs[0], MD_PROC_CMDLINE, "first\0a", sizeof("first\0a"));
     snapshot(&fs[1], MD_PROC_CMDLINE, "other\0b", sizeof("other\0b"));

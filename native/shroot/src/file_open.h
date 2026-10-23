@@ -40,8 +40,13 @@ struct md_open_completion {
     /* Worker-local membership proof, retained only with the opened identity.
      * Attributes and catalogue promotion remain live observations. */
     unsigned native_leaf;
+    /* Worker-local, stable catalogue dentry selected by this open. */
+    uint64_t dentry;
 };
 int md_open_device(unsigned mode, uint64_t device, int flags, struct md_open_completion *);
+/* Enumerate the portable character endpoints; zero marks the end. The returned
+ * absolute name and device number also seed launch-private guest metadata. */
+int md_open_device_node(unsigned index,const char **path,uint64_t *device);
 int md_complete_open(int, int, struct md_open_completion);
 struct md_open_observation { uint32_t initial_reader, writers; };
 int md_complete_open_observed(int, int, struct md_open_completion, struct md_open_observation *);

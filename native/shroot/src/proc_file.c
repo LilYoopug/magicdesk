@@ -365,6 +365,9 @@ static void process_status_line(struct md_proc_file *f, FILE *out, const char *l
         if (!strncmp(line,"TracerPid:",10)) {
             fprintf(out,"TracerPid:\t%d\n",process_number(f->pid_view,f->tracer)); return;
         }
+        if (!strncmp(line,"NoNewPrivs:",11)) {
+            fprintf(out,"NoNewPrivs:\t%d\n",!!f->process_identity.no_new_privs); return;
+        }
         int group=!strncmp(line,"Gid:",4);
         if (group || !strncmp(line,"Uid:",4)) {
             const struct md_identity_ids *ids=group ? &f->process_identity.gid : &f->process_identity.uid;

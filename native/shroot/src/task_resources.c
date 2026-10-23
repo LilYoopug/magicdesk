@@ -147,6 +147,22 @@ failed:
     md_resources_unshare_finish(NULL,NULL,change,error);
     return error;
 }
+int md_resources_clone_cgroup_prepare(const struct md_task_resources *r,unsigned long flags,struct md_fs_anchor *origin,
+        const struct md_identity *id,struct md_resource_change *change) {
+    int error=origin ? md_cgroup_member_clone(r->cgroup,origin,id,r->cgroup_namespace,
+        !!(flags&CLONE_THREAD),&change->next.cgroup) : -EINVAL;
+    if (!error && (flags&CLONE_NEWCGROUP)) {
+        struct md_user_namespace *owner=change->identity_pending
+            ? change->identity.user_namespace : id->user_namespace;
+        struct md_cgroup_namespace *ns=md_cgroup_namespace_new(change->next.cgroup,owner);
+        if (!ns) error=-errno;
+        else {
+            md_cgroup_namespace_release(change->next.cgroup_namespace);
+            change->next.cgroup_namespace=ns;
+        }
+    }
+    return error;
+}
 int md_resources_unshare_finish(struct md_task_resources *r,
         struct md_identity *identity, struct md_resource_change *change, long result) {
     int invalid=!result && (!r || (change->identity_pending && !identity)
@@ -154,6 +170,10 @@ int md_resources_unshare_finish(struct md_task_resources *r,
         || (change->join_mounts && (!change->next.mounts || !change->next.fs))
         || (change->check_root && !change->next.fs));
     if (!result && !invalid) {
+        if (change->next.cgroup) {
+            struct md_cgroup_member *old=r->cgroup;
+            r->cgroup=change->next.cgroup; change->next.cgroup=old;
+        }
         if (change->next.cgroup_namespace) {
             struct md_cgroup_namespace *old=r->cgroup_namespace;
             r->cgroup_namespace=change->next.cgroup_namespace; change->next.cgroup_namespace=old;

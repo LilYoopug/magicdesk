@@ -11,6 +11,8 @@ int md_network_endpoint_enabled(const struct md_network_namespace *);
 int md_network_endpoint_open(struct md_network_namespace *,uint32_t,int,int,int,struct md_fd_object **,int *);
 int md_network_endpoint_bind(struct md_fd_object *,int,const struct md_identity *,const struct sockaddr *,socklen_t);
 int md_network_endpoint_listen(struct md_fd_object *,int,int);
+int md_network_endpoint_device_set(struct md_fd_object *,const struct md_identity *,const char *);
+int md_network_endpoint_device_get(struct md_fd_object *,char *,socklen_t *);
 int md_network_endpoint_destination(struct md_fd_object *,const struct sockaddr *,socklen_t,
     struct sockaddr_storage *,socklen_t *);
 int md_network_endpoint_destination_info(struct md_fd_object *,const struct sockaddr *,socklen_t,
@@ -31,4 +33,6 @@ int md_network_endpoint_snapshot(struct md_network_namespace *,int,
     struct md_network_endpoint_info **,size_t *);
 struct md_network_filter;
 int md_network_endpoint_policy_update(struct md_network_namespace *,struct md_network_filter *);
+/* Called under the fabric lock before changing TCP namespace defaults. */
+int md_network_endpoint_tcp_idle(const struct md_network_namespace *);
 #endif

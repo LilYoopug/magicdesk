@@ -1,10 +1,17 @@
 #define _GNU_SOURCE
 #include "process_limits.h"
+#include "task_status.h"
 #include <assert.h>
 #include <errno.h>
 #include <limits.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <stddef.h>
 #include <sched.h>
 #include <stdio.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static struct md_process_member *member(const struct md_identity *id,const struct rlimit *nproc) {
@@ -40,11 +47,69 @@ static void nofile(struct md_identity *root,struct md_identity *user) {
     md_process_member_release(thread); md_process_member_release(child); md_process_member_release(p);
     puts("PASS nofile policy: kernel enforcement, reversible hard limit, rollback, sharing and copy");
 }
+static void native_limits(struct md_identity *root,struct md_identity *user) {
+    struct md_process_limits initial;
+    assert(!md_process_limits_read(&initial));
+    struct md_process_member *m=md_process_member_new(root,&initial); assert(m);
+    int ready[2],release[2]; assert(!pipe(ready) && !pipe(release));
+    struct rlimit expected[RLIM_NLIMITS];
+    for (unsigned resource=0;resource<RLIM_NLIMITS;++resource)
+        assert(!getrlimit(resource,&expected[resource]));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        assert(!prctl(PR_SET_DUMPABLE,0));
+        assert(write(ready[1],"r",1)==1);
+        char byte; assert(read(release[0],&byte,1)==1); _exit(0);
+    }
+    char byte; assert(read(ready[0],&byte,1)==1);
+    for (unsigned resource=0;resource<RLIM_NLIMITS;++resource) {
+        struct rlimit actual;
+        assert(!md_task_limit(child,resource,&actual));
+        assert(actual.rlim_cur==expected[resource].rlim_cur && actual.rlim_max==expected[resource].rlim_max);
+        assert(!md_process_limit(m,root,root,0,resource,NULL,&actual,child));
+        assert(actual.rlim_cur==expected[resource].rlim_cur && actual.rlim_max==expected[resource].rlim_max);
+        assert(md_process_limit(m,user,root,0,resource,NULL,&actual,child)==-EPERM);
+    }
+    struct rlimit value;
+    assert(md_task_limit(child,RLIM_NLIMITS,&value)==-EINVAL);
+    assert(md_process_limit(m,root,root,0,RLIM_NLIMITS,NULL,&value,child)==-EINVAL);
+    assert(write(release[1],"r",1)==1);
+    int status; assert(waitpid(child,&status,0)==child && !status);
+    assert(md_process_limit(m,root,root,0,RLIMIT_SIGPENDING,NULL,&value,child)==-ESRCH);
+    close(ready[0]); close(ready[1]); close(release[0]); close(release[1]);
+    md_process_member_release(m);
+    puts("PASS native limits: protected foreign process, all resources, guest permissions and disappearance");
+}
+static void proc_limits(void) {
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        struct rlimit expected[RLIM_NLIMITS];
+        for (unsigned i=0;i<RLIM_NLIMITS;++i) assert(!getrlimit(i,&expected[i]));
+        struct sock_filter code[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_prlimit64,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EACCES),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)};
+        struct sock_fprog filter={sizeof(code)/sizeof(*code),code};
+        assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+        assert(!prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&filter));
+        for (unsigned i=0;i<RLIM_NLIMITS;++i) {
+            struct rlimit actual;
+            assert(!md_task_limit(getpid(),i,&actual));
+            assert(actual.rlim_cur==expected[i].rlim_cur && actual.rlim_max==expected[i].rlim_max);
+        }
+        _exit(0);
+    }
+    int status; assert(waitpid(child,&status,0)==child && !status);
+    puts("PASS limits proc fallback: all soft/hard values with native prlimit denied");
+}
 
 int main(void) {
     struct md_identity root=md_identity_new(0,0), user=md_identity_new(1000,1000), other=md_identity_new(1001,1001);
     struct rlimit limit={3,3}, old;
     nofile(&root,&user);
+    native_limits(&root,&user);
+    proc_limits();
     struct md_process_member *p=member(&user,&limit), *a=NULL,*b=NULL,*c=NULL;
     assert(p);
     assert(!md_process_member_fork(p,&user,CLONE_THREAD,&a));
@@ -100,7 +165,7 @@ int main(void) {
     md_identity_release(&nested);
     /* Historical nproc scopes must not keep user-namespace quotas occupied. */
     p=member(&user,&(struct rlimit){3,10}); assert(p);
-    assert(!md_user_namespace_set_limit(NULL,1));
+    assert(!md_user_namespace_set_limit(NULL,MD_USER_NAMESPACES,1));
     for (unsigned i=0;i<8;++i) {
         nested=md_identity_copy(&user);
         assert(!md_identity_enter_user_namespace(&nested));
@@ -109,7 +174,7 @@ int main(void) {
         md_process_member_release(a); md_identity_release(&nested);
     }
     md_process_member_release(p);
-    assert(!md_user_namespace_set_limit(NULL,INT_MAX));
+    assert(!md_user_namespace_set_limit(NULL,MD_USER_NAMESPACES,INT_MAX));
     md_identity_release(&root); md_identity_release(&user); md_identity_release(&other);
     puts("PASS process limits: reservation, zombie custody, thread sharing, fork copy, credentials and exec");
 }

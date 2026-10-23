@@ -35,7 +35,6 @@ static inline int md_dispatch_control_kind(unsigned policy) {
 }
 #define MD_GUEST_PID_FILTER 0x4d44010c
 #define MD_GUEST_PID_SIGNAL_GROUP 0x4d44010d
-#define MD_GUEST_PIDFD_SIGNAL 0x4d44010e
 enum md_export_control { MD_EXPORT_BEGIN=1, MD_EXPORT_READY, MD_EXPORT_OBSERVED };
 #define MD_EXPORT_ADMIT (-4096L)
 /* Register-only control works before/inside a mapped filesystem request too. */

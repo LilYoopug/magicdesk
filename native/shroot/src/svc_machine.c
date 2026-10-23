@@ -12,6 +12,8 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/wait.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 static int regs(pid_t pid,int operation,struct user_pt_regs *r) {
@@ -94,6 +96,9 @@ int md_svc_machine_drain(struct md_svc_registry *r,struct md_svc_machine_thread 
     /* This stop already owns a reconstructed guest continuation. The exit
      * handler installs it before the filter fence permits publication. */
     if (s->syscall_exit) return 0;
+    /* A filter/dumpability fence must leave the kernel's pending restart
+     * decision untouched and wait for the signal-commit boundary. */
+    if (s->signal_alias) { s->draining=1; return 0; }
     struct user_pt_regs registers;
     if (adapter) registers=*adapter;
     else {
@@ -121,7 +126,7 @@ int md_svc_machine_flush(struct md_svc_registry *r,struct md_svc_machine_thread 
     if (!r) return 0;
     /* Finish the checkpoint before restoring the guest continuation and
      * returning retained signals to their original kernel delivery context. */
-    if (s->syscall_exit) return 1;
+    if (s->syscall_exit || s->signal_alias) return 1;
     struct user_pt_regs registers;
     int error=regs(pid,PTRACE_GETREGSET,&registers);
     if (error) return error;
@@ -141,6 +146,17 @@ int md_svc_machine_signal(struct md_svc_registry *r,struct md_svc_machine_thread
     struct user_pt_regs registers;
     int error=regs(pid,PTRACE_GETREGSET,&registers);
     if (error) return error;
+    struct md_svc_site *site=md_svc_registry_direct_at(r,pid,registers.pc,registers.sp);
+    if (site && registers.pc==site->kernel_alias) {
+        /* EVENT_WAIT: do_signal must compare its original restart PC before
+         * we translate it. INTERRUPT stops after that decision and signal-frame
+         * construction, before any handler instruction. Only interrupted native
+         * aliases need this boundary, not ordinary syscalls or accelerated calls. */
+        if (ptrace(PTRACE_INTERRUPT,pid,NULL,NULL)<0) return -errno;
+        s->signal_alias=site->kernel_alias; s->signal_svc=site->direct.svc;
+        s->signal_sp=registers.sp;
+        *deliver=signal; return 1;
+    }
     int recovery=recover(r,s,pid,&registers);
     if (recovery<0) return recovery;
     if (recovery==2) {
@@ -151,6 +167,36 @@ int md_svc_machine_signal(struct md_svc_registry *r,struct md_svc_machine_thread
     if (recovery==1 && (error=regs(pid,PTRACE_SETREGSET,&registers))) return error;
     if (recovery) { *deliver=signal; return 1; }
     return 0;
+}
+int md_svc_machine_signal_committed(struct md_svc_registry *r,struct md_svc_machine_thread *s,
+        pid_t pid,int status) {
+    if (!s->signal_alias || !WIFSTOPPED(status)
+            || (unsigned)status>>16!=PTRACE_EVENT_STOP || WSTOPSIG(status)!=SIGTRAP) return 0;
+    struct user_pt_regs current;
+    int error=regs(pid,PTRACE_GETREGSET,&current);
+    if (error) return error;
+    struct user_pt_regs continuation=current;
+    uintptr_t frame=0;
+    if (current.sp!=s->signal_sp) {
+        frame=current.sp+sizeof(siginfo_t)+offsetof(ucontext_t,uc_mcontext);
+        /* sigcontext starts with fault_address, then the architectural GPRs. */
+        error=md_svc_registry_read(pid,frame+offsetof(mcontext_t,regs),
+            &continuation,sizeof(continuation));
+        if (error) return error;
+    }
+    if (continuation.sp!=s->signal_sp || (continuation.pc!=s->signal_alias
+            && continuation.pc!=s->signal_alias+4)) return -EPROTO;
+    int restarting=continuation.pc==s->signal_alias;
+    continuation.pc=s->signal_svc+(restarting ? 0 : 4);
+    if (restarting && (error=retry(r,s,pid,&continuation))) return error;
+    if (frame) error=md_svc_registry_write(pid,frame+offsetof(mcontext_t,pc),
+        &continuation.pc,sizeof(continuation.pc));
+    else error=regs(pid,PTRACE_SETREGSET,&continuation);
+    if (!error) {
+        s->signal_alias=s->signal_svc=s->signal_sp=0;
+        s->draining=0;
+    }
+    return error;
 }
 int md_svc_machine_return(struct md_svc_registry *r,struct md_svc_machine_thread *s,
         pid_t pid,struct user_pt_regs *registers) {

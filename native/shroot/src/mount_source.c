@@ -39,6 +39,8 @@ static int sysfs_source(struct md_filesystem *fs,const struct md_fs_request *q,
         if (r) { md_mount_source_close(&s); return r; }
     }
     s.provider=md_provider_tree_retain(md_sysfs_provider(s.sysfs));
+    int policy=md_mount_policy_set(md_provider_tree_super_policy(s.provider),q->flags&MS_RDONLY ? MD_MOUNT_READONLY : 0);
+    if (policy) { md_mount_source_close(&s); return policy; }
     s.fd=openat(md_sysfs_root(s.sysfs),".",O_PATH|O_DIRECTORY|O_CLOEXEC);
     if (s.fd<0) { int r=-errno; md_mount_source_close(&s); return r; }
     *out=s; return 0;
@@ -96,6 +98,9 @@ int md_mount_source_create(struct md_filesystem *fs,const struct md_fs_request *
         s.provider=md_procfs_new(parent,q->value_size ? q->value : NULL,fs->store->identity);
         int error=errno; close(parent);
         if (!s.provider) { md_mount_source_close(&s); return -error; }
+        md_provider_tree_set_owner(s.provider,md_pid_namespace_owner(pid));
+        int r=md_mount_policy_set(md_provider_tree_super_policy(s.provider),q->flags&MS_RDONLY ? MD_MOUNT_READONLY : 0);
+        if (r) { md_mount_source_close(&s); return r; }
     }
     s.fd=devpts ? openat(md_devpts_root(s.devpts),".",O_PATH|O_DIRECTORY|O_CLOEXEC)
         : cgroup ? md_cgroup_open_root(s.cgroup,fs->actor->cgroup_namespace)

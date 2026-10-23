@@ -9,7 +9,7 @@ struct mdi_cache_entry {
     enum mdi_query query;
     int valid, result;
     char id[33], name[NAME_MAX+1], scope[33];
-    union { struct mdi_node node; struct mdi_path_name name; } value;
+    union { struct mdi_node node; struct mdi_path_name name; uint64_t number; } value;
 };
 struct mdi_read_cache {
     sqlite3_int64 version;
@@ -31,14 +31,14 @@ static int equals(sqlite3_value *value,const char *text) {
  * or allocate cache entries. Failed transactions discard all speculative rows. */
 static void changed_row(struct md_inode_store *s,sqlite3 *db,const char *table,int old) {
     int object=!strcmp(table,"objects"), names=!strcmp(table,"names"),
-        backing=!strcmp(table,"backings"), path=!strcmp(table,"file_paths");
-    if (!object && !names && !backing && !path) return;
+        backing=!strcmp(table,"backings"), path=!strcmp(table,"file_paths"), dentry=!strcmp(table,"dentry_paths");
+    if (!object && !names && !backing && !path && !dentry) return;
     s->read_cache->dirty=1;
     sqlite3_value *id=NULL,*parent=NULL,*name=NULL,*device=NULL,*inode=NULL;
     int (*value)(sqlite3 *,int,sqlite3_value **)=old ? sqlite3_preupdate_old : sqlite3_preupdate_new;
-    int r=value(db,names ? 3 : backing ? 1 : 0,&id);
-    if (!r && names) r=value(db,1,&parent);
-    if (!r && names) r=value(db,2,&name);
+    int r=value(db,names ? 3 : backing ? 1 : dentry ? 2 : 0,&id);
+    if (!r && (names || dentry)) r=value(db,dentry ? 3 : 1,&parent);
+    if (!r && (names || dentry)) r=value(db,dentry ? 4 : 2,&name);
     if (!r && backing) r=value(db,2,&device);
     if (!r && backing) r=value(db,3,&inode);
     if (r) { mdi_cache_invalidate(s); return; }
@@ -54,6 +54,8 @@ static void changed_row(struct md_inode_store *s,sqlite3 *db,const char *table,i
         if (backing) affected=e->query==MDI_FD && e->device==(uint64_t)sqlite3_value_int64(device)
             && e->inode==(uint64_t)sqlite3_value_int64(inode);
         if (path) affected=e->query==MDI_FILE_PATH && equals(id,e->id);
+        if ((names || dentry) && e->query==MDI_DENTRY_CAPTURE)
+            affected=equals(parent,e->id) && equals(name,e->name);
         if (affected) { e->valid=0; e->used=0; }
     }
 }
@@ -196,4 +198,13 @@ void mdi_cache_name_put(struct md_inode_store *s, const struct mdi_cache_key *ke
         const struct mdi_path_name *name) {
     struct mdi_cache_entry *entry=put(s,key,0);
     if (entry) entry->value.name=*name;
+}
+int mdi_cache_number_get(struct md_inode_store *s, const struct mdi_cache_key *key, uint64_t *number) {
+    struct mdi_cache_entry *entry=get(s,key);
+    if (!entry) return 0;
+    *number=entry->value.number; return 1;
+}
+void mdi_cache_number_put(struct md_inode_store *s, const struct mdi_cache_key *key, uint64_t number) {
+    struct mdi_cache_entry *entry=put(s,key,0);
+    if (entry) entry->value.number=number;
 }

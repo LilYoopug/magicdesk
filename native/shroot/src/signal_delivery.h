@@ -27,9 +27,14 @@ static inline int md_signal_delivery_pending(const struct md_signal_delivery *q)
  * an unexecuted syscall normally and owns its restart/EINTR decision. Chained
  * real signal stops retain context without service instructions or registers. */
 int md_signal_delivery_publish(struct md_signal_delivery *,pid_t tid,pid_t group);
-/* 1 owns this delivery stop and supplies its resume signal, 0 leaves an
- * unrelated event unchanged, negative errno reports failure. Realtime siginfo
- * is normalized before any internal owner can retain that delivery again. */
+enum md_signal_delivery_event {
+    MD_SIGNAL_NEW,
+    MD_SIGNAL_CARRIER,
+    MD_SIGNAL_RESTORED
+};
+/* CARRIER supplies the resume signal for an intermediate protocol stop.
+ * RESTORED needs ordinary debugger/namespace admission, but must not enter
+ * interrupted-syscall discovery again. Negative errno reports failure. */
 int md_signal_delivery_event(struct md_signal_delivery *,pid_t tid,int signal,int *deliver);
 void md_signal_delivery_clear(struct md_signal_delivery *);
 #endif

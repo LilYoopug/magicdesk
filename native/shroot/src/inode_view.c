@@ -103,6 +103,7 @@ static int scope_delete(struct md_inode_store *s, const char *scope) {
     static const char *const queries[]={
         "DELETE FROM names WHERE parent IN (SELECT object FROM objects WHERE scope=?1)",
         "DELETE FROM file_paths WHERE object IN (SELECT object FROM objects WHERE scope=?1)",
+        "DELETE FROM dentry_paths WHERE object IN (SELECT object FROM objects WHERE scope=?1)",
         "DELETE FROM sockets WHERE object IN (SELECT object FROM objects WHERE scope=?1)",
         "DELETE FROM file_capabilities WHERE object IN (SELECT object FROM objects WHERE scope=?1)",
         "DELETE FROM inode_acls WHERE object IN (SELECT object FROM objects WHERE scope=?1)",

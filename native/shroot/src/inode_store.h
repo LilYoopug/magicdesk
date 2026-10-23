@@ -133,6 +133,9 @@ int md_inode_import_metadata(struct md_inode_store *, int fd, uint32_t uid, uint
  * return ENOTSUP, never an arbitrary alias. Unlinked files retain a deleted
  * suffix while their parent path is available. No per-open path cache. */
 int md_inode_path(struct md_inode_store *, int fd, char *, size_t);
+/* Captured namespace entry, independent of other hardlinks to the same inode.
+ * native_birth selects the first promoted name for a pre-promotion native FD. */
+int md_inode_dentry_path(struct md_inode_store *,int,uint64_t,int native_birth,char *,size_t);
 /* Backing identity ancestry, independent of names and the selected root.
  * Returns 1/0; an object from a different store is not contained. */
 int md_inode_contains(struct md_inode_store *, int root, int object);

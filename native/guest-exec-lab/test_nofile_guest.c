@@ -125,6 +125,8 @@ static void scenario(int protected) {
 static void foreign(void) {
     int ready[2], release[2]; assert(!pipe(ready) && !pipe(release));
     set_limit(256,256);
+    struct rlimit pending;
+    assert(!getrlimit(RLIMIT_SIGPENDING,&pending));
     pid_t parent=getpid(), child=fork(); assert(child>=0);
     if (!child) {
         assert(!prctl(PR_SET_DUMPABLE,0));
@@ -132,8 +134,11 @@ static void foreign(void) {
         char byte; assert(read(release[0],&byte,1)==1);
         check_limit(128,128);
         struct rlimit next={512,512}, old;
+        assert(!syscall(SYS_prlimit64,parent,RLIMIT_SIGPENDING,NULL,&old));
+        assert(old.rlim_cur==pending.rlim_cur && old.rlim_max==pending.rlim_max);
         assert(!syscall(SYS_prlimit64,parent,RLIMIT_NOFILE,&next,&old) && old.rlim_cur==256);
         assert(!setgid(23459) && !setuid(23459));
+        errno=0; assert(syscall(SYS_prlimit64,parent,RLIMIT_SIGPENDING,NULL,&old)==-1 && errno==EPERM);
         errno=0; assert(syscall(SYS_prlimit64,parent,RLIMIT_NOFILE,NULL,&old)==-1 && errno==EPERM);
         errno=0; assert(setrlimit(RLIMIT_NOFILE,&next)==-1 && errno==EPERM);
         _exit(0);
@@ -142,6 +147,9 @@ static void foreign(void) {
     /* EVENT_WAIT: child has disabled dumpability before the foreign update. */
     assert(read(ready[0],&byte,1)==1);
     struct rlimit next={128,128}, old;
+    assert(!syscall(SYS_prlimit64,child,RLIMIT_SIGPENDING,NULL,&old));
+    assert(old.rlim_cur==pending.rlim_cur && old.rlim_max==pending.rlim_max);
+    errno=0; assert(syscall(SYS_prlimit64,child,RLIMIT_SIGPENDING,NULL,(void *)1)==-1 && errno==EFAULT);
     assert(!syscall(SYS_prlimit64,child,RLIMIT_NOFILE,&next,&old) && old.rlim_cur==256);
     assert(write(release[1],"r",1)==1);
     reaped(child); check_limit(512,512);

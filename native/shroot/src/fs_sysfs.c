@@ -11,9 +11,10 @@
 
 int md_fs_initial_boundaries_capture(struct md_filesystem *fs) {
     struct md_mount_namespace *n=fs->mounts;
-    if (!n || n->root!=&n->base || n->base.source>=0 || !n->tree
-            || n->tree->count>MD_INODE_INITIAL_BOUNDARIES) return -EINVAL;
+    if (!n || n->root!=&n->base || n->base.source>=0 || !n->tree) return -EINVAL;
     memset(&n->initial_boundary,0,sizeof(n->initial_boundary));
+    /* Admission is an optimization, not a limit on the launch mount graph. */
+    if (n->tree->count>sizeof(n->initial_boundary.mounts)/sizeof(*n->initial_boundary.mounts)) return 0;
     for (unsigned i=0;i<n->tree->count;++i) {
         const struct md_view_mount *m=&n->tree->mounts[i];
         if (!m->id || m->detached) return -EINVAL;
@@ -23,6 +24,7 @@ int md_fs_initial_boundaries_capture(struct md_filesystem *fs) {
         n->initial_boundary.mounts[i].parent=m->parent;
         if (m->parent!=&n->base) continue;
         struct md_inode_mount_boundaries *b=&n->initial_boundary.boundaries;
+        if (b->count==MD_INODE_INITIAL_BOUNDARIES) return 0;
         int error=md_inode_object_id(fs->store,m->target,b->objects[b->count]);
         if (error) return error;
         b->filter|=md_inode_mount_bit(b->objects[b->count++]);

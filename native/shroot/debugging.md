@@ -71,6 +71,16 @@ Descriptor-operation completion during ELF bootstrap remains internal. A traced
 guest exec publishes its image-entry event before its syscall-exit stop; loader
 FD operations cannot complete that pending guest call.
 
+Syscall and single-step observation resume only at the shared guest boundary,
+after metadata replay and other internal owners have restored the caller.
+An internal return checkpoint is not a guest syscall, even when the adapter
+phase itself is idle. Pending signal carriers wait for the native syscall-exit
+record; restored signal-delivery stops then pass through ordinary debugger
+admission before recipient-namespace translation. Their restored provenance
+also prevents another interrupted-syscall probe: on nondumpable tasks that
+probe itself needs a guest memory-read helper and must not defer the same
+signal indefinitely.
+
 ## Waits And Process Identity
 
 Guest wait4 and waitid deliver queued trace stops in event order, with rusage

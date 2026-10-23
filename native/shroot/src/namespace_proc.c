@@ -74,7 +74,7 @@ long md_namespace_host_open_resolved(const struct md_fs *fs,int base,const char 
      * retains the kernel's relative openat2 scope and symlink checks. */
     struct md_proc_path ref=md_proc_path(identity);
     enum md_proc_kind kind=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
-    if (kind==MD_PROC_PROCESS_DIRECTORY && ref.ordinary_link
+    if (ref.ordinary_link && !*ref.tail
             && ((how->flags&O_NOFOLLOW) || (how->resolve&RESOLVE_NO_SYMLINKS)))
         return RAW4(openat2,base,path,how,sizeof(*how));
     if (kind==MD_PROC_MEMORY) {
@@ -116,13 +116,17 @@ long md_namespace_host_open_resolved(const struct md_fs *fs,int base,const char 
         RAW1(close,checked);
         return fdinfo_open(fs,&ref,(int)how->flags,proc_namespace);
     }
-    if (ref.kind==MD_PROC_FOREIGN) return -ENOTSUP;
-    if (ref.kind==MD_PROC_CMDLINE || ref.kind==MD_PROC_AUXV) {
+    if (kind==MD_PROC_CMDLINE || kind==MD_PROC_AUXV) {
+        if (*ref.tail) return -ENOTDIR;
         long checked=RAW4(openat2,base,path,how,sizeof(*how));
         if (checked<0) return checked;
+        if (how->flags&O_PATH) return checked;
         RAW1(close,checked);
-        return *ref.tail ? -ENOTDIR : md_proc_image_open(fs,ref.kind,(int)how->flags);
+        return ref.kind==MD_PROC_FOREIGN
+            ? RAW5(prctl,MD_GUEST_PROC_IMAGE,ref.process,kind,how->flags,0)
+            : md_proc_image_open(fs,kind,(int)how->flags);
     }
+    if (ref.kind==MD_PROC_FOREIGN) return -ENOTSUP;
     if (ref.kind && (how->resolve&(RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS))) {
         if ((how->flags&(O_PATH|O_NOFOLLOW))==(O_PATH|O_NOFOLLOW) && !*ref.tail)
             return RAW4(openat2,base,path,how,sizeof(*how));
@@ -156,17 +160,20 @@ long md_namespace_native_statx(const struct md_fs *fs, const unsigned long *args
     /* Publish ordinary mount IDs, never claim the kernel-global UNIQUE space. */
     long r=RAW5(statx,args[0],args[1],args[2],(args[3]&~(unsigned long)STATX_MNT_ID_UNIQUE)|STATX_MNT_ID,&st);
     if (r<0) return r;
+    return md_namespace_native_statx_result(fs,args,&st);
+}
+long md_namespace_native_statx_result(const struct md_fs *fs,const unsigned long *args,struct statx *st) {
     /* Anonymous kernel files can report MNT_ID with zero: they have no mount
      * placement to translate. Preserve that result instead of rejecting stat. */
-    if ((st.stx_mask & STATX_MNT_ID) && st.stx_mnt_id) {
-        struct md_fs_request q={.operation=MD_FS_NATIVE_MOUNT,.directory={-1,-1},.offset=(int64_t)st.stx_mnt_id};
+    if ((st->stx_mask & STATX_MNT_ID) && st->stx_mnt_id) {
+        struct md_fs_request q={.operation=MD_FS_NATIVE_MOUNT,.directory={-1,-1},.offset=(int64_t)st->stx_mnt_id};
         struct md_fs_response out;
-        r=md_fs_call(fs->endpoint,5000,&q,&out);
+        long r=md_fs_call(fs->endpoint,5000,&q,&out);
         if (!r) r=out.result.error;
         if (r<0) return r;
-        st.stx_mnt_id=out.result.info.mount_id;
+        st->stx_mnt_id=out.result.info.mount_id;
     }
-    return md_write_memory((void *)args[4],&st,sizeof(st));
+    return md_write_memory((void *)args[4],st,sizeof(*st));
 }
 
 static long descriptor_path(int base, char *host) {
@@ -299,7 +306,8 @@ long md_namespace_paths_resolve(const struct md_fs *fs,const struct md_fs_reques
 long md_namespace_paths_request(const struct md_fs *fs,struct md_fs_request *q) {
     struct md_fs_response out;
     long r=md_namespace_paths_resolve(fs,q,&out);
-    return r<0 || q->operation!=MD_FS_OPEN_TREE ? r : md_namespace_open_result(&out.result,q->flags);
+    return r<0 || (q->operation!=MD_FS_OPEN_TREE && q->operation!=MD_FS_FSPICK)
+        ? r : md_namespace_open_result(&out.result,q->flags);
 }
 static long host_readlink(const struct md_fs *fs, const struct md_proc_path *ref,
         const char *path, const unsigned long *a) {
@@ -364,13 +372,13 @@ static long native_call(const struct md_fs *fs, long nr, const unsigned long *a)
     return nr==SYS_statx ? md_namespace_native_statx(fs,a)
         : md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
 }
-long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a,
+static long host_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a,
                             unsigned path_index, const char *path, uint64_t proc_namespace) {
     struct md_proc_path ref = md_proc_path(path);
     enum md_proc_kind control=ref.kind==MD_PROC_FOREIGN ? ref.foreign_kind : ref.kind;
-    /* self and thread-self are ordinary proc links, not process controls.
+    /* Proc aliases are ordinary links, not their target's process controls.
      * Keep no-follow operations on that dentry in the caller's kernel view. */
-    if (control==MD_PROC_PROCESS_DIRECTORY && ref.ordinary_link
+    if (ref.ordinary_link && !*ref.tail
             && (nr==SYS_readlinkat || link_operation(nr,a))) {
         unsigned long args[6]; memcpy(args,a,sizeof(args)); args[path_index]=(unsigned long)path;
         return native_call(fs,nr,args);
@@ -402,6 +410,13 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
         if (*ref.tail) return -ENOTDIR;
         if (nr==SYS_openat) return mount_table_open(fs,&ref,path,(int)a[2]);
         ref.kind=MD_PROC_NONE;
+    }
+    /* Image bytes need the selected process, but metadata and access checks
+     * belong to the native proc inode, just as they do for our own image. */
+    if (control==MD_PROC_CMDLINE || control==MD_PROC_AUXV) {
+        if (*ref.tail) return -ENOTDIR;
+        if (nr==SYS_openat && (a[2]&O_PATH)) ref.kind=MD_PROC_NONE;
+        else if (nr!=SYS_openat) ref.kind=control;
     }
     if (ref.kind == MD_PROC_FOREIGN) {
         if (ref.foreign_kind==MD_PROC_ROOT) {
@@ -543,5 +558,17 @@ long md_namespace_host_call(const struct md_fs *fs, const char *exe, long nr, co
     } else result=target_call(fs,nr,args,operand);
     if (result==-EXDEV) result=native_call(fs,nr,args);
     if (owned>=0) RAW1(close,owned);
+    return result;
+}
+long md_namespace_host_call(const struct md_fs *fs,const char *exe,long nr,const unsigned long *a,
+        unsigned path_index,const char *path,uint64_t proc_namespace) {
+    long result=host_call(fs,exe,nr,a,path_index,path,proc_namespace);
+    if (result==-EBADF && nr!=SYS_inotify_add_watch) {
+        /* Borrowing a proc target is an internal FD operation. A closed target
+         * is a missing pathname to the caller, not an invalid syscall dirfd. */
+        struct md_proc_path ref=md_proc_path(path);
+        if (ref.kind==MD_PROC_FD || (ref.kind==MD_PROC_FOREIGN && ref.foreign_kind==MD_PROC_FD))
+            result=-ENOENT;
+    }
     return result;
 }

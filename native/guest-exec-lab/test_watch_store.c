@@ -2,6 +2,7 @@
 #include "inode_internal.h"
 #include "inode_watch.h"
 #include "inode_view.h"
+#include "fs_operation.h"
 #include "watch_source.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -37,8 +38,49 @@ static void expect_record(int reader, struct md_inode_store *s, int wd, unsigned
 static void physical_create(int parent,const char *name) {
     int fd=openat(parent,name,O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0600); CHECK(fd>=0); close(fd);
 }
+static void directory_timestamps(const char *base) {
+    char path[PATH_MAX]; snprintf(path,sizeof(path),"%s/directory-times",base);
+    struct md_inode_store *s,*writer;
+    CHECK(!md_inode_store_open(path,1,&s) && !md_inode_store_open(path,0,&writer));
+    CHECK(!md_inode_mkdir(writer,-1,"/dir",0700));
+    int dir=md_inode_open(s,-1,"/dir",O_PATH|O_DIRECTORY,0); CHECK(dir>=0);
+    int root=md_inode_open(s,-1,"/",O_PATH|O_DIRECTORY,0); CHECK(root>=0);
+    int reader=md_inode_watch_create(s,IN_NONBLOCK); CHECK(reader>=0);
+    int wd=md_inode_watch_add(s,reader,dir,IN_CREATE|IN_DELETE|IN_ATTRIB|IN_MODIFY); CHECK(wd>0);
+    int root_wd=md_inode_watch_add(s,reader,root,IN_ATTRIB|IN_MODIFY); CHECK(root_wd>0);
+    CHECK(!md_inode_symlink(writer,"target",-1,"/dir/link"));
+    expect_record(reader,s,wd,IN_CREATE,"link");
+    CHECK(md_inode_watch_read(s,reader,path,sizeof(path),NULL,NULL)==-EAGAIN);
+    CHECK(!md_inode_unlink(writer,-1,"/dir/link",0));
+    expect_record(reader,s,wd,IN_DELETE,"link");
+    CHECK(md_inode_watch_read(s,reader,path,sizeof(path),NULL,NULL)==-EAGAIN);
+    CHECK(!md_inode_metadata(writer,&(struct md_fs_request){.operation=MD_FS_UTIMENS,
+        .directory={MD_INODE_ROOT},.path={"/dir"},
+        .attributes={.seconds={1000000000,1000000001}}}));
+    union { struct inotify_event align; char bytes[1024]; } bytes;
+    ssize_t n=md_inode_watch_read(s,reader,bytes.bytes,sizeof(bytes.bytes),NULL,NULL);
+    unsigned seen=0;
+    for (ssize_t offset=0;offset<n;) {
+        struct inotify_event *e=(void *)(bytes.bytes+offset);
+        CHECK(e->mask==(IN_ATTRIB|IN_ISDIR));
+        if (e->wd==wd) { CHECK(!e->len && !(seen&1)); seen|=1; }
+        else { CHECK(e->wd==root_wd && e->len && !strcmp(e->name,"dir") && !(seen&2)); seen|=2; }
+        offset+=sizeof(*e)+e->len;
+    }
+    CHECK(seen==3 && md_inode_watch_read(s,reader,path,sizeof(path),NULL,NULL)==-EAGAIN);
+    close(reader); close(root); close(dir); md_inode_store_close(writer); md_inode_store_close(s);
+    puts("PASS directory time updates keep logical namespace notifications without duplicate native attributes");
+}
 static void logical_create(struct md_inode_store *s,const char *path) {
     int fd=md_inode_create(s,-1,path,0600); CHECK(fd>=0); close(fd);
+}
+static void unrelated_io(struct md_inode_store *s) {
+    int noisy=md_inode_open(s,-1,"/unsubscribed",O_RDONLY,0); CHECK(noisy>=0);
+    char path[64]; snprintf(path,sizeof(path),"/proc/self/fd/%d",noisy);
+    for (unsigned n=0;n<40000;++n) {
+        int opened=open(path,O_RDONLY|O_CLOEXEC); CHECK(opened>=0); close(opened);
+    }
+    close(noisy);
 }
 static void native_transitions(const char *base) {
     char path[PATH_MAX];
@@ -54,11 +96,14 @@ static void native_transitions(const char *base) {
     physical_create(native,"before"); expect_record(reader,s,native_wd,IN_CREATE,"before");
     CHECK(!stats.step.calls && !stats.transaction.calls);
     logical_create(writer,"/unsubscribed");
+    unrelated_io(writer);
+    CHECK(md_inode_watch_read(s,reader,path,sizeof(path),NULL,NULL)==-EAGAIN);
     CHECK(!mdi_begin(writer,1));
     CHECK(!mdi_sql(writer,"UPDATE events SET sequence=sequence+70000"));
     CHECK(!mdi_finish(writer,0));
     CHECK(md_inode_watch_read(s,reader,path,sizeof(path),NULL,NULL)==-EAGAIN);
     int logical_wd=md_inode_watch_add(s,reader,root,IN_CREATE); CHECK(logical_wd>0);
+    unrelated_io(writer);
     CHECK(md_inode_watch_read(s,reader,path,sizeof(path),NULL,NULL)==-EAGAIN);
     logical_create(writer,"/mixed"); expect_record(reader,s,logical_wd,IN_CREATE,"mixed");
     physical_create(native,"mixed"); expect_record(reader,s,native_wd,IN_CREATE,"mixed");
@@ -70,6 +115,8 @@ static void native_transitions(const char *base) {
     CHECK(md_inode_watch_read(s,reader,path,sizeof(path),NULL,NULL)==-EAGAIN);
     close(second); CHECK(!md_inode_watch_pump(s));
     physical_create(native,"after-close"); expect_record(reader,s,native_wd,IN_CREATE,"after-close");
+    unrelated_io(writer);
+    CHECK(md_inode_watch_read(s,reader,path,sizeof(path),NULL,NULL)==-EAGAIN);
     logical_create(writer,"/before-oneshot");
     logical_wd=md_inode_watch_add(s,reader,root,IN_CREATE|IN_ONESHOT); CHECK(logical_wd>0);
     logical_create(writer,"/oneshot");
@@ -126,6 +173,49 @@ static void provider_lifetime(struct md_inode_store *s) {
     md_watch_source_release(source);
     close(b); CHECK(!md_inode_watch_pump(s) && md_inode_watch_pollfd(s)==-1);
     puts("PASS shared provider lifetime: mask updates, last close/remove/oneshot, re-registration and unmount");
+}
+static void quotas(const char *base) {
+    char path[PATH_MAX]; snprintf(path,sizeof(path),"%s/quotas",base);
+    struct md_inode_store *a,*b;
+    CHECK(!md_inode_store_open(path,1,&a) && !md_inode_store_open(path,0,&b));
+    struct md_identity first=md_identity_new(1000,1000),other=md_identity_new(2000,2000);
+    a->identity=b->identity=&first;
+    CHECK(!md_user_namespace_set_limit(NULL,MD_USER_INOTIFY_INSTANCES,1));
+    int x=md_inode_watch_create(a,IN_NONBLOCK); CHECK(x>=0);
+    CHECK(md_inode_watch_create(b,IN_NONBLOCK)==-EMFILE);
+    b->identity=&other;
+    int y=md_inode_watch_create(b,IN_NONBLOCK); CHECK(y>=0);
+    int alias=dup(x); CHECK(alias>=0); close(x);
+    CHECK(!md_inode_watch_pump(a));
+    CHECK(md_inode_watch_create(a,IN_NONBLOCK)==-EMFILE);
+    close(alias);
+    x=md_inode_watch_create(a,IN_NONBLOCK); CHECK(x>=0);
+    CHECK(!md_user_namespace_set_limit(NULL,MD_USER_INOTIFY_INSTANCES,2));
+    b->identity=&first;
+    int z=md_inode_watch_create(b,IN_NONBLOCK); CHECK(z>=0);
+    CHECK(!md_user_namespace_set_limit(NULL,MD_USER_INOTIFY_INSTANCES,0));
+    CHECK(md_inode_watch_create(a,IN_NONBLOCK)==-EMFILE);
+    CHECK(!md_user_namespace_set_limit(NULL,MD_USER_INOTIFY_WATCHES,1));
+    struct md_watch_source *source; CHECK(!md_watch_source_new(&source));
+    int wd=md_inode_watch_add_provider(a,x,source,7,S_IFREG,IN_MODIFY); CHECK(wd>0);
+    CHECK(md_inode_watch_add_provider(b,z,source,7,S_IFREG,IN_MODIFY)==-ENOSPC);
+    CHECK(md_inode_watch_add_provider(a,x,source,7,S_IFREG,IN_MODIFY|IN_MASK_ADD)==wd);
+    /* Changing the caller cannot move a descriptor's charge to another UID. */
+    b->identity=&other;
+    CHECK(md_inode_watch_add_provider(b,z,source,8,S_IFREG,IN_MODIFY)==-ENOSPC);
+    CHECK(md_inode_watch_add_provider(b,y,source,8,S_IFREG,IN_MODIFY)>0);
+    CHECK(!md_inode_watch_remove(a,x,wd));
+    CHECK(md_inode_watch_add_provider(b,z,source,7,S_IFREG,IN_MODIFY)>0);
+    close(x); close(y); close(z);
+    CHECK(!md_inode_watch_pump(a) && !md_inode_watch_pump(b));
+    CHECK(!md_user_namespace_set_limit(NULL,MD_USER_INOTIFY_INSTANCES,1));
+    x=md_inode_watch_create(a,IN_NONBLOCK); CHECK(x>=0);
+    CHECK(md_inode_watch_add_provider(a,x,source,7,S_IFREG,IN_MODIFY)>0);
+    close(x); md_inode_store_close(a); md_inode_store_close(b);
+    md_watch_source_release(source); md_identity_release(&first); md_identity_release(&other);
+    CHECK(!md_user_namespace_set_limit(NULL,MD_USER_INOTIFY_INSTANCES,MD_USER_DEFAULT_INOTIFY_INSTANCES));
+    CHECK(!md_user_namespace_set_limit(NULL,MD_USER_INOTIFY_WATCHES,MD_USER_DEFAULT_INOTIFY_WATCHES));
+    puts("PASS shared per-user watch quotas: independent workers/UIDs, live limits, retained FD owner and last close");
 }
 static void collected_view_journal(const char *base) {
     char path[PATH_MAX]; snprintf(path,sizeof(path),"%s/collected",base);
@@ -215,6 +305,8 @@ int main(int argc, char **argv) {
     provider_lifetime(s);
     md_inode_store_close(writer); md_inode_store_close(s);
     native_transitions(argv[1]);
+    directory_timestamps(argv[1]);
     collected_view_journal(argv[1]);
+    quotas(argv[1]);
     return 0;
 }

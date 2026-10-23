@@ -213,6 +213,7 @@ struct md_sysfs *md_sysfs_new(int parent,struct md_network_namespace *network,co
     v->tree=md_provider_tree_new(parent,lower,NULL,0,&tree_ops,NULL);
     int saved=errno; if (lower>=0) close(lower); errno=saved;
     if (!v->tree) goto failed;
+    md_provider_tree_set_owner(v->tree,md_network_namespace_owner(network));
     v->root=md_provider_tree_root(v->tree);
     for (unsigned i=0;i<NODE_COUNT;++i)
         if ((r=materialize(v,v->root,&nodes[i],&v->nodes[i]))) { errno=-r; goto failed; }

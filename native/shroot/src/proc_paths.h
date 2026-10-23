@@ -9,7 +9,7 @@ enum md_proc_kind { MD_PROC_NONE, MD_PROC_FD, MD_PROC_FDINFO, MD_PROC_CWD, MD_PR
                     MD_PROC_HOSTNAME, MD_PROC_DOMAINNAME, MD_PROC_OSTYPE,
                     MD_PROC_OSRELEASE, MD_PROC_VERSION,
                     MD_PROC_OVERFLOWUID, MD_PROC_OVERFLOWGID, MD_PROC_CAP_LAST,
-                    MD_PROC_NR_OPEN,
+                    MD_PROC_NR_OPEN, MD_PROC_PID_MAX,
                     MD_PROC_INOTIFY_INSTANCES, MD_PROC_INOTIFY_WATCHES, MD_PROC_INOTIFY_QUEUE,
                     MD_PROC_NS_USER, MD_PROC_NS_MOUNT, MD_PROC_NS_UTS, MD_PROC_NS_IPC,
                     MD_PROC_NS_PID, MD_PROC_NS_PID_CHILDREN, MD_PROC_NS_NETWORK, MD_PROC_NS_CGROUP,
@@ -21,6 +21,7 @@ enum md_proc_kind { MD_PROC_NONE, MD_PROC_FD, MD_PROC_FDINFO, MD_PROC_CWD, MD_PR
                     MD_PROC_NET_UNPRIVILEGED_PORT, MD_PROC_NET_PING_GROUPS, MD_PROC_NET_LOCAL_PORTS,
                     MD_PROC_NET_IPV4_FORWARD, MD_PROC_NET_ROUTE_LOCALNET, MD_PROC_NET_RP_FILTER, MD_PROC_NET_ARP_NOTIFY,
                     MD_PROC_NET_BRIDGE_FILTER,
+                    MD_PROC_NET_TCP_KEEPIDLE, MD_PROC_NET_TCP_KEEPINTVL, MD_PROC_NET_TCP_KEEPCNT,
                     MD_PROC_MEMORY, MD_PROC_MAX_USER_NAMESPACES,
                     MD_PROC_NET_TCP, MD_PROC_NET_TCP6, MD_PROC_NET_UDP, MD_PROC_NET_UDP6, MD_PROC_NET_IF_INET6,
                     MD_PROC_DEVICES };
@@ -28,11 +29,11 @@ static inline int md_proc_network_table(enum md_proc_kind kind) {
     return kind>=MD_PROC_NET_TCP && kind<=MD_PROC_NET_IF_INET6;
 }
 static inline int md_proc_network_control(enum md_proc_kind kind) {
-    return (kind>=MD_PROC_NET_UNPRIVILEGED_PORT && kind<=MD_PROC_NET_BRIDGE_FILTER)
+    return (kind>=MD_PROC_NET_UNPRIVILEGED_PORT && kind<=MD_PROC_NET_TCP_KEEPCNT)
         || md_proc_network_table(kind);
 }
 static inline int md_proc_network_sysctl(enum md_proc_kind kind) {
-    return kind>=MD_PROC_NET_UNPRIVILEGED_PORT && kind<=MD_PROC_NET_BRIDGE_FILTER;
+    return kind>=MD_PROC_NET_UNPRIVILEGED_PORT && kind<=MD_PROC_NET_TCP_KEEPCNT;
 }
 static inline int md_proc_network_interface(enum md_proc_kind kind) {
     return kind>=MD_PROC_NET_ROUTE_LOCALNET && kind<=MD_PROC_NET_ARP_NOTIFY;
@@ -66,12 +67,13 @@ int md_proc_task_path(const char *, char *, size_t);
 struct md_process_image {
     const void *arguments;
     size_t argument_bytes;
+    size_t environment_bytes;
     unsigned char auxv[4096];
     size_t auxv_bytes;
     char executable_object[33];
     const char *executable_path;
 };
-void md_proc_image_init(struct md_process_image *, const void *arguments, size_t argument_bytes,
+void md_proc_image_init(struct md_process_image *, const void *arguments, size_t argument_bytes, size_t environment_bytes,
         const void *auxv, size_t auxv_bytes);
 struct md_fs;
 long md_proc_executable_open(const struct md_fs *, const char *path, int flags);

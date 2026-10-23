@@ -14,6 +14,8 @@ struct md_task_call_arguments { long number; unsigned long value[6]; };
  * syscall exit and a synthetic interrupt, never a forced application signal.
  * USER, ENTRY, EXIT and SECCOMP boundaries are accepted. At a restart exit,
  * the kernel first recovers its private original arguments at a stopped entry.
+ * Re-entry uses the stable call gate, restoring the original PC before seccomp;
+ * it never fetches a potentially replaced source instruction.
  * Injected calls also leave ERESTART processing to the kernel; an internal
  * restart code is never published as their completed result. A kernel-forced
  * SIGSYS unblock must not be reversed by restoring the saved mask: the call

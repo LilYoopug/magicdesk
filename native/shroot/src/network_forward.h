@@ -19,10 +19,11 @@ int md_network_forward_source(struct md_network_namespace *,int,struct sockaddr_
 int md_network_forward_destination(struct md_network_namespace *,const void *,int,const struct sockaddr_in *,
     const struct sockaddr_in *,struct sockaddr_in *);
 void md_network_forward_endpoint_closed(struct md_network_namespace *,const void *);
+int md_network_forward_endpoint_active(struct md_network_namespace *,const void *);
 int md_network_forward_bind(struct md_network_namespace *,const void *,int,const struct sockaddr_in *,
     struct md_network_port_reservation **);
 void md_network_forward_bound(struct md_network_port_reservation *,int);
 int md_network_forward_listen(struct md_network_namespace *,const void *,int);
 /* Resolve a logical destination to its current socket, without retaining it. */
-int md_network_endpoint_resolve(struct md_network_fabric *,uint64_t,int,const struct sockaddr_in *,struct sockaddr_in *,const void **);
+int md_network_endpoint_resolve(struct md_network_fabric *,struct md_network_flow_path *,int,struct sockaddr_in *,const void **);
 #endif

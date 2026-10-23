@@ -104,6 +104,16 @@ static const char format17_revision2[] =
         "UNIQUE(parent,position)) STRICT;"
     "UPDATE properties SET value=2 WHERE key='schema-revision';";
 
+static const char format17_revision3[] =
+    "CREATE TABLE inode_xattrs(object TEXT NOT NULL REFERENCES objects ON DELETE CASCADE,"
+        "name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 255),"
+        "value BLOB CHECK(length(value)<=65536),PRIMARY KEY(object,name)) STRICT;"
+    "INSERT INTO inode_xattrs SELECT object,CASE name "
+        "WHEN 1 THEN 'user.overlay.whiteout' WHEN 2 THEN 'user.overlay.opaque' "
+        "WHEN 3 THEN 'trusted.overlay.whiteout' WHEN 4 THEN 'trusted.overlay.opaque' END,value "
+        "FROM overlay_attributes; DROP TABLE overlay_attributes;"
+    "UPDATE properties SET value=3 WHERE key='schema-revision';";
+
 /* SLF2, uid=42, gid=43, mode=06750, empty ACL/capability payloads. */
 static const unsigned char format17_native_metadata[] = {
     0x53,0x4c,0x46,0x32, 42,0,0,0, 43,0,0,0, 0xe8,0x0d,0,0, 0,0,0,0, 0,0,0,0

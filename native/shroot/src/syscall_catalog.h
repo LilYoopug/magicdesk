@@ -7,7 +7,7 @@
     X(mkdirat) X(unlinkat) X(symlinkat) X(renameat) X(renameat2) X(linkat) \
     X(chdir) X(fchdir) X(getcwd) X(fchmodat) X(fchmodat2) X(fchownat) X(utimensat) \
     X(truncate) X(mknodat) X(inotify_add_watch) X(mount) X(umount2) X(pivot_root) \
-    X(fsconfig) X(fsmount) X(open_tree) X(move_mount) X(mount_setattr) X(bpf) \
+    X(fsconfig) X(fsmount) X(fspick) X(open_tree) X(move_mount) X(mount_setattr) X(bpf) \
     X(landlock_create_ruleset) X(landlock_add_rule) X(landlock_restrict_self) \
     X(setxattr) X(lsetxattr) X(removexattr) X(lremovexattr) \
     X(fsetxattr) X(fremovexattr) X(fchmod) X(fchown)

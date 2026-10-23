@@ -36,7 +36,12 @@ int md_fs_anchor_native_leaf(const struct md_fs_anchor *p,const struct md_inode_
     return p && p->native_leaf && fd==p->fd && md_inode_lifetime_same(p->lifetime,md_inode_store_lifetime(s));
 }
 unsigned md_fs_anchor_policy(const struct md_fs_anchor *p) {
-    return !p || !p->view ? 0 : md_mount_policy_flags(p->mount ? &p->mount->policy : &p->view->base.policy);
+    if (!p || !p->view) return 0;
+    const struct md_view_mount *mount=p->mount ? p->mount : &p->view->base;
+    return md_view_policy_flags(mount);
+}
+struct md_cgroup_view *md_fs_anchor_cgroup(const struct md_fs_anchor *p) {
+    return p && p->mount ? p->mount->cgroup : NULL;
 }
 void md_fs_anchor_mount_info(const struct md_fs_anchor *p,struct md_fs_info *info) {
     if (!p || !p->mount) return;
@@ -46,6 +51,7 @@ void md_fs_anchor_mount_info(const struct md_fs_anchor *p,struct md_fs_info *inf
 int md_fs_anchor_same(const struct md_fs_anchor *a, const struct md_fs_anchor *b) {
     return a && b && a->view==b->view && a->mount==b->mount
         && a->device==b->device && a->inode==b->inode
+        && a->dentry==b->dentry && a->native_leaf==b->native_leaf
         && (a->child && b->child ? !strcmp(a->child,b->child) : a->child==b->child)
         && md_inode_lifetime_same(a->lifetime,b->lifetime);
 }
@@ -147,6 +153,7 @@ void md_view_capture(struct md_filesystem *fs, struct md_mount_namespace *view,
     }
     p->kind=st.st_mode&S_IFMT;
     p->native_leaf=out->open_completion.native_leaf;
+    p->dentry=out->open_completion.dentry;
     *output->origin=p;
     if (transfer) out->fd=-1;
 }

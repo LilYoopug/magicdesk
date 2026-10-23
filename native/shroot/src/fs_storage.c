@@ -70,10 +70,10 @@ int md_fs_storage_enter(struct md_filesystem *fs, const struct md_view_mount *mo
     if (r) return r;
     *scope=(struct md_fs_storage_scope){.store=md_inode_store_retain(store),.identity=store->identity,
         .root=store->root_id,.boundary=store->boundary,.mask=store->creation_mask,
-        .landlock=store->landlock,.landlock_execute=store->landlock_execute};
+        .landlock=store->landlock,.image_open=store->image_open};
     store->identity=fs->store->identity; store->creation_mask=fs->store->creation_mask;
     store->landlock=fs->store->landlock;
-    store->landlock_execute=fs->store->landlock_execute;
+    store->image_open=fs->store->image_open;
     /* Pivoted roots retain their providers. Ordinary bind aliases still expose
      * real dentries until selected as roots, rather than inventing proc/dev. */
     store->boundary=store==fs->store && (!mount || !fs->mounts || mount==&fs->mounts->base
@@ -86,7 +86,7 @@ void md_fs_storage_leave(struct md_fs_storage_scope *scope) {
     scope->store->identity=scope->identity; scope->store->root_id=scope->root;
     scope->store->boundary=scope->boundary; scope->store->creation_mask=scope->mask;
     scope->store->landlock=scope->landlock;
-    scope->store->landlock_execute=scope->landlock_execute;
+    scope->store->image_open=scope->image_open;
     md_inode_store_close(scope->store);
     scope->store=NULL;
 }

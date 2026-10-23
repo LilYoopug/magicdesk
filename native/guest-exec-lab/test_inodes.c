@@ -123,6 +123,46 @@ static void descriptors(void) {
     puts("PASS inode identity, native FD/mmap/locks, link counts and open-unlinked lifetime");
 }
 
+static void dentry_names(void) {
+    struct md_inode_store *s=store("dentry-names",1);
+    CHECK(!md_inode_mkdir(s,-1,"dir",0755));
+    struct md_open_completion first,alias,replacement;
+    int a=md_inode_prepare_open(s,-1,"dir/a",O_CREAT|O_EXCL|O_RDWR,0644,0,&first);
+    CHECK(a>=0);
+    CHECK(!md_inode_link(s,-1,"dir/a",-1,"dir/b",0));
+    int b=md_inode_prepare_open(s,-1,"dir/b",O_PATH|O_NOFOLLOW,0,0,&alias);
+    CHECK(b>=0 && alias.dentry);
+    char text[PATH_MAX];
+    CHECK(!md_inode_dentry_path(s,a,first.dentry,first.native_leaf,text,sizeof(text)) && !strcmp(text,"/dir/a"));
+    CHECK(!md_inode_dentry_path(s,b,alias.dentry,alias.native_leaf,text,sizeof(text)) && !strcmp(text,"/dir/b"));
+    struct md_inode_store *peer=store("dentry-names",0);
+    CHECK(!md_inode_rename(peer,-1,"dir/b",-1,"dir/c",0));
+    CHECK(!md_inode_rename(peer,-1,"dir",-1,"moved",0));
+    CHECK(!md_inode_dentry_path(s,b,alias.dentry,0,text,sizeof(text)) && !strcmp(text,"/moved/c"));
+    CHECK(!md_inode_unlink(peer,-1,"moved/c",0));
+    CHECK(!md_inode_link(peer,-1,"moved/a",-1,"moved/c",0));
+    CHECK(!md_inode_dentry_path(s,b,alias.dentry,0,text,sizeof(text)) && !strcmp(text,"/moved/c (deleted)"));
+    int c=md_inode_prepare_open(s,-1,"moved/c",O_RDONLY,0,0,&replacement);
+    CHECK(c>=0 && replacement.dentry!=alias.dentry);
+    CHECK(!md_inode_dentry_path(s,c,replacement.dentry,0,text,sizeof(text)) && !strcmp(text,"/moved/c"));
+    int other=md_inode_prepare_open(peer,-1,"moved/d",O_CREAT|O_EXCL|O_RDWR,0644,0,&replacement);
+    CHECK(other>=0);
+    CHECK(!md_inode_rename(peer,-1,"moved/a",-1,"moved/d",RENAME_EXCHANGE));
+    CHECK(!md_inode_dentry_path(s,a,first.dentry,first.native_leaf,text,sizeof(text)) && !strcmp(text,"/moved/d"));
+    CHECK(!md_inode_dentry_path(s,other,replacement.dentry,replacement.native_leaf,text,sizeof(text)) && !strcmp(text,"/moved/a"));
+    CHECK(md_inode_dentry_path(s,other,alias.dentry,0,text,sizeof(text))==-ESTALE);
+    CHECK(!md_inode_rename(peer,-1,"moved/d",-1,"moved/a",0));
+    CHECK(!md_inode_dentry_path(s,other,replacement.dentry,replacement.native_leaf,text,sizeof(text)) && !strcmp(text,"/moved/a (deleted)"));
+    CHECK(!md_inode_dentry_path(s,a,first.dentry,first.native_leaf,text,sizeof(text)) && !strcmp(text,"/moved/a"));
+    md_inode_store_close(peer); md_inode_store_close(s); s=store("dentry-names",0);
+    CHECK(!md_inode_dentry_path(s,b,alias.dentry,0,text,sizeof(text)) && !strcmp(text,"/moved/c (deleted)"));
+    CHECK(md_inode_path(s,b,text,sizeof(text))==-ENOTSUP);
+    close(a); close(b); close(c); close(other);
+    struct md_inode_audit audit; CHECK(!md_inode_audit(s,&audit));
+    md_inode_store_close(s);
+    puts("PASS exact dentry: hardlinks, native promotion, peer rename/exchange, unlink/relink, replacement and reopen");
+}
+
 static void namespace(void) {
     struct md_inode_store *s = store("names", 1);
     int a = md_inode_create(s, MD_INODE_ROOT, "a", 0600), b = md_inode_create(s, MD_INODE_ROOT, "b", 0600);
@@ -1549,12 +1589,74 @@ static void native_plans(void) {
     md_inode_store_close(copy); md_inode_store_close(source);
     puts("PASS native open plans: pin identity, deferred write/append/truncate, readonly policy, permissions and pre-effect decline");
 }
+static void reset_directory_time(struct md_inode_store *s, const char *name) {
+    CHECK(!md_inode_metadata(s,&(struct md_fs_request){.operation=MD_FS_UTIMENS,
+        .directory={MD_INODE_ROOT},.path={name},
+        .attributes={.seconds={1000000000,1000000001},.nanos={123,456}}}));
+}
+static void directory_time(struct md_inode_store *s, const char *name, int changed) {
+    struct stat st;
+    CHECK(!md_inode_stat(s,MD_INODE_ROOT,name,0,&st));
+    CHECK(S_ISDIR(st.st_mode));
+    CHECK(st.st_atim.tv_sec==1000000000 && st.st_atim.tv_nsec==123);
+    if (!(changed ? st.st_mtim.tv_sec>1000000001 :
+            st.st_mtim.tv_sec==1000000001 && st.st_mtim.tv_nsec==456))
+        fprintf(stderr,"directory=%s native=%d expected-changed=%d mtime=%lld.%09ld\n",
+            name,s->native_files,changed,(long long)st.st_mtim.tv_sec,st.st_mtim.tv_nsec);
+    CHECK(changed ? st.st_mtim.tv_sec>1000000001 :
+        st.st_mtim.tv_sec==1000000001 && st.st_mtim.tv_nsec==456);
+}
+static void directory_times(void) {
+    struct md_identity identity=md_identity_new(0,0);
+    for (int native=0;native<2;++native) {
+        const char *name=native ? "directory-times-native" : "directory-times-catalogue";
+        struct md_inode_store *s=store(name,1),*peer=store(name,0);
+        s->identity=&identity; s->native_files=native;
+        CHECK(!md_inode_mkdir(s,-1,"a",0700) && !md_inode_mkdir(s,-1,"b",0700));
+        reset_directory_time(s,"a"); reset_directory_time(s,"b");
+        CHECK(!md_inode_symlink(s,"target",-1,"a/link"));
+        directory_time(peer,"a",1); directory_time(peer,"b",0);
+        reset_directory_time(s,"a");
+        CHECK(md_inode_symlink(s,"target",-1,"a/link")==-EEXIST);
+        CHECK(md_inode_unlink(s,-1,"a/missing",0)==-ENOENT);
+        directory_time(peer,"a",0);
+        CHECK(!md_inode_mkdir(s,-1,"a/child",0700)); directory_time(peer,"a",1);
+        reset_directory_time(s,"a");
+        int fd=md_inode_create(s,-1,"a/file",0600); CHECK(fd>=0); close(fd);
+        directory_time(peer,"a",1);
+        reset_directory_time(s,"a");
+        CHECK(!md_inode_link(s,-1,"a/file",-1,"b/alias",0));
+        directory_time(peer,"a",0); directory_time(peer,"b",1);
+        reset_directory_time(s,"b");
+        CHECK(!md_inode_rename(s,-1,"a/link",-1,"b/link",0));
+        directory_time(peer,"a",1); directory_time(peer,"b",1);
+        reset_directory_time(s,"a"); reset_directory_time(s,"b");
+        CHECK(!md_inode_rename(s,-1,"a/file",-1,"b/alias",0));
+        directory_time(peer,"a",0); directory_time(peer,"b",0);
+        CHECK(!md_inode_rename(s,-1,"a/file",-1,"b/link",RENAME_EXCHANGE));
+        directory_time(peer,"a",1); directory_time(peer,"b",1);
+        reset_directory_time(s,"a"); reset_directory_time(s,"b");
+        CHECK(!md_inode_unlink(s,-1,"a/child",AT_REMOVEDIR));
+        CHECK(!md_inode_unlink(s,-1,"b/link",0));
+        directory_time(peer,"a",1); directory_time(peer,"b",1);
+        md_inode_store_close(peer); md_inode_store_close(s);
+        s=store(name,0); directory_time(s,"a",1); directory_time(s,"b",1);
+        md_inode_store_close(s);
+    }
+    struct md_inode_store *source=store("directory-times-source",1),*copy=store("directory-times-copy",1);
+    CHECK(!md_inode_mkdir(source,-1,"a",0700)); reset_directory_time(source,"a");
+    CHECK(!md_inode_store_seal(source) && !md_inode_snapshot(source,copy));
+    CHECK(!md_inode_symlink(copy,"target",-1,"a/link"));
+    directory_time(copy,"a",1); directory_time(source,"a",0);
+    md_inode_store_close(copy); md_inode_store_close(source); md_identity_release(&identity);
+    puts("PASS directory timestamps: logical/native names, errors, same-inode rename, exchange, peer/reopen and snapshot isolation");
+}
 int main(int argc, char **argv) {
     CHECK(argc == 2 || argc == 3);
     CHECK(argv[1][0] == '/' && strlen(argv[1]) < sizeof(root)); strcpy(root, argv[1]);
     if (argc == 3) { CHECK(!strcmp(argv[2], "exec-child")); exec_child("exec"); return 0; }
     CHECK(mkdir(root, 0700) == 0);
-    descriptors(); namespace(); contention(); multiple_stores(); across_exec(argv[0]);
+    descriptors(); dentry_names(); namespace(); directory_times(); contention(); multiple_stores(); across_exec(argv[0]);
     native_plans(); native_births(); native_birth_custody(); native_birth_recovery(); native_birth_acl();
     hierarchy(); symlinks(); permissions(); kernel_reference(); scoped_paths(); read_admission_failure(); operation_windows();
     permission_snapshot(); reused_queries(); metadata_queries(); cached_path_names();

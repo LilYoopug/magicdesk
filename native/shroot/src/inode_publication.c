@@ -77,7 +77,8 @@ static int commit(struct md_inode_store *s,int r) {
     if (r) mdi_sql(s,"ROLLBACK");
     return r;
 }
-static int parent_directory(struct md_inode_store *s,const struct intent *p,struct mdi_node *parent) {
+static int parent_directory(struct md_inode_store *s,const struct intent *p,struct mdi_node *parent,
+        struct timespec times[2]) {
     int r=mdi_node(s,p->parent,parent);
     if (!r && (parent->kind!=S_IFDIR || parent->source || !parent->attached)) r=-ESTALE;
     struct stat st;
@@ -87,6 +88,7 @@ static int parent_directory(struct md_inode_store *s,const struct intent *p,stru
     if (fd<0) return -errno;
     if (fstat(fd,&st)) r=-errno;
     if (!r && (st.st_dev!=parent->device || st.st_ino!=parent->inode)) r=-ESTALE;
+    if (!r && times) { times[0]=st.st_atim; times[1]=st.st_mtim; }
     if (r) close(fd);
     return r ? r : fd;
 }
@@ -99,7 +101,8 @@ static int named(int directory,const char *name,struct stat *st) {
 }
 static int publish(struct md_inode_store *s,const struct intent *p) {
     struct mdi_node parent;
-    int directory=parent_directory(s,p,&parent);
+    struct timespec times[2];
+    int directory=parent_directory(s,p,&parent,times);
     if (directory<0) return directory;
     struct stat source,target;
     int a=named(directory,p->name,&source),b=named(s->objects,p->object,&target);
@@ -107,6 +110,8 @@ static int publish(struct md_inode_store *s,const struct intent *p) {
         : !matches(a ? &source : &target,p) ? -ESTALE : 0;
     if (!r) r=watch_boundary(s,1);
     if (!r && a && renameat2(directory,p->name,s->objects,p->object,RENAME_NOREPLACE)) r=-errno;
+    /* Promotion changes representation, not the visible parent contents. */
+    if (!r && a && futimens(directory,times)) r=-errno;
     if (!r) r=mdi_sync(s,s->objects);
     if (!r) r=mdi_sync(s,directory);
     close(directory);
@@ -215,7 +220,7 @@ int mdi_publication_promote(struct md_inode_store *s,const struct mdi_node *pare
     struct stat existing;
     r=named(s->objects,p.object,&existing);
     if (r) return r<0 ? r : -EEXIST;
-    int directory=parent_directory(s,&p,&ignored);
+    int directory=parent_directory(s,&p,&ignored,NULL);
     if (directory<0) return directory;
     int fd=openat(directory,name,O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK);
     r=fd<0 ? -errno : 0;

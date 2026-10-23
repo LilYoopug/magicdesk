@@ -1,18 +1,135 @@
 #define _GNU_SOURCE
 #include "network_endpoint.h"
 #include "network_internal.h"
+#include "network_forward.h"
 #include "network_proc.h"
 #include "guest_identity.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <net/if.h>
+#include <netinet/tcp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+static void device_binding(void) {
+    struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
+    struct md_identity root=md_identity_new(0,0),user=md_identity_new(1000,1000);
+    unsigned first,second;
+    assert(!md_network_interface_add(n,MD_LINK_BRIDGE,"device-a",&first));
+    assert(!md_network_interface_add(n,MD_LINK_BRIDGE,"device-b",&second));
+    struct md_network_interface *a=md_network_interface_find(n,first,NULL);
+    struct md_network_interface *b=md_network_interface_find(n,second,NULL);
+    a->info.flags|=IFF_UP; a->ipv4=htonl(0x0a010001); a->prefix=24;
+    b->info.flags|=IFF_UP; b->ipv4=htonl(0x0a020001); b->prefix=24;
+    struct md_fd_object *late; int late_fd;
+    assert(!md_network_endpoint_open(n,0,AF_INET,SOCK_DGRAM,0,&late,&late_fd));
+    struct sockaddr_in wildcard={.sin_family=AF_INET};
+    assert(!md_network_endpoint_bind(late,late_fd,&root,(void *)&wildcard,sizeof(wildcard)));
+    struct sockaddr_storage public_address; socklen_t size;
+    assert(!md_network_endpoint_name(late,late_fd,0,&public_address,&size));
+    assert(!md_network_endpoint_device_set(late,&root,"device-a"));
+    int native_fd=socket(AF_INET,SOCK_DGRAM,0);
+    assert(native_fd>=0 && !bind(native_fd,(void *)&public_address,size));
+    assert(md_network_endpoint_device_set(late,&root,"")==-EADDRINUSE);
+    char retained[IFNAMSIZ]; size=sizeof(retained);
+    assert(!md_network_endpoint_device_get(late,retained,&size) && !strcmp(retained,"device-a"));
+    close(native_fd);
+    assert(!md_network_endpoint_device_set(late,&root,""));
+    close(late_fd); md_fd_object_release(late);
+    struct md_fd_object *one,*two; int f,s;
+    assert(!md_network_endpoint_open(n,0,AF_INET,SOCK_DGRAM,0,&one,&f));
+    assert(!md_network_endpoint_open(n,0,AF_INET,SOCK_DGRAM,0,&two,&s));
+    char name[IFNAMSIZ]; socklen_t length=0;
+    assert(!md_network_endpoint_device_get(one,name,&length) && !length);
+    assert(md_network_endpoint_device_set(one,&root,"missing")==-ENODEV);
+    assert(!md_network_endpoint_device_set(one,&user,"device-a"));
+    assert(md_network_endpoint_device_set(one,&user,"")==-EPERM);
+    assert(md_network_endpoint_device_get(one,name,&length)==-EINVAL);
+    length=sizeof(name);
+    assert(!md_network_endpoint_device_get(one,name,&length) && length==9 && !strcmp(name,"device-a"));
+    assert(!md_network_endpoint_device_set(one,&root,""));
+    assert(!md_network_endpoint_device_set(one,&root,"device-a"));
+    assert(!md_network_endpoint_device_set(two,&root,"device-b"));
+    struct sockaddr_in any={.sin_family=AF_INET,.sin_port=htons(18670)};
+    assert(!md_network_endpoint_bind(one,f,&root,(void *)&any,sizeof(any)));
+    assert(!md_network_endpoint_bind(two,s,&root,(void *)&any,sizeof(any)));
+    struct md_network_flow_path path={.destination=n->inode,
+        .translated={.destination=a->ipv4,.destination_port=any.sin_port,.input=first}};
+    struct sockaddr_in native; const void *selected=NULL;
+    assert(!md_network_endpoint_resolve(n->fabric,&path,SOCK_DGRAM,&native,&selected));
+    assert(selected==one && path.mediated);
+    path.translated.input=second;
+    assert(!md_network_endpoint_resolve(n->fabric,&path,SOCK_DGRAM,&native,&selected) && selected==two);
+    path.translated.input=1;
+    assert(md_network_endpoint_resolve(n->fabric,&path,SOCK_DGRAM,&native,&selected)==-ECONNREFUSED);
+    struct sockaddr_storage destination;
+    any.sin_addr.s_addr=b->ipv4;
+    assert(md_network_endpoint_destination(one,(void *)&any,sizeof(any),&destination,&length)==-ENETUNREACH);
+    assert(!md_network_interface_move(n,first,n,"renamed"));
+    length=sizeof(name);
+    assert(!md_network_endpoint_device_get(one,name,&length) && !strcmp(name,"renamed"));
+    assert(!md_network_interface_remove(n,first));
+    assert(!md_network_interface_add(n,MD_LINK_BRIDGE,"renamed",&first));
+    length=sizeof(name);
+    assert(md_network_endpoint_device_get(one,name,&length)==-ENODEV);
+    assert(md_network_endpoint_destination(one,(void *)&any,sizeof(any),&destination,&length)==-ENODEV);
+    close(f); close(s); md_fd_object_release(one); md_fd_object_release(two);
+    md_identity_release(&root); md_identity_release(&user); md_network_namespace_release(n);
+    puts("PASS socket device binding: shared endpoint identity, permissions, routing, ingress, rename and removal");
+}
+
+static void tcp_defaults(void) {
+    struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
+    assert(n);
+    const int options[]={TCP_KEEPIDLE,TCP_KEEPINTVL,TCP_KEEPCNT};
+    const uint32_t defaults[]={7200,75,9},selected[]={1800,30,4};
+    uint32_t values[2]={0};
+    for (unsigned i=0;i<3;++i) {
+        enum md_network_parameter kind=MD_NET_TCP_KEEPIDLE+i;
+        assert(!md_network_parameter_read(n,kind,0,values) && values[0]==defaults[i]);
+        values[0]=0;
+        assert(md_network_parameter_write(n,kind,0,values)==-EOPNOTSUPP);
+        values[0]=i==2 ? 256 : UINT32_MAX;
+        assert(md_network_parameter_write(n,kind,0,values)==-EINVAL);
+        values[0]=i==2 ? 128 : 32768;
+        assert(md_network_parameter_write(n,kind,0,values)==-EOPNOTSUPP);
+        values[0]=selected[i];
+        assert(!md_network_parameter_write(n,kind,0,values));
+    }
+    struct md_network_namespace *child=md_network_namespace_copy(n,NULL);
+    assert(child);
+    assert(!md_network_parameter_read(child,MD_NET_TCP_KEEPIDLE,0,values) && values[0]==7200);
+    struct md_fd_object *tcp,*udp; int fd,datagram;
+    assert(!md_network_endpoint_open(n,0,AF_INET,SOCK_DGRAM,0,&udp,&datagram));
+    values[0]=1801;
+    assert(!md_network_parameter_write(n,MD_NET_TCP_KEEPIDLE,0,values));
+    values[0]=1800;
+    assert(!md_network_parameter_write(n,MD_NET_TCP_KEEPIDLE,0,values));
+    assert(!md_network_endpoint_open(n,0,AF_INET,SOCK_STREAM,0,&tcp,&fd));
+    for (unsigned i=0;i<3;++i) {
+        int value=-1; socklen_t length=sizeof(value);
+        assert(!getsockopt(fd,IPPROTO_TCP,options[i],&value,&length) && value==(int)selected[i]);
+        values[0]=selected[i];
+        assert(!md_network_parameter_write(n,MD_NET_TCP_KEEPIDLE+i,0,values));
+        ++values[0];
+        assert(md_network_parameter_write(n,MD_NET_TCP_KEEPIDLE+i,0,values)==-EBUSY);
+        assert(!md_network_parameter_read(n,MD_NET_TCP_KEEPIDLE+i,0,values) && values[0]==selected[i]);
+    }
+    values[0]=3600;
+    assert(!md_network_parameter_write(child,MD_NET_TCP_KEEPIDLE,0,values));
+    close(fd); md_fd_object_release(tcp);
+    assert(!md_network_parameter_write(n,MD_NET_TCP_KEEPIDLE,0,values));
+    close(datagram); md_fd_object_release(udp);
+    md_network_namespace_release(child); md_network_namespace_release(n);
+    puts("PASS TCP namespace defaults: native options, independent namespaces, atomic admission and close");
+}
+
 void test_network_endpoint(void) {
+    tcp_defaults();
+    device_binding();
     struct md_network_namespace *root=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
     struct md_network_namespace *a=md_network_namespace_copy(root,NULL), *b=md_network_namespace_copy(root,NULL);
     struct md_network_namespace *offline=md_network_namespace_new(NULL,MD_NETWORK_PRIVATE);

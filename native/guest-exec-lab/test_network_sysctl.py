@@ -41,6 +41,12 @@ def write(name, text):
 def guest():
     os.environ['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     def ipv4_proc(root):
+        controls = Path(root) / 'sys/net'
+        assert 'ipv4' in os.listdir(controls)
+        assert 'ipv6' not in os.listdir(controls)
+        denied(lambda: (controls / 'ipv6').stat(), errno.ENOENT)
+        denied(lambda: (controls / 'ipv6/conf/all/forwarding').read_bytes(), errno.ENOENT)
+        denied(lambda: os.open(controls / 'ipv6/conf/all/forwarding', os.O_WRONLY), errno.ENOENT)
         # A pre-existing proc mount keeps its original PID namespace even
         # after unshare(CLONE_NEWPID). Use the PID exposed by that mount.
         process = os.readlink(str(Path(root) / 'self'))
@@ -75,12 +81,25 @@ def guest():
         duplicate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         with socket.socket(fileno=os.dup(first.fileno())) as alias:
             assert alias.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) == 1
-        subscriptions = 0x113  # LINK | NOTIFY | IPV4_IFADDR | IPV6_IFADDR
+        subscriptions = 0x913  # LINK | NOTIFY | IPV4_IFADDR | IPV6_IFADDR | IPV6_IFINFO
         first.bind((0, subscriptions))
         assert first.getsockname()[1] == subscriptions
         first.setsockopt(270, 2, 2)  # DROP_MEMBERSHIP, NOTIFY
         assert first.getsockname()[1] == subscriptions & ~2
         first.setsockopt(270, 1, 2)
+        first.setsockopt(270, 2, 12)  # IPv6 link catalogue is empty but observable.
+        assert first.getsockname()[1] == subscriptions & ~(1 << 11)
+        first.setsockopt(270, 1, 12)
+        for group in (18, 20, 25):  # PREFIX, ND_USEROPT, IPv6 NETCONF
+            first.setsockopt(270, 1, group)
+            assert first.getsockname()[1] == subscriptions | (1 << (group - 1))
+            first.setsockopt(270, 2, group)
+            assert first.getsockname()[1] == subscriptions
+        first.settimeout(5)
+        request = struct.pack('=IHHII', 32, 18, 0x301, 71, 0) + bytes([socket.AF_INET6]) + bytes(15)
+        assert first.sendto(request, (0, 0)) == len(request)
+        reply, source = first.recvfrom(4096)
+        assert source == (0, 0) and struct.unpack('=IHHIIi', reply) == (20, 3, 2, 71, first.getsockname()[0], 0)
         # Standalone nexthops are an empty catalogue, not an unsupported
         # subscription. Modern network managers subscribe before dumping it.
         first.setsockopt(270, 1, 32)  # SOL_NETLINK, ADD_MEMBERSHIP, NEXTHOP
@@ -186,6 +205,35 @@ def guest():
         return result
 
     port, ping, local = 'ip_unprivileged_port_start', 'ping_group_range', 'ip_local_port_range'
+    keepalive = (('tcp_keepalive_time', socket.TCP_KEEPIDLE, 1800),
+                 ('tcp_keepalive_intvl', socket.TCP_KEEPINTVL, 30),
+                 ('tcp_keepalive_probes', socket.TCP_KEEPCNT, 4))
+    original_keepalive = {name: read(name)[0] for name, _, _ in keepalive}
+    subprocess.run(['ip', 'link', 'set', 'lo', 'up'], check=True, timeout=10)
+    subprocess.run(['ip', 'address', 'replace', '127.0.0.1/8', 'dev', 'lo', 'scope', 'host'],
+                   check=True, timeout=10)
+    for name, _, value in keepalive:
+        write(name, str(value))
+        assert read(name) == [str(value)]
+        denied(lambda: write(name, '0'), errno.EOPNOTSUPP)
+    with socket.socket() as server, socket.socket() as client:
+        server.bind(('127.0.0.1', 0))
+        server.listen()
+        client.connect(server.getsockname())
+        accepted, _ = server.accept()
+        with accepted:
+            for name, option, value in keepalive:
+                for descriptor in (server, client, accepted):
+                    assert descriptor.getsockopt(socket.IPPROTO_TCP, option) == value
+                write(name, str(value))
+                denied(lambda: write(name, str(value + 1)), errno.EBUSY)
+                assert read(name) == [str(value)]
+            accepted.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 123)
+            assert accepted.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE) == 123
+            assert server.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE) == 1800
+    for name, value in original_keepalive.items():
+        write(name, value)
+    print('PASS TCP namespace defaults, native/accepted socket options and live-update admission', flush=True)
     bridge = Path(BASE).parent / 'bridge/bridge-nf-call-iptables'
     assert bridge.read_text() == '1\n'
     bridge.write_text('1')
@@ -376,15 +424,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build', type=Path)
     parser.add_argument('store')
+    parser.add_argument('--entry', choices=('base', 'lazy'), default='lazy')
     args = parser.parse_args()
     from test_oci_services import Suite
-    suite = Suite(args.build, args.build)
+    suite = Suite(args.build, args.build, machine_entry=args.entry == 'lazy')
     target = '/tmp/md-net-sysctl-' + suite.report['id']
     prefix = [suite.runner, '--store', args.store, '--user', '0:0']
     try:
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/test.py')
         suite.command(prefix + ['--', '/bin/mkdir', target])
-        suite.command(prefix + ['--bind-ro', suite.base, target, '--deadline-seconds', '60', '--',
+        suite.command(prefix + suite.entry_options + ['--network', 'routed', '--bind-ro', suite.base, target, '--deadline-seconds', '60', '--',
                                 '/usr/bin/unshare', '--net', '--mount', '--pid', '--fork',
                                 '/usr/bin/python3', target + '/test.py', '--guest'],
                       timeout=80)

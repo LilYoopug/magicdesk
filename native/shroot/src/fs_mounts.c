@@ -156,34 +156,44 @@ int md_view_backing_contains(struct md_filesystem *fs,const struct md_view_mount
     if (!r) r=md_view_backing_path(fs,object,mount,child,sizeof(child));
     return r ? r : beneath(child,parent);
 }
+static int backing_dentry_path(struct md_filesystem *fs,int fd,struct md_view_mount *m,
+        uint64_t dentry,int native_birth,char *out,size_t size) {
+    if ((!dentry && !native_birth) || !md_view_inode(m)) return md_view_backing_path(fs,fd,m,out,size);
+    struct md_fs_storage_scope scope;
+    int r=md_fs_storage_enter(fs,m,&scope);
+    if (r) return r;
+    scope.store->root_id=NULL;
+    r=md_inode_dentry_path(scope.store,fd,dentry,native_birth,out,size);
+    md_fs_storage_leave(&scope); return r;
+}
 static int location_path(struct md_filesystem *fs, int fd, struct md_view_mount *m,
-        const struct md_view_mount *boundary, char *out, size_t size) {
+        const struct md_view_mount *boundary,uint64_t dentry,int native_birth,char *out, size_t size) {
     if (!m) m=&fs->mounts->base;
     /* A retained root names its own subtree even if its mount is detached.
      * Only ancestors above that root are irrelevant; detached children still
      * have no reachable pathname in this process's view. */
-    if (m==&fs->mounts->base && m->source<0) return md_view_backing_path(fs,fd,m,out,size);
+    if (m==&fs->mounts->base && m->source<0) return backing_dentry_path(fs,fd,m,dentry,native_birth,out,size);
     if (m->detached && m!=boundary) return -ENOENT;
     char root[PATH_MAX], path[PATH_MAX], target[PATH_MAX];
     struct stat st;
     if (fstat(fd, &st)) return -errno;
     if (m==boundary) {
         if (!st.st_nlink) return -ENOENT;
-        return md_view_backing_path(fs,fd,m,out,size);
+        return backing_dentry_path(fs,fd,m,dentry,native_birth,out,size);
     }
     /* A mount root is named by its covered dentry, not by the backing
      * inode's aliases. File binds need no source-name reconstruction. */
     if (md_view_same(&st,&m->native)) {
-        if (m->parent) return location_path(fs,m->target,m->parent,boundary,out,size);
+        if (m->parent) return location_path(fs,m->target,m->parent,boundary,0,0,out,size);
         if (size<2) return -ERANGE;
         strcpy(out,"/"); return 0;
     }
     if (!st.st_nlink) return -ENOENT;
     int r=md_view_backing_path(fs,m->source,m,root,sizeof(root));
-    if (!r) r=md_view_backing_path(fs,fd,m,path,sizeof(path));
+    if (!r) r=backing_dentry_path(fs,fd,m,dentry,native_birth,path,sizeof(path));
     if (!r && !beneath(path, root)) r = -EXDEV;
     if (!r) {
-        if (m->parent) r=location_path(fs,m->target,m->parent,boundary,target,sizeof(target));
+        if (m->parent) r=location_path(fs,m->target,m->parent,boundary,0,0,target,sizeof(target));
         else strcpy(target,"/");
     }
     if (!r) {
@@ -194,7 +204,11 @@ static int location_path(struct md_filesystem *fs, int fd, struct md_view_mount 
     return r;
 }
 int md_view_path(struct md_filesystem *fs, int fd, struct md_view_mount *m, char *out, size_t size) {
-    if (!fs->native_root && !fs->store->root_id) return location_path(fs,fd,m,NULL,out,size);
+    return md_view_dentry_path(fs,fd,m,0,0,out,size);
+}
+int md_view_dentry_path(struct md_filesystem *fs,int fd,struct md_view_mount *m,
+        uint64_t dentry,int native_birth,char *out,size_t size) {
+    if (!fs->native_root && !fs->store->root_id) return location_path(fs,fd,m,NULL,dentry,native_birth,out,size);
     if (fs->native_root) {
         struct md_view_mount *ancestor=m;
         while (ancestor && ancestor!=fs->native_root->mount) ancestor=ancestor->parent;
@@ -209,8 +223,8 @@ int md_view_path(struct md_filesystem *fs, int fd, struct md_view_mount *m, char
     fs->store->root_id=NULL;
     char root[PATH_MAX], path[PATH_MAX];
     struct md_view_mount *boundary=fs->native_root ? fs->native_root->mount : NULL;
-    int r = location_path(fs,root_fd,boundary,boundary,root,sizeof(root));
-    if (!r) r = location_path(fs,fd,m,boundary,path,sizeof(path));
+    int r = location_path(fs,root_fd,boundary,boundary,0,0,root,sizeof(root));
+    if (!r) r = location_path(fs,fd,m,boundary,dentry,native_birth,path,sizeof(path));
     fs->store->root_id=selected;
     if (!fs->native_root) close(root_fd);
     if (!r && !beneath(path,root)) r = -ENOENT;

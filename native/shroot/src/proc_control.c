@@ -130,7 +130,8 @@ long md_proc_control_link_metadata(const struct md_proc_path *ref,long nr,const 
          * the native carrier or treating it as an immutable proc entry. */
         else if (metadata.kind==MD_PROC_FILE_CONTROL && metadata.value.mount_id
                 && (nr==SYS_fchmod || nr==SYS_fchmodat || nr==SYS_fchmodat2
-                    || nr==SYS_fchown || nr==SYS_fchownat || nr==SYS_utimensat)) result=-EXDEV;
+                    || nr==SYS_fchown || nr==SYS_fchownat || nr==SYS_utimensat
+                    || nr==SYS_inotify_add_watch)) result=-EXDEV;
         else result=-EPERM;
     }
     long released=md_adapter_buffer_release();

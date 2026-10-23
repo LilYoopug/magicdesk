@@ -7,6 +7,7 @@
 #include <linux/seccomp.h>
 #include <stddef.h>
 #include <poll.h>
+#include <sched.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -245,7 +246,67 @@ static int alias_history(const char *directory) {
     CHECK(!close(fd));
     return 0;
 }
+static unsigned limit_read(int fd) {
+    char text[32]={0}; CHECK(pread(fd,text,sizeof(text)-1,0)>0);
+    char *end; unsigned long value=strtoul(text,&end,10);
+    CHECK(end!=text && *end=='\n' && !end[1]); return (unsigned)value;
+}
+static void limit_write(int fd,unsigned value) {
+    char text[32]; int n=snprintf(text,sizeof(text),"%u\n",value);
+    CHECK(pwrite(fd,text,n,0)==n && limit_read(fd)==value);
+}
+static int quotas(void) {
+    CHECK(!getuid());
+    const char *names[]={"max_user_instances","max_user_watches","max_queued_events"};
+    int limits[3]; unsigned saved[3];
+    for (unsigned i=0;i<3;++i) {
+        char path[128]; snprintf(path,sizeof(path),"/proc/sys/fs/inotify/%s",names[i]);
+        limits[i]=open(path,O_RDWR|O_CLOEXEC); CHECK(limits[i]>=0);
+        struct stat st; CHECK(!fstat(limits[i],&st) && (st.st_mode&0777)==0644);
+        saved[i]=limit_read(limits[i]);
+        const char *bad[]={"-1","2147483648","1x","1 2"," "};
+        for (unsigned n=0;n<sizeof(bad)/sizeof(*bad);++n)
+            CHECK(pwrite(limits[i],bad[n],strlen(bad[n]),0)==-1 && errno==EINVAL);
+        CHECK(pwrite(limits[i],"99",2,1)==2 && limit_read(limits[i])==saved[i]);
+    }
+    limit_write(limits[0],2);
+    int a=inotify_init1(IN_NONBLOCK),b=inotify_init1(IN_NONBLOCK); CHECK(a>=0 && b>=0);
+    CHECK(inotify_init1(0)<0 && errno==EMFILE);
+    pid_t child=fork(); CHECK(child>=0);
+    if (!child) {
+        CHECK(!unshare(CLONE_NEWNS));
+        CHECK(inotify_init1(0)<0 && errno==EMFILE);
+        CHECK(!setuid(1000));
+        CHECK(pwrite(limits[0],"100",3,0)<0 && errno==EPERM);
+        int independent=inotify_init1(0); CHECK(independent>=0);
+        CHECK(!close(independent)); _exit(0);
+    }
+    int status; CHECK(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    CHECK(!close(a) && !close(b));
+    limit_write(limits[0],8);
+    CHECK(!mkdir("/tmp/watch-quota",0777) && !chdir("/tmp/watch-quota"));
+    limit_write(limits[2],1);
+    a=inotify_init1(IN_NONBLOCK); CHECK(a>=0);
+    limit_write(limits[2],0);
+    b=inotify_init1(IN_NONBLOCK); CHECK(b>=0);
+    limit_write(limits[1],1);
+    int wd=inotify_add_watch(a,".",IN_CREATE); CHECK(wd>0);
+    CHECK(inotify_add_watch(b,".",IN_CREATE)<0 && errno==ENOSPC);
+    CHECK(inotify_add_watch(a,".",IN_CREATE|IN_MASK_ADD)==wd);
+    limit_write(limits[1],2);
+    CHECK(inotify_add_watch(b,".",IN_CREATE)>0);
+    limit_write(limits[1],0);
+    create("event"); one(a,IN_CREATE,"event"); one(b,IN_Q_OVERFLOW,NULL);
+    CHECK(inotify_add_watch(a,"event",IN_MODIFY)<0 && errno==ENOSPC);
+    CHECK(!inotify_rm_watch(a,wd));
+    CHECK(!close(a) && !close(b) && !unlink("event"));
+    CHECK(!chdir("/") && !rmdir("/tmp/watch-quota"));
+    for (unsigned i=0;i<3;++i) { limit_write(limits[i],saved[i]); CHECK(!close(limits[i])); }
+    puts("PASS guest inotify quotas: real sysctl, UID/mount sharing, FD authorization, retained queue limits");
+    return 0;
+}
 int main(int argc, char **argv) {
+    if (argc==2 && !strcmp(argv[1],"quotas")) return quotas();
     if (argc == 2 && !strcmp(argv[1], "receive-filtered")) return receive_filtered();
     if (argc == 3 && !strcmp(argv[1], "aliases")) return alias_history(argv[2]);
     if (argc == 3 && !strcmp(argv[1], "protected-all")) {

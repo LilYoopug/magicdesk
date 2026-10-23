@@ -13,10 +13,10 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { MAGIC=0x4d444f56U, VERSION=6, MAX=MD_FD_RECEIPT_MAX };
+enum { MAGIC=0x4d444f56U, VERSION=7, MAX=MD_FD_RECEIPT_MAX };
 struct span { uint32_t start, count; struct md_fd_identity identity; };
 struct origin { uint32_t view, owner, mount, descriptor; struct md_fd_identity identity; uint64_t generation;
-    struct md_fd_identity endpoint; char fifo_channel[32]; };
+    struct md_fd_identity endpoint; char fifo_channel[32]; uint64_t dentry; uint32_t native_leaf,reserved; };
 struct manifest {
     uint32_t magic, version, count, origins, views, owners, rights, reserved;
     struct md_fd_message_route route;
@@ -25,7 +25,7 @@ struct manifest {
     struct origin origin[MAX];
     struct span view[MAX], owner[MAX];
 };
-_Static_assert(sizeof(struct span)==24 && sizeof(struct origin)==88, "origin wire records");
+_Static_assert(sizeof(struct span)==24 && sizeof(struct origin)==104, "origin wire records");
 _Static_assert(offsetof(struct manifest,index)==136, "origin wire header");
 struct cached_view {
     struct cached_view *next;
@@ -148,6 +148,7 @@ int md_fs_origin_export_entries(const struct md_fd_message *message, struct md_f
         struct origin *o=&data.origin[n];
         o->identity=(struct md_fd_identity){a->device,a->inode}; o->mount=view_slot(a);
         o->endpoint=a->endpoint;
+        o->dentry=a->dentry; o->native_leaf=a->native_leaf;
         r=fifo_channel(a,o->fifo_channel);
         if (r) return r;
         o->generation=a->mount->generation;
@@ -286,7 +287,8 @@ static int validate(struct md_fs_origin_imports *s, const struct md_fd_message_r
     for (unsigned i=0;!r && i<m->views;++i) r=check_span(&m->view[i],MD_MOUNT_GRAPH_FDS,&next,p,1);
     for (unsigned i=0;!r && i<m->origins;++i) {
         struct origin *o=&m->origin[i]; struct md_fd_identity actual;
-        if (o->view>=m->views || o->owner>=m->owners || o->descriptor!=next || next>=p->count) return -EPROTO;
+        if (o->view>=m->views || o->owner>=m->owners || o->descriptor!=next || next>=p->count
+                || o->reserved || o->native_leaf>1 || o->dentry>INT64_MAX) return -EPROTO;
         r=path_identity(p->fd[next++],&actual);
         if (!r && !md_fd_identity_same(actual,o->identity)) r=-EPROTO;
         if (!r) {
@@ -356,6 +358,7 @@ static int import(struct md_fs_origin_imports *s, const struct md_fd_message_rou
             o->identity.device,o->identity.inode);
         if (!a) { r=-errno; break; }
         a->endpoint=o->endpoint;
+        a->dentry=o->dentry; a->native_leaf=o->native_leaf;
         take(p,o->descriptor);
         take(p,o->descriptor+1);
         anchors[i]=a;

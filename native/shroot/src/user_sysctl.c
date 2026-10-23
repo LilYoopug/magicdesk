@@ -2,7 +2,7 @@
 #include "guest_identity.h"
 #include "fs_mounts.h"
 #include "mount_policy.h"
-#include <ctype.h>
+#include "sysctl_value.h"
 #include <errno.h>
 #include <limits.h>
 #include <linux/magic.h>
@@ -47,7 +47,7 @@ static long read_value(void *context,const struct md_control_actor *actor,void *
     struct user_sysctl *f=context;
     if (offset<0) return -EINVAL;
     char text[32];
-    int count=snprintf(text,sizeof(text),"%u\n",md_user_namespace_limit(f->space));
+    int count=snprintf(text,sizeof(text),"%u\n",md_user_namespace_limit(f->space,MD_USER_NAMESPACES));
     if ((uint64_t)offset>=(unsigned)count) return 0;
     size_t n=(size_t)count-(size_t)offset;
     if (n>size) n=size;
@@ -59,19 +59,9 @@ static long write_value(void *context,const struct md_control_actor *actor,const
     if (error || !size) return error;
     if (offset<0) return -EINVAL;
     if (offset) return (long)size;
-    if (size>128) return -E2BIG;
-    const unsigned char *p=data,*end=p+size;
-    while (p<end && isspace(*p)) ++p;
-    if (p==end || !isdigit(*p)) return -EINVAL;
     uint32_t value=0;
-    do {
-        unsigned digit=*p++-'0';
-        if (value>((unsigned)INT_MAX-digit)/10) return -EINVAL;
-        value=value*10+digit;
-    } while (p<end && isdigit(*p));
-    while (p<end && isspace(*p)) ++p;
-    if (p!=end) return -EINVAL;
-    error=md_user_namespace_set_limit(f->space,value);
+    error=md_sysctl_parse_uint(data,size,&value);
+    if (!error) error=md_user_namespace_set_limit(f->space,MD_USER_NAMESPACES,value);
     return error ? error : (long)size;
 }
 static const struct md_control_file_ops ops={.retain=retain,.release=release,.stat=metadata,

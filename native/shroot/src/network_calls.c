@@ -115,25 +115,35 @@ static long data_send_batch(const unsigned long *a) {
     return count;
 }
 long md_network_data_call(long nr,const unsigned long *a) {
+    int device=(nr==SYS_setsockopt || nr==SYS_getsockopt) && a[1]==SOL_SOCKET && a[2]==SO_BINDTODEVICE;
     if (nr==SYS_read || nr==SYS_write || nr==SYS_readv || nr==SYS_writev
             || md_socket_payload_native(nr,a[4])
-            || nr==SYS_getsockopt || (nr==SYS_ioctl && (a[1]==FIONBIO || a[1]==FIONREAD || a[1]==TIOCOUTQ)))
+            || (nr==SYS_getsockopt && !device) || (nr==SYS_ioctl && (a[1]==FIONBIO || a[1]==FIONREAD || a[1]==TIOCOUTQ)))
         return md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
-    if (nr==SYS_setsockopt) {
-        if (a[1]==SOL_SOCKET && a[2]==SO_BINDTODEVICE) return -EOPNOTSUPP;
+    if (nr==SYS_setsockopt && !device) {
         return md_raw(nr,a[0],a[1],a[2],a[3],a[4],a[5]);
     }
     if (nr==SYS_sendto || nr==SYS_recvfrom || nr==SYS_sendmsg || nr==SYS_recvmsg)
         return data_message(nr,a);
     if (nr==SYS_sendmmsg) return data_send_batch(a);
     if (nr!=SYS_bind && nr!=SYS_connect && nr!=SYS_accept && nr!=SYS_accept4 && nr!=SYS_listen
-            && nr!=SYS_getsockname && nr!=SYS_getpeername) return -EOPNOTSUPP;
+            && nr!=SYS_getsockname && nr!=SYS_getpeername && !device) return -EOPNOTSUPP;
     long address=md_adapter_buffer_take(); if (address<0) return address;
     struct md_task_receive_frame *frame=(void *)address;
     frame->input=(struct md_task_receive){.socket=(int)a[0]};
     frame->io.address_size=frame->io.control_size=frame->io.flags=frame->io.batch_count=0;
     frame->io.size=0;
     long result=0;
+    if (device && nr==SYS_setsockopt) {
+        unsigned length=(unsigned)a[4];
+        if ((int)length<0) result=-EINVAL;
+        else {
+            if (length>=IFNAMSIZ) length=IFNAMSIZ-1;
+            frame->io.address_size=length;
+            result=md_read_memory(&frame->io.address,(void *)a[3],length);
+            ((char *)&frame->io.address)[length]=0;
+        }
+    } else if (device) result=md_read_memory(&frame->io.address_size,(void *)a[4],sizeof(socklen_t));
     if (nr==SYS_bind || nr==SYS_connect) {
         if (a[2]>sizeof(frame->io.address)) result=-EINVAL;
         else {
@@ -144,6 +154,8 @@ long md_network_data_call(long nr,const unsigned long *a) {
     if (!result) result=md_socket_capture_inputs(md_guest_buffer_control(MD_BUFFER_NETWORK_DATA,0,0),
         &frame->capture,&frame->input.socket,1);
     if (result==MD_IPC_TASK_IO) result=md_guest_buffer_control(MD_FS_BUFFER_IPC_RECEIVE,0,0);
+    if (!result && device && nr==SYS_getsockopt)
+        result=output((void *)a[3],(void *)a[4],&frame->io.address,frame->io.address_size);
     if (!result && (nr==SYS_getsockname || nr==SYS_getpeername || ((nr==SYS_accept || nr==SYS_accept4) && a[1])))
         result=output((void *)a[1],(void *)a[2],&frame->io.address,frame->io.address_size);
     long dropped=md_guest_buffer_control(MD_FS_BUFFER_RECEIVED_DROP,0,0);

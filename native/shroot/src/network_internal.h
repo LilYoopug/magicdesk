@@ -35,6 +35,7 @@ struct md_network_namespace {
     uint32_t default_gateway, default_metric;
     uint32_t unprivileged_port, ping_groups[2], local_ports[2];
     uint32_t next_port, ipv4_forward;
+    uint32_t tcp_keepalive[3];
     struct md_network_ipv4_policy all, defaults;
     struct md_network_listener *listeners;
     struct md_network_ethernet *ethernet;

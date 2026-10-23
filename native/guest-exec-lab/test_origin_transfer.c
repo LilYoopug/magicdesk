@@ -111,6 +111,7 @@ static struct source source(const char *base, unsigned count) {
     assert(!md_inode_mkdir(image,-1,"/outer",0700) && !md_inode_mkdir(image,-1,"/alias",0700));
     int fd=md_inode_open(image,-1,"/value",O_WRONLY|O_CREAT,0600); assert(fd>=0);
     assert(write(fd,"lower",5)==5); close(fd);
+    assert(!md_inode_link(image,-1,"/value",-1,"/value-alias",0));
     assert(!md_inode_store_seal(image) && !md_inode_snapshot(image,s.fs.store)); md_inode_store_close(image);
     for (unsigned i=0;i<3;++i) {
         char leaf[16]; snprintf(leaf,sizeof(leaf),"host%u",i); path(host[i],base,leaf); assert(!mkdir(host[i],0700));
@@ -158,12 +159,20 @@ static void contents(struct md_filesystem *fs, struct md_fs_anchor *a, const cha
     assert(!r.error && r.fd>=0); char bytes[16]={0};
     assert(read(r.fd,bytes,sizeof(bytes))==(ssize_t)strlen(expected) && !strcmp(bytes,expected)); close(r.fd);
 }
+static void display_path(struct md_filesystem *fs, struct md_fs_anchor *a, const char *expected) {
+    struct md_fs_request q={.operation=MD_FS_PATH,.mode=MD_FS_PATH_DISPLAY,
+        .directory={md_fs_anchor_fd(a),-1},.origin={a,NULL}};
+    struct md_fs_result r; char text[PATH_MAX];
+    md_fs_execute(fs,&q,&r,&(struct md_fs_output){.data=text,.capacity=sizeof(text)});
+    assert(!r.error && !strcmp(text,expected));
+}
 static void engine_entries(const char *base, struct md_fs_anchor *const *a, int changed) {
     for (unsigned i=0;i<253;++i) assert(a[i]==a[i%8]);
     assert(a[0]==a[6] && !a[7] && a[1]->view==a[2]->view && a[1]->view!=a[4]->view);
     assert(a[2]->device==a[3]->device && a[2]->inode==a[3]->inode && a[2]->mount!=a[3]->mount);
     char store[PATH_MAX]; path(store,base,"store"); struct md_filesystem fs={0};
     assert(!md_inode_store_open(store,0,&fs.store) && !md_fs_mounts_open(&fs,NULL,0));
+    display_path(&fs,a[5],"/value");
     contents(&fs,a[0],"value","lower"); contents(&fs,a[1],"value","outer");
     contents(&fs,a[3],"value","inner"); contents(&fs,a[3],"../value","outer");
     for (unsigned i=1;i<=4;++i) {
@@ -199,6 +208,7 @@ static void copy_unlink(const char *base, struct md_fs_anchor *origin) {
     assert(!current.error && current.fd>=0); char bytes[5];
     assert(read(current.fd,bytes,5)==5 && !memcmp(bytes,"upper",5)); close(current.fd);
     assert(read(old.fd,bytes,5)==5 && !memcmp(bytes,"lower",5)); close(old.fd);
+    display_path(&fs,origin,"/value (deleted)");
     md_fs_mounts_close(&fs); md_inode_store_close(fs.store);
 }
 static struct md_fs_origin_vector *receive(struct source *s, struct md_fs_origin_imports *i) {
@@ -241,13 +251,17 @@ static void mutate(struct md_fs_origin_parcel *p, unsigned word, uint32_t value,
 static void failures(const char *base) {
     unsigned before=descriptors(); struct source s=source(base,253); struct md_fs_origin_imports *i=imports(base);
     struct md_fs_origin_vector *good=receive(&s,i); engine(base,good,0); unsigned live=descriptors();
-    for (unsigned n=0;n<14;++n) {
+    for (unsigned n=0;n<17;++n) {
         struct md_fs_origin_parcel p={0}; assert(!md_fs_origin_export(s.message,&p));
         struct md_fd_message_route expected=s.route;
         int seals=F_SEAL_WRITE|F_SEAL_SEAL|F_SEAL_SHRINK|F_SEAL_GROW;
         switch (n) {
         case 0: mutate(&p,0,0,seals); break;
         case 1: mutate(&p,1,UINT_MAX,seals); break;
+        /* Header (34 words), vector (253), then first origin's new fields. */
+        case 14: mutate(&p,34+253+23,UINT_MAX,seals); break;
+        case 15: mutate(&p,34+253+24,2,seals); break;
+        case 16: mutate(&p,34+253+25,1,seals); break;
         case 2: mutate(&p,2,254,seals); break;
         case 3: mutate(&p,3,254,seals); break;
         case 4: mutate(&p,7,1,seals); break;

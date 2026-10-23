@@ -174,6 +174,7 @@ static void *run(void *context) {
         w->device_events=md_device_events_new();
         if (!w->device_events) error=-errno;
     }
+    fs.device_events=w->device_events;
     if (!error) error=md_input_session_start(&fs,w->input,w->device_events,sysfs,&input);
     w->input=NULL;
     if (!error && w->inherited && w->inherited->count) {

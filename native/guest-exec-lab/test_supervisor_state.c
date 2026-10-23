@@ -58,6 +58,39 @@ static void barrier_admission(void) {
     entry_fence_stage=0; mapping_execution=NULL;
     puts("PASS supervisor admission: entry, repair, injection, release and exact nested retirement");
 }
+static long readiness_return_trace(int request,pid_t pid,void *address,void *data) {
+    assert(request==PTRACE_SETREGSET && pid==123 && (uintptr_t)address==NT_PRSTATUS);
+    struct user_pt_regs *regs=((struct iovec *)data)->iov_base;
+    assert((long)regs->regs[0]==MD_EPOLL_NATIVE);
+    errno=ESRCH; return -1;
+}
+static void readiness_admission_order(void) {
+    struct md_fd_origins *files=md_fd_origins_new();
+    struct md_fd_selector *group=md_fd_selector_new();
+    struct md_control_epoll *queue=md_control_epoll_new();
+    assert(files && group && queue);
+    struct readiness_owner prior={.loan_number=-1},activation={0};
+    struct thread t={.pid=123,.phase=DISPATCHING,.readiness=&prior};
+    t.resources.files=files; t.original.regs[0]=5; t.original.regs[8]=SYS_epoll_pwait;
+    assert(md_fd_order_begin(files,&prior.files,NULL)==1);
+    activation.admission=md_fd_admission_new(md_control_epoll_object(queue),1U<<MD_FD_SELECTOR_EPOLL);
+    assert(activation.admission && !md_fd_admission_add(activation.admission,files,group));
+    assert(!md_fd_admission_begin(activation.admission,NULL));
+    assert(!md_fd_admission_prepare(activation.admission));
+    readiness_activation=&activation;
+    thread_index[t.pid%THREAD_BUCKETS]=&t;
+    checkpoints.trace=readiness_return_trace;
+    readiness_start(&t);
+    checkpoints.trace=checkpoint_native_trace;
+    thread_index[t.pid%THREAD_BUCKETS]=NULL;
+    assert(prior.done && !prior.files.table && t.resume_lost);
+    assert(md_fd_admission_prepare(activation.admission)==1);
+    assert(!t.retries[0].mask && !t.retries[1].mask);
+    readiness_activation=NULL;
+    md_fd_admission_release(activation.admission);
+    md_control_epoll_release(queue); md_fd_selector_release(group); md_fd_origins_release(files);
+    puts("PASS supervisor readiness: earlier table turn drains during cold admission");
+}
 static long no_trace(int request,pid_t pid,void *address,void *data) {
     (void)request; (void)pid; (void)address; (void)data;
     assert(!"deferring a repair must not stop unrelated tasks"); return -1;
@@ -457,7 +490,7 @@ static void provider_wait_boundaries(void) {
 }
 int main(void) {
     alarm(30);
-    barrier_admission(); entry_fence_ownership(); control_deadlines(); terminal_buffer_completion(); buffered_io_pressure(); captured_writes(); repair_events(); event_accounting();
+    barrier_admission(); readiness_admission_order(); entry_fence_ownership(); control_deadlines(); terminal_buffer_completion(); buffered_io_pressure(); captured_writes(); repair_events(); event_accounting();
     for (unsigned mode=0;mode<4;++mode) {
         completed_open(mode,SIGUSR1); completed_open(mode,SIGRTMAX);
     }

@@ -44,6 +44,20 @@ def pressure(root, expected):
 
 def pinned_links(root):
     with ExitStack() as cleanup:
+        for name in ('self', 'thread-self', 'mounts', 'net', 'device-tree'):
+            try:
+                info = os.stat(name, dir_fd=root, follow_symlinks=False)
+            except FileNotFoundError:
+                assert name == 'device-tree'
+                continue
+            assert stat.S_ISLNK(info.st_mode), name
+            link = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root)
+            try:
+                pinned = os.fstat(link)
+                assert (pinned.st_mode, pinned.st_ino) == (info.st_mode, info.st_ino), (name, pinned, info)
+                assert os.readlink('', dir_fd=link) == os.readlink(name, dir_fd=root), name
+            finally:
+                os.close(link)
         target = os.open('/etc/os-release', os.O_RDONLY)
         cleanup.callback(os.close, target)
         directory = os.open('self/fd', os.O_PATH | os.O_DIRECTORY, dir_fd=root)

@@ -16,6 +16,19 @@ enum md_host_fs_view md_host_fs_kind(const struct md_provider_tree *tree) {
         : md_provider_tree_matches(tree,&dev_ops) ? MD_HOST_FS_DEV
         : md_device_tree_portable(tree) ? MD_HOST_FS_DEVICES : MD_HOST_FS_NONE;
 }
+int md_host_fs_stat(struct md_provider_tree *tree,int fd,struct stat *st) {
+    enum md_host_fs_view kind=md_host_fs_kind(tree);
+    if (kind==MD_HOST_FS_NONE) return 0;
+    if (fstat(fd,st)) return -errno;
+    if (!S_ISDIR(st->st_mode)) return 0;
+    int private=md_provider_tree_private(tree,fd);
+    if (private<=0) return private;
+    /* Upper directories are private transport, not Android-owned guest nodes.
+     * Read-through lower objects and typed devices retain their own metadata. */
+    st->st_uid=st->st_gid=0;
+    st->st_mode=S_IFDIR|(kind==MD_HOST_FS_SYS ? 0555 : 0755);
+    return 1;
+}
 static struct md_provider_tree *create(int parent,int upper,enum md_host_fs_view kind) {
     if (kind!=MD_HOST_FS_SYS && kind!=MD_HOST_FS_DEV) { errno=EINVAL; return NULL; }
     int lower=open(kind==MD_HOST_FS_SYS ? "/sys" : "/dev",O_PATH|O_DIRECTORY|O_CLOEXEC);

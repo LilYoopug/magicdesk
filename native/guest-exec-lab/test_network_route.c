@@ -241,6 +241,38 @@ void test_network_route(void) {
         if (item->nlmsg_type==RTM_NEWLINK) ++links; else ++done;
     }
     assert(!length && links==4 && done==1);
+    /* ip -4 addr first enumerates links with an AF_INET GETLINK dump. */
+    for (unsigned strict=0;strict<2;++strict) {
+        h=request(&p,RTM_GETLINK,NLM_F_DUMP);
+        ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_family=AF_INET;
+        if (!strict) h->nlmsg_len=NLMSG_LENGTH(sizeof(struct rtgenmsg));
+        length=md_network_route(n,&user,h,h->nlmsg_len,91,strict ? MD_NETWORK_ROUTE_STRICT : 0,
+            NULL,reply.bytes,sizeof(reply),NULL);
+        assert(length>0); links=done=0;
+        for (struct nlmsghdr *item=&reply.align;NLMSG_OK(item,length);item=NLMSG_NEXT(item,length)) {
+            assert(item->nlmsg_type==RTM_NEWLINK || item->nlmsg_type==NLMSG_DONE);
+            if (item->nlmsg_type==RTM_NEWLINK) ++links; else ++done;
+        }
+        assert(!length && links==4 && done==1);
+    }
+    h=request(&p,RTM_GETLINK,0);
+    ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_family=AF_INET;
+    ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_index=1;
+    length=md_network_route(n,&user,h,h->nlmsg_len,91,MD_NETWORK_ROUTE_STRICT,NULL,reply.bytes,sizeof(reply),NULL);
+    assert(length>0 && reply.align.nlmsg_type==RTM_NEWLINK);
+    assert(((struct ifinfomsg *)NLMSG_DATA(&reply.align))->ifi_index==1);
+    for (unsigned strict=0;strict<2;++strict) {
+        h=request(&p,RTM_GETLINK,NLM_F_DUMP);
+        ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_family=AF_INET6;
+        if (!strict) h->nlmsg_len=NLMSG_LENGTH(sizeof(struct rtgenmsg));
+        length=md_network_route(n,&user,h,h->nlmsg_len,91,strict ? MD_NETWORK_ROUTE_STRICT : 0,
+            NULL,reply.bytes,sizeof(reply),NULL);
+        assert(length==(long)NLMSG_LENGTH(sizeof(int)) && reply.align.nlmsg_type==NLMSG_DONE);
+        assert(*(int *)NLMSG_DATA(&reply.align)==0);
+    }
+    h=request(&p,RTM_NEWLINK,NLM_F_CREATE|NLM_F_EXCL);
+    ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_family=AF_INET6;
+    assert(ack(n,&root,h,NULL)==-EINVAL);
     const unsigned queries[]={RTM_GETLINK,RTM_GETADDR,RTM_GETROUTE};
     for (unsigned q=0;q<3;++q) for (unsigned padding=1;padding<=4;padding*=4) {
         h=request(&p,queries[q],NLM_F_DUMP);
@@ -385,6 +417,23 @@ void test_network_route(void) {
             }
     }
     assert(metrics==1);
+    dump_header=request(&dump_packet,RTM_GETROUTE,NLM_F_DUMP);
+    dump_header->nlmsg_len=NLMSG_LENGTH(sizeof(struct rtmsg));
+    *(struct rtmsg *)NLMSG_DATA(dump_header)=(struct rtmsg){.rtm_family=AF_INET,
+        .rtm_table=RT_TABLE_MAIN,.rtm_protocol=RTPROT_BOOT,.rtm_type=RTN_UNICAST};
+    length=md_network_route(child,&root,dump_header,dump_header->nlmsg_len,91,0,
+        NULL,reply.bytes,sizeof(reply),NULL);
+    assert(length>0);
+    unsigned legacy_routes=0;
+    for (struct nlmsghdr *item=&reply.align;NLMSG_OK(item,length);item=NLMSG_NEXT(item,length)) {
+        assert(item->nlmsg_type==RTM_NEWROUTE || item->nlmsg_type==NLMSG_DONE);
+        legacy_routes+=item->nlmsg_type==RTM_NEWROUTE;
+    }
+    assert(!length && legacy_routes>=2);
+    length=md_network_route(child,&root,dump_header,dump_header->nlmsg_len,91,MD_NETWORK_ROUTE_STRICT,
+        NULL,reply.bytes,sizeof(reply),NULL);
+    assert(length>0 && reply.align.nlmsg_type==NLMSG_ERROR);
+    assert(((struct nlmsgerr *)NLMSG_DATA(&reply.align))->error==-EOPNOTSUPP);
     for (unsigned selection=0;selection<6;++selection) {
         dump_header=request(&dump_packet,RTM_GETROUTE,NLM_F_DUMP);
         dump_header->nlmsg_len=NLMSG_LENGTH(sizeof(struct rtmsg));

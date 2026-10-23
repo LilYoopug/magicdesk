@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Clone ABI contracts on the real shell and in a recipe-installed userspace."""
 import argparse
-import json
 from pathlib import Path
 
 from test_oci_services import Suite
@@ -14,7 +13,7 @@ def main():
     args = parser.parse_args()
     suite = Suite(args.build, args.build)
     try:
-        info = json.loads(suite.command(['shroot', 'inspect', args.name], quiet=True))
+        info = suite.installed_environment(args.name)
         suite.report['environment'] = info
         binary = 'libmagicdesk_guest_clone3_guest.so'
         suite.transport.upload(suite.client, args.build / binary, suite.base + '/' + binary)

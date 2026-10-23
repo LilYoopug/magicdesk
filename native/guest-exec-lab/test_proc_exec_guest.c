@@ -2,6 +2,8 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/stat.h>
+#include <linux/openat2.h>
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +17,40 @@
 #include <unistd.h>
 
 extern char **environ;
+static void image_metadata(const char *proc) {
+    pid_t parent=getpid(), child=fork(); assert(child>=0);
+    if (!child) {
+        const char *names[]={"cmdline","auxv"};
+        for (unsigned i=0;i<sizeof(names)/sizeof(*names);++i) {
+            char path[256],bytes[64];
+            snprintf(path,sizeof(path),"%s/%d/%s",proc,parent,names[i]);
+            struct stat st,link,opened;
+            assert(!stat(path,&st) && S_ISREG(st.st_mode));
+            assert(!lstat(path,&link) && link.st_ino==st.st_ino);
+            struct statx sx;
+            assert(!syscall(SYS_statx,AT_FDCWD,path,0,STATX_BASIC_STATS,&sx));
+            assert(sx.stx_ino==st.st_ino && sx.stx_mode==st.st_mode);
+            assert(!faccessat(AT_FDCWD,path,F_OK,0));
+            assert(!faccessat(AT_FDCWD,path,R_OK,0));
+            int fd=open(path,O_PATH|O_CLOEXEC); assert(fd>=0);
+            assert(!fstat(fd,&opened) && opened.st_ino==st.st_ino);
+            errno=0; assert(read(fd,bytes,sizeof(bytes))==-1 && errno==EBADF); close(fd);
+            struct open_how how={.flags=O_PATH|O_CLOEXEC,.resolve=RESOLVE_NO_SYMLINKS};
+            fd=syscall(SYS_openat2,AT_FDCWD,path,&how,sizeof(how)); assert(fd>=0);
+            assert(!fstat(fd,&opened) && opened.st_ino==st.st_ino); close(fd);
+            how.flags=O_RDONLY|O_CLOEXEC;
+            fd=syscall(SYS_openat2,AT_FDCWD,path,&how,sizeof(how)); assert(fd>=0);
+            assert(read(fd,bytes,sizeof(bytes))>0); close(fd);
+            errno=0; assert(readlink(path,bytes,sizeof(bytes))==-1 && errno==EINVAL);
+            strncat(path,"/child",sizeof(path)-strlen(path)-1);
+            errno=0; assert(stat(path,&st)==-1 && errno==ENOTDIR);
+        }
+        _exit(0);
+    }
+    /* EVENT_WAIT: child checks a live foreign process in this proc mount. */
+    int status=0; assert(waitpid(child,&status,0)==child && !status);
+    puts("PASS foreign process image metadata and native access checks");
+}
 static void execute(const char *path,int base,int protected) {
     pid_t child=fork(); assert(child>=0);
     if (!child) {
@@ -32,6 +68,7 @@ static void execute(const char *path,int base,int protected) {
     assert(WIFEXITED(status) && WEXITSTATUS(status)==37);
 }
 static void exercise(const char *proc,const char *directory) {
+    image_metadata(proc);
     char path[256],alias[256];
     const char *nonlinks[]={"", "/sys", "/uptime"};
     for (unsigned i=0;i<sizeof(nonlinks)/sizeof(nonlinks[0]);++i) {

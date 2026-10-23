@@ -111,11 +111,6 @@ static int socket_bound(int type,struct sockaddr_in *address) {
     if (getsockname(fd,(void *)address,&size)) { int error=-errno; close(fd); return error; }
     return fd;
 }
-static int endpoint_target(struct md_network_fabric *f,const struct md_network_flow_path *path,int type,struct sockaddr_in *target) {
-    struct sockaddr_in logical={.sin_family=AF_INET,.sin_addr.s_addr=path->translated.destination,
-        .sin_port=path->translated.destination_port};
-    return md_network_endpoint_resolve(f,path->destination,type,&logical,target,NULL);
-}
 static int check(struct md_network_forward *f,struct flow *c,unsigned direction) {
     if (c->checked[direction]!=f->fabric->policy_generation) {
         unsigned mark=c->path.translated.ctmark;
@@ -156,9 +151,8 @@ static struct flow *new_flow(struct md_network_forward *f,struct listener *l,int
     c->listener=l->external ? l->id : 0; c->space=l->space; c->endpoint=l->external ? NULL : l->endpoint;
     c->client=*client; c->path=*path; c->gateway=l->address;
     if (c->type==SOCK_DGRAM && path->destination) {
-        struct sockaddr_in logical={.sin_family=AF_INET,.sin_addr.s_addr=path->translated.destination,
-            .sin_port=path->translated.destination_port}, ignored;
-        int error=md_network_endpoint_resolve(f->fabric,path->destination,c->type,&logical,&ignored,&c->receiver);
+        struct sockaddr_in ignored;
+        int error=md_network_endpoint_resolve(f->fabric,path,c->type,&ignored,&c->receiver);
         if (error) { free(c); errno=-error; return NULL; }
     }
     c->id=++f->next_id;
@@ -204,7 +198,7 @@ static int incoming_path(struct md_network_forward *f,struct listener *l,const s
         && (ntohl(local->sin_addr.s_addr)>>24)==127;
     int error=md_network_flow_route(n,&p,!host_local,path);
     if (!error && !p.dnat && !l->endpoint) error=-ECONNREFUSED;
-    if (!error) error=endpoint_target(f->fabric,path,l->type,target);
+    if (!error) error=md_network_endpoint_resolve(f->fabric,path,l->type,target,NULL);
     return error;
 }
 static void tcp_accept(struct md_network_forward *f,struct listener *l) {
@@ -604,6 +598,15 @@ int md_network_forward_destination(struct md_network_namespace *n,const void *en
             *native=c->remote; native->sin_addr.s_addr=htonl(INADDR_LOOPBACK); return 1;
         }
     }
+    return 0;
+}
+int md_network_forward_endpoint_active(struct md_network_namespace *n,const void *endpoint) {
+    struct md_network_forward *f=n->fabric->forward;
+    if (!f) return 0;
+    for (struct listener *l=f->ports;l;l=l->next)
+        if (!l->external && l->endpoint==endpoint) return 1;
+    for (struct flow *c=f->connections;c;c=c->next)
+        if (c->endpoint==endpoint || c->receiver==endpoint) return 1;
     return 0;
 }
 void md_network_forward_endpoint_closed(struct md_network_namespace *n,const void *endpoint) {

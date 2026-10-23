@@ -88,9 +88,14 @@ static inline int md_view_base(const struct md_mount_namespace *view, const stru
 static inline int md_view_inode(const struct md_view_mount *m) {
     return !m || m->backing==MD_MOUNT_INODE;
 }
-static inline int md_view_readonly(const struct md_view_mount *m) {
-    return m && !!(md_mount_policy_flags(&m->policy)&MD_MOUNT_READONLY);
+static inline unsigned md_view_policy_flags(const struct md_view_mount *m) {
+    return m ? md_mount_policy_flags(&m->policy)
+        |(m->provider ? md_provider_tree_super_flags(m->provider) : 0) : 0;
 }
+static inline int md_view_readonly(const struct md_view_mount *m) {
+    return !!(md_view_policy_flags(m)&MD_MOUNT_READONLY);
+}
+int md_view_require_root(struct md_filesystem *,const struct md_view_location *);
 static inline int md_view_nosymfollow(const struct md_view_mount *m) {
     return m && !!(md_mount_policy_flags(&m->policy)&MD_MOUNT_NOSYMFOLLOW);
 }
@@ -157,6 +162,7 @@ struct md_fs_anchor {
     dev_t device;
     ino_t inode;
     unsigned kind, native_leaf;
+    uint64_t dentry;
     /* Optional native data endpoint of a logical device inode. The retained
      * path descriptor above remains authoritative for metadata and names. */
     struct md_fd_identity endpoint;
@@ -173,6 +179,7 @@ int md_view_record(struct md_filesystem *, int fd, struct md_view_mount *, struc
 int md_view_backing_contains(struct md_filesystem *,const struct md_view_mount *,int root,int object);
 int md_view_identity(struct md_filesystem *, int fd, struct md_view_object **);
 int md_view_path(struct md_filesystem *, int fd, struct md_view_mount *, char *, size_t);
+int md_view_dentry_path(struct md_filesystem *,int,struct md_view_mount *,uint64_t,int,char *,size_t);
 int md_view_location_path(struct md_filesystem *,const struct md_view_location *,char *,size_t);
 int md_view_backing_path(struct md_filesystem *, int fd, const struct md_view_mount *, char *, size_t);
 /* Worker-only publication of an already prepared filesystem. The caller owns

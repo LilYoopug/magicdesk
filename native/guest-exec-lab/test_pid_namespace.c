@@ -1,4 +1,5 @@
 #include "pid_namespace.h"
+#include "guest_identity.h"
 #include <assert.h>
 #include <errno.h>
 #include <stdio.h>
@@ -14,6 +15,21 @@ int main(void) {
     assert(!md_pid_identity_prepare(outer,&a) && md_pid_identity_number(a,outer)==1);
     assert(!md_pid_identity_publish(a,20001,20001) && md_pid_identity_publish(a,20002,20002)==-EINVAL);
     assert(md_pid_identity_number(a,NULL)==20001 && md_pid_identity_live(a));
+    struct md_identity privileged=md_identity_new(0,0),unprivileged=md_identity_new(1000,1000);
+    pid_t selected=42;
+    assert(md_pid_identity_prepare_selected(outer,&unprivileged,&selected,1,&b)==-EPERM && !b);
+    assert(!md_pid_identity_prepare_selected(outer,&privileged,&selected,1,&b));
+    assert(md_pid_identity_number(b,outer)==selected);
+    assert(md_pid_identity_prepare_selected(outer,&privileged,&selected,1,&c)==-EEXIST && !c);
+    assert(!md_pid_identity_publish(b,20100,20100) && !md_pid_identity_exit(b));
+    assert(md_pid_identity_prepare_selected(outer,&privileged,&selected,1,&c)==-EEXIST && !c);
+    md_pid_identity_reap(b);
+    assert(!md_pid_identity_prepare_selected(outer,&privileged,&selected,1,&c));
+    md_pid_identity_release(b);
+    assert(!md_pid_identity_publish(c,20101,20101));
+    struct md_pid_identity *reused=md_pid_namespace_lookup(outer,selected); assert(reused==c);
+    md_pid_identity_release(reused); md_pid_identity_release(c);
+    md_identity_release(&privileged); md_identity_release(&unprivileged);
     struct md_pid_namespace *inner=md_pid_namespace_new(outer,NULL); assert(inner);
     assert(!md_pid_identity_prepare(inner,&b) && !md_pid_identity_publish(b,20002,20002));
     assert(md_pid_identity_number(b,inner)==1 && md_pid_identity_number(b,outer)==2);

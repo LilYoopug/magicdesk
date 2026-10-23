@@ -98,8 +98,9 @@ int md_catalogue_open(struct md_image_catalogue *c, struct md_inode_store *s, in
         struct md_inode_birth **birth) {
     *completion = (struct md_open_completion){0};
     if (c) {
-        int fd = md_inode_open_resolved(s, dir, path,
-            O_PATH | O_CLOEXEC | (flags & (O_NOFOLLOW | O_DIRECTORY)), 0, resolve);
+        struct md_open_completion opened;
+        int fd = md_inode_prepare_open(s, dir, path,
+            O_PATH | O_CLOEXEC | (flags & (O_NOFOLLOW | O_DIRECTORY)), 0, resolve,&opened);
         if (fd >= 0) {
             char object[33];
             int error = md_inode_object_id(s, fd, object);
@@ -108,6 +109,7 @@ int md_catalogue_open(struct md_image_catalogue *c, struct md_inode_store *s, in
             if (!strcmp(object, c->object)) {
                 if (native_plan) return -EXDEV;
                 error=md_inode_landlock_fd(s,c->entry.source,flags);
+                if (!error) *completion=opened;
                 return error ? error : open_snapshot(c,flags);
             }
         } else if (fd != -ENOENT) return fd;

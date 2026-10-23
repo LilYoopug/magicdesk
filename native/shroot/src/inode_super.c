@@ -99,7 +99,13 @@ int mdi_super_preserve_writer(struct md_inode_store *s,struct mdi_node *node) {
 }
 int md_inode_store_reconfigure(struct md_inode_store *s,int readonly) {
     if (!s->lifetime->temporary || s->lifetime->filesystem_kind!=MD_FILESYSTEM_TMPFS
-            || strcmp(s->lifetime->scope,MDI_ROOT)) return -EOPNOTSUPP;
+            || strcmp(s->lifetime->scope,MDI_ROOT)) {
+        /* Picking an existing filesystem is also used to confirm its current
+         * mode. A sealed source cannot become writable; a writable persistent
+         * store still cannot acquire tmpfs's superblock-wide writer tracking. */
+        if (s->readonly) return readonly ? 0 : -EROFS;
+        return readonly ? -EOPNOTSUPP : 0;
+    }
     if (s->readonly) return -EROFS;
     int r=mdi_begin(s,0);
     if (r) return r;

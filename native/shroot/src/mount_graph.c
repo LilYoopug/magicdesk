@@ -15,10 +15,10 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { MAGIC=0x4d444d47U, VERSION=15, HEADER=144 };
+enum { MAGIC=0x4d444d47U, VERSION=16, HEADER=144 };
 enum { INODE=1, DETACHED=2, RETIRED=4, LOCKED=8, PROC=16, PARENTLESS=32, ROOT_PROVIDERS=64, HOST_SYSFS=128, HOST_DEVFS=256, HOST_DEVICES=512 };
 #define HOST_PROVIDERS (HOST_SYSFS|HOST_DEVFS|HOST_DEVICES)
-struct entry { uint32_t parent, flags; struct md_fd_identity source, target, policy;
+struct entry { uint32_t parent, flags; struct md_fd_identity source, target, policy, super_policy;
     uint32_t storage, descriptor; uint64_t generation, proc_namespace;
     uint32_t shared, master, unbindable, reserved; };
 struct storage { struct md_fd_identity root; uint32_t start, count; };
@@ -39,7 +39,7 @@ struct md_mount_graph {
     uint64_t revision, observed;
     struct md_fd_identity identity;
 };
-_Static_assert(sizeof(struct entry)==96 && sizeof(struct storage)==24,"mount graph entry layout");
+_Static_assert(sizeof(struct entry)==112 && sizeof(struct storage)==24,"mount graph entry layout");
 _Static_assert(offsetof(struct manifest,entries)==HEADER,"mount graph header layout");
 
 static void manifest_release(struct manifest *m) {
@@ -117,7 +117,7 @@ unsigned md_mount_graph_rights(struct md_mount_namespace *view) {
     struct md_inode_lifetime *owners[(view->tree ? view->tree->count : 0)+1];
     unsigned count=stores(view->tree ? view->tree->mounts : NULL,view->tree ? view->tree->count : 0,owners), rights=4;
     for (unsigned i=0;view->tree && i<view->tree->count;++i)
-        if (view->tree->mounts[i].id) rights+=3;
+        if (view->tree->mounts[i].id) rights+=3+!!view->tree->mounts[i].provider;
     if (view->base.source>=0) rights+=2;
     for (unsigned i=0;i<count;++i) rights+=md_inode_custody_rights(owners[i]);
     return rights;
@@ -223,7 +223,8 @@ static int parse_manifest(unsigned char *bytes,size_t n,struct manifest *out) {
             continue;
         }
         if (e->descriptor!=next) return -EPROTO;
-        next+=3;
+        next+=3+!!(e->flags&HOST_PROVIDERS);
+        if (!(e->flags&HOST_PROVIDERS) && (e->super_policy.device || e->super_policy.inode)) return -EPROTO;
         if (e->parent && (e->parent>out->count || (out->entries[e->parent-1].flags&RETIRED))) return -EPROTO;
         if (e->storage==owners+1) ++owners;
         for (unsigned j=0;j<i;++j) if (!(e->flags&DETACHED) && !(out->entries[j].flags&DETACHED)
@@ -329,7 +330,7 @@ static int describe(struct md_mount_namespace *view, const struct md_mount_layou
     }
     out->storages=stores(entries,count,owners);
     unsigned next=out->base_descriptor ? 5 : 3;
-    for (unsigned i=0;i<count;++i) if (entries[i].id) next+=3;
+    for (unsigned i=0;i<count;++i) if (entries[i].id) next+=3+!!entries[i].provider;
     for (unsigned i=0;i<out->storages;++i) {
         out->storage[i]=(struct storage){.root={owners[i]->device,owners[i]->inode},
             .start=next,.count=md_inode_custody_rights(owners[i])};
@@ -346,7 +347,7 @@ static int describe(struct md_mount_namespace *view, const struct md_mount_layou
         e->unbindable=m->links.unbindable;
         /* A private device view cannot be flattened into a native attachment. */
         if (!mount_portable(m)) return -EOPNOTSUPP;
-        e->descriptor=next; next+=3;
+        e->descriptor=next; next+=3+!!m->provider;
         if (m->storage) {
             if (!md_view_inode(m)) return -EINVAL;
             unsigned j=0; while (j<out->storages && !md_inode_lifetime_same(m->storage,owners[j])) ++j;
@@ -383,12 +384,19 @@ static int describe(struct md_mount_namespace *view, const struct md_mount_layou
         struct stat st; if (fstat(policy,&st)) return -errno;
         e->policy=md_fd_identity(&st);
         fds[e->descriptor]=source; fds[e->descriptor+1]=m->target; fds[e->descriptor+2]=policy;
+        if (m->provider) {
+            int super=md_mount_policy_share(md_provider_tree_super_policy(m->provider));
+            if (super<0) return super;
+            if (fstat(super,&st)) return -errno;
+            e->super_policy=md_fd_identity(&st); fds[e->descriptor+3]=super;
+        }
     }
     return topology(out);
 }
 static unsigned placement_rights(const struct manifest *data) {
     unsigned count=data->base_descriptor ? 5 : 3;
-    for (unsigned i=0;i<data->count;++i) if (!(data->entries[i].flags&RETIRED)) count+=3;
+    for (unsigned i=0;i<data->count;++i) if (!(data->entries[i].flags&RETIRED))
+        count+=3+!!(data->entries[i].flags&HOST_PROVIDERS);
     return count;
 }
 static int parcel(const struct manifest *data, int *fds, struct md_inode_lifetime **owners,
@@ -421,7 +429,7 @@ static int prepare_update(struct md_mount_namespace *view,const struct md_mount_
     if (g->writer<0) return -EPERM;
     if (g->revision==UINT64_MAX) return -EOVERFLOW;
     if (l->count>MD_FS_MOUNTS_MAX) return -EINVAL;
-    struct manifest data={0}; int fds[6+3*l->count];
+    struct manifest data={0}; int fds[6+4*l->count];
     struct md_inode_lifetime *owners[l->count+1];
     int r=describe(view,l,&data,fds,owners);
     /* Exportability is not mount authority. A local typed provider publishes
@@ -506,7 +514,7 @@ int md_mount_graph_export(struct md_mount_namespace *view, int root, struct md_m
     }
     struct manifest data={0},known={0};
     struct md_mount_layout l=layout(view);
-    int fds[6+3*l.count]; struct md_inode_lifetime *owners[l.count+1]; struct md_fd_identity id;
+    int fds[6+4*l.count]; struct md_inode_lifetime *owners[l.count+1]; struct md_fd_identity id;
     r=describe(view,&l,&data,fds,owners);
     if (!r) r=read_manifest(view->graph->fd,&known,&id);
     if (!r && !manifest_same(&known,&data)) r=-ESTALE;
@@ -546,6 +554,7 @@ static int same_objects(const struct manifest *old, const struct manifest *next)
         if ((a->flags&(INODE|PROC|HOST_PROVIDERS))!=(b->flags&(INODE|PROC|HOST_PROVIDERS)) || a->proc_namespace!=b->proc_namespace
                 || !md_fd_identity_same(a->source,b->source)
                 || !md_fd_identity_same(a->policy,b->policy)
+                || !md_fd_identity_same(a->super_policy,b->super_policy)
                 || !!a->storage!=!!b->storage) return -ESTALE;
         if (a->storage && !md_fd_identity_same(old->storage[a->storage-1].root,
                 next->storage[b->storage-1].root)) return -ESTALE;
@@ -649,6 +658,10 @@ static int import_known(struct md_mount_graph_parcel *p,struct md_mount_namespac
         if (!r) r=path_object(p->fd[e->descriptor+1],e->target,&st,0);
         if (!r && fstat(p->fd[e->descriptor+2],&st)) r=-errno;
         if (!r && !md_fd_identity_same(md_fd_identity(&st),e->policy)) r=-EPROTO;
+        if (!r && (e->flags&HOST_PROVIDERS)) {
+            if (fstat(p->fd[e->descriptor+3],&st)) r=-errno;
+            else if (!md_fd_identity_same(md_fd_identity(&st),e->super_policy)) r=-EPROTO;
+        }
         if (r) return r;
     }
     struct md_inode_lifetime *owners[data.storages+1];
@@ -664,7 +677,7 @@ static int import_known(struct md_mount_graph_parcel *p,struct md_mount_namespac
     if (!r && *out) {
         struct manifest known={0};
         struct md_mount_layout l=layout(*out);
-        int borrowed[6+3*l.count]; struct md_inode_lifetime *existing[l.count+1];
+        int borrowed[6+4*l.count]; struct md_inode_lifetime *existing[l.count+1];
         r=describe(*out,&l,&known,borrowed,existing);
         if (!r && known.revision==data.revision && !manifest_same(&known,&data)) r=-ESTALE;
         if (!r) r=same_objects(&known,&data);
@@ -714,6 +727,8 @@ static int import_known(struct md_mount_graph_parcel *p,struct md_mount_namespac
             m->provider=md_host_fs_import(m->source,e->flags&HOST_SYSFS ? MD_HOST_FS_SYS
                 : e->flags&HOST_DEVICES ? MD_HOST_FS_DEVICES : MD_HOST_FS_DEV);
             if (!m->provider) r=-errno;
+            if (!r) r=md_mount_policy_import(md_provider_tree_super_policy(m->provider),p->fd[e->descriptor+3]);
+            if (!r) take(p,e->descriptor+3);
         }
         if (!r) r=md_mount_policy_import(&m->policy,p->fd[e->descriptor+2]);
         if (!r) { take(p,e->descriptor+2); r=md_mount_id_allocate(&m->id); }

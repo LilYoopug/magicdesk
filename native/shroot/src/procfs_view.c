@@ -24,7 +24,10 @@ static const struct { const char *name; int directory; } kernel_nodes[]={
 const char *md_procfs_static_link(int fd) {
     struct stat pinned, named;
     if (fstat(fd,&pinned) || !S_ISLNK(pinned.st_mode)) return NULL;
-    const char *names[]={"/proc/self","/proc/thread-self"};
+    /* These root entries cannot be renamed or replaced by the application.
+     * Reopen only after matching the pinned inode, without SCM_RIGHTS, which
+     * Android may silently strip for an otherwise accessible proc symlink. */
+    const char *names[]={"/proc/self","/proc/thread-self","/proc/mounts","/proc/net","/proc/device-tree"};
     for (size_t i=0;i<sizeof(names)/sizeof(*names);++i)
         if (!lstat(names[i],&named) && pinned.st_dev==named.st_dev && pinned.st_ino==named.st_ino)
             return names[i];
@@ -32,7 +35,7 @@ const char *md_procfs_static_link(int fd) {
 }
 static const struct md_provider_tree_ops tree_ops={.filesystem=PROC_SUPER_MAGIC,.release=free};
 static const struct proc_policy *policy(const struct md_view_mount *mount) {
-    return md_provider_tree_context(mount->provider,&tree_ops);
+    return mount ? md_provider_tree_context(mount->provider,&tree_ops) : NULL;
 }
 static int options(struct proc_policy *p,const char *text,const struct md_identity *id) {
     *p=(struct proc_policy){0};
@@ -220,6 +223,8 @@ static int permitted(struct md_filesystem *fs,const struct proc_policy *p,pid_t 
     return inspect(fs,native);
 }
 int md_procfs_check(struct md_filesystem *fs,const struct md_view_mount *mount,const char *path,unsigned minimum) {
+    if (fs->actor && md_network_namespace_managed(fs->actor->network)
+            && !strncmp(path,"/proc/sys/net/ipv6",18) && (!path[18] || path[18]=='/')) return -ENOENT;
     const struct proc_policy *p=policy(mount);
     if (!p || !p->hidepid || strncmp(path,"/proc/",6)) return 0;
     const char *end;
@@ -334,6 +339,7 @@ static int network_directory(struct md_filesystem *fs,const char *path) {
         }
     }
     if (!fs->actor || !md_network_namespace_managed(fs->actor->network)) return 0;
+    if (!strcmp(path,"/proc/sys/net")) return 5;
     if (!strcmp(path,"/proc/sys/net/bridge")) return 3;
     size_t length=sizeof(network_conf)-1;
     return !strcmp(path,network_conf) ? 1 : !strncmp(path,network_conf,length) && path[length]=='/' ? 2 : 0;
@@ -342,6 +348,9 @@ static int network_entry(struct md_filesystem *fs,const char *path,const char *n
     if (!strcmp(name,".") || !strcmp(name,"..")) return 1;
     int directory=network_directory(fs,path);
     if (!directory) return 1;
+    /* The managed fabric has no IPv6 stack. Do not expose host controls
+     * which advertise one, independently of the selected proc mount. */
+    if (directory==5) return strcmp(name,"ipv6")!=0;
     if (directory==4) return strcmp(name,"if_inet6")!=0;
     if (directory==3) return !strcmp(name,"bridge-nf-call-iptables");
     uint64_t scope;
@@ -357,7 +366,7 @@ static int network_file(int root,const char *path) {
     return 0;
 }
 static int network_bridge_nodes(const struct md_view_mount *mount) {
-    if (!mount->provider) return -EOPNOTSUPP;
+    if (!mount->provider) return 0;
     int root=md_provider_tree_root(mount->provider);
     if (mkdirat(root,"sys/net/bridge",0755) && errno!=EEXIST) return -errno;
     return network_file(root,"sys/net/bridge/bridge-nf-call-iptables");
@@ -396,11 +405,10 @@ int md_procfs_step(struct md_filesystem *fs,struct md_mount_namespace *view,stru
         if (network_directory(fs,path)==1 && strcmp(name,".") && strcmp(name,"..")) {
             r=network_nodes(mount,name);
             if (r) return r;
+        } else if (network_directory(fs,path)==5 && !strcmp(name,"bridge")) {
+            r=network_bridge_nodes(mount);
+            if (r) return r;
         }
-    } else if (!strcmp(path,"/proc/sys/net") && !strcmp(name,"bridge")
-            && fs->actor && md_network_namespace_managed(fs->actor->network)) {
-        r=network_bridge_nodes(mount);
-        if (r) return r;
     } else if (!strcmp(path,"/proc/sys/net/ipv4") && !strcmp(name,"conf")
             && fs->actor && md_network_namespace_managed(fs->actor->network)) {
         r=network_nodes(mount,NULL);
@@ -532,6 +540,10 @@ ssize_t md_procfs_getdents(struct md_filesystem *fs,const struct md_view_mount *
     pid_t group=directory(path);
     int net=network_directory(fs,path);
     if (!strcmp(path,"/proc/sys/net") && fs->actor && md_network_namespace_managed(fs->actor->network)) {
+        if (mount->provider) {
+            error=network_nodes(mount,NULL);
+            if (error) return error;
+        }
         error=network_bridge_nodes(mount);
         if (error) return error;
     }

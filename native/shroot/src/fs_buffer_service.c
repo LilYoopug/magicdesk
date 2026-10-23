@@ -667,7 +667,7 @@ static void prepare_open(struct md_fs_buffer_request *r,struct md_filesystem *fs
         }
         int flags=fcntl(r->opened.fd,F_GETFL);
         if (flags<0) { r->error=-errno; return; }
-        r->opened.flags=(flags&O_PATH) || r->snapshot_phase || r->request.operation==MD_FS_FSOPEN
+        r->opened.flags=(flags&O_PATH) || r->snapshot_phase || r->request.operation==MD_FS_FSOPEN || r->request.operation==MD_FS_FSPICK
             || r->request.operation==MD_FS_FDINFO
             ? r->request.flags : O_CLOEXEC;
         r->output->transfer=(flags&O_PATH) ? MD_FS_BUFFER_ANCHOR : MD_FS_BUFFER_ADDFD;
@@ -690,16 +690,11 @@ static void prepare_open(struct md_fs_buffer_request *r,struct md_filesystem *fs
                 int source=md_inode_descriptor_source(fs->store,r->opened.fd,
                     r->output->source,sizeof(r->output->source));
                 if (source) {
-                    if (source==-EXDEV && !S_ISLNK(st.st_mode)) {
-                        /* A native pin may retain NOFOLLOW even though it is
-                         * not a link. Admission already checked that component;
-                         * reopen the exact pin, not a mutable native name. */
-                        r->opened.flags&=~O_NOFOLLOW;
-                        r->output->source_flags&=~O_NOFOLLOW;
-                        snprintf(r->output->source,sizeof(r->output->source),
-                            "/proc/%d/fd/%d",getpid(),r->opened.fd);
-                    } else if (source==-EXDEV) {
-                        const char *link=md_procfs_static_link(r->opened.fd);
+                    if (source==-EXDEV) {
+                        /* Reopening a proc magic link would lose NOFOLLOW,
+                         * including for non-links. Preserve the actual OFD. */
+                        const char *link=S_ISLNK(st.st_mode)
+                            ? md_procfs_static_link(r->opened.fd) : NULL;
                         if (link) snprintf(r->output->source,sizeof(r->output->source),"%s",link);
                         else r->output->transfer=MD_FS_BUFFER_RIGHTS;
                     }
@@ -1126,9 +1121,10 @@ int md_fs_buffer_progress(struct md_fs_buffer_service *s) {
                         : fcntl(pin,F_DUPFD_CLOEXEC,3);
                     if (pin>=0 && fd<0) fd=-errno;
                     md_fd_object_release(object);
-                    if (md_task_descriptor_needs_export(fd) && r->request.operation==MD_FS_FSTAT) {
+                    if (md_task_descriptor_needs_export(fd)
+                            && (r->request.operation==MD_FS_FSTAT || r->request.operation==MD_FS_READLINK)) {
                         /* O_PATH proc symlinks may be withheld from SCM_RIGHTS
-                         * by Android. Stat needs identity, not the source OFD. */
+                         * by Android. Metadata needs identity, not the source OFD. */
                         int path=md_task_descriptor_pin(r->actor,base);
                         if (path>=0) fd=path;
                     }

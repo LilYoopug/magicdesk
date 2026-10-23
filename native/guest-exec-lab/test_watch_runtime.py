@@ -82,6 +82,10 @@ def main():
         command("timeout 60 " + directory + "/libmagicdesk_guest_watch_launch.so "
                 + directory + "/libmagicdesk_guest_run.so " + directory + "/store --user " + shlex.quote(args.user))
         command("timeout 30 " + directory + "/libmagicdesk_guest_watch_store.so " + directory + "/store-unit")
+        for entry in (0, 1):
+            command("timeout 60 " + directory + "/libmagicdesk_guest_run.so --user 0:0"
+                    + f" --env SHROOT_MACHINE_ENTRY={entry} --store " + directory
+                    + "/store -- /bin/watch quotas")
         if args.contracts:
             for name in ("inodes", "import", "rpc"):
                 command("timeout 60 " + directory + "/libmagicdesk_guest_test_" + name + ".so "
