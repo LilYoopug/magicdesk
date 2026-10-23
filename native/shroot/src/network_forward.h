@@ -16,7 +16,11 @@ void md_network_forward_retire(struct md_network_namespace *);
 void md_network_forward_shutdown(struct md_network_fabric *);
 int md_network_forward_route(struct md_network_namespace *,const void *,int,const struct md_inet_address *,
     const struct md_inet_address *,struct md_network_flow_path *,struct md_inet_address *);
-int md_network_forward_source(struct md_network_namespace *,int,struct md_inet_address *,struct md_ip_address *);
+int md_network_forward_datagram(struct md_network_namespace *,unsigned,const struct md_filter_packet *,unsigned hops,const void *,size_t);
+int md_network_forward_group(struct md_network_namespace *,const void *,const struct md_inet_address *,
+    struct md_filter_packet *,unsigned,int,struct md_inet_address *);
+struct md_network_packet_info;
+int md_network_forward_source(struct md_network_namespace *,int,struct md_inet_address *,struct md_network_packet_info *);
 int md_network_forward_destination(struct md_network_namespace *,const void *,int,const struct md_inet_address *,
     const struct md_inet_address *,struct md_inet_address *);
 void md_network_forward_endpoint_closed(struct md_network_namespace *,const void *);

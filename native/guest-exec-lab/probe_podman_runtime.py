@@ -7,6 +7,7 @@ No seccomp/privilege bypass is passed to Podman or its container runtime.
 """
 import argparse
 import collections
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -122,7 +123,7 @@ def guest(options):
         ports = []
         image = options['portsImage']
         ipv6 = options['ipv6']
-        host = '[' + options['ipv6Host'] + ']' if ipv6 else '127.0.0.1'
+        host = '[' + options['ipv6PublishHost'] + ']' if ipv6 else '127.0.0.1'
         family = ['--ipv6'] if ipv6 else []
         def external(**request):
             return observe(options['observer'], ipv6=ipv6, **request)
@@ -262,6 +263,8 @@ def main():
     parser.add_argument('--exercise-ports', action='store_true')
     parser.add_argument('--ipv6', action='store_true', help='Exercise a dual-stack bridge, IPv6 publication and named IPv6 peers')
     parser.add_argument('--ipv6-host', default='::1', help='Native Android IPv6 address for the external port observer')
+    parser.add_argument('--ipv6-publish-host', type=ipaddress.IPv6Address,
+                        help='Guest bind address; defaults to --ipv6-host. Use :: for wildcard publication')
     parser.add_argument('--internet-ipv6', action='store_true', help='Require public IPv6 UDP/TCP DNS and verified HTTPS')
     parser.add_argument('--ports-image', default='docker.io/library/python:3.14-alpine')
     parser.add_argument('--internet', action='store_true', help='Also require external DNS and HTTP')
@@ -273,8 +276,8 @@ def main():
         parser.error('--exercise-ports requires bridge')
     if args.ipv6 and not args.exercise_ports:
         parser.error('--ipv6 requires --exercise-ports')
-    if (args.internet_ipv6 or args.ipv6_host != '::1') and not args.ipv6:
-        parser.error('--internet-ipv6 and --ipv6-host require --ipv6')
+    if (args.internet_ipv6 or args.ipv6_host != '::1' or args.ipv6_publish_host is not None) and not args.ipv6:
+        parser.error('--internet-ipv6, --ipv6-host and --ipv6-publish-host require --ipv6')
     if not 1 <= args.exec_repeats <= 50:
         parser.error('--exec-repeats must be between 1 and 50')
     suite = Suite(Path('build/podman-results'), args.build, machine_entry=args.machine_entry)
@@ -301,6 +304,7 @@ def main():
                    'cgroups': args.cgroups,
                    'internet': args.internet, 'portsImage': args.ports_image,
                    'ipv6': args.ipv6, 'ipv6Host': args.ipv6_host, 'internetIpv6': args.internet_ipv6,
+                   'ipv6PublishHost': str(args.ipv6_publish_host) if args.ipv6_publish_host is not None else args.ipv6_host,
                    'trace': args.trace, 'hostLimits': args.host_limits, 'unlimitedPids': args.unlimited_pids,
                    'execRepeats': args.exec_repeats,
                    'captureNft': args.capture_nft,

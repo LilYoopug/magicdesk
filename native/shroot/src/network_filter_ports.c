@@ -48,6 +48,7 @@ static int may_translate(struct md_network_filter *f,const struct md_filter_chai
                 memset(k+size,1,padded-size);
             }
             switch (e->code) {
+            case MD_FILTER_ICMP_MATCH: possible=protocol==e->key; uncertain=1; break;
             case MD_FILTER_TRANSPORT: {
                 const struct md_filter_transport *t=&e->transport;
                 int unrestricted=t->destination[0]==0 && t->destination[1]==UINT16_MAX;
@@ -67,12 +68,15 @@ static int may_translate(struct md_network_filter *f,const struct md_filter_chai
                 break;
             case MD_FILTER_STATE_MATCH: possible=!!(8U&e->key)!=!!e->operation; break;
             case MD_FILTER_MARK_MATCH: uncertain=1; break;
+            case MD_FILTER_PACKET_TYPE: case MD_FILTER_REVERSE_PATH: uncertain=1; break;
             case MD_FILTER_ADDRESS_TYPE:
                 possible=!e->aux || (!!(e->aux&(1U<<RTN_LOCAL))!=!!(e->operation&MD_FILTER_INVERT_DESTINATION));
                 uncertain|=!!e->key;
                 break;
             case MD_FILTER_FIB:
-                if (e->operation!=NFTA_FIB_F_SADDR) { number=RTN_LOCAL; memcpy(value,&number,4); memset(k,1,4); }
+                if (e->key==NFT_FIB_RESULT_ADDRTYPE && e->operation==NFTA_FIB_F_DADDR) {
+                    number=RTN_LOCAL; memcpy(value,&number,4); memset(k,1,4);
+                }
                 break;
             case MD_FILTER_PAYLOAD:
                 for (unsigned b=0;b<size;++b) {
@@ -113,16 +117,17 @@ static int may_translate(struct md_network_filter *f,const struct md_filter_chai
                     possible=e->operation==NFT_RANGE_EQ ? inside : !inside;
                 } else uncertain=1;
                 break;
-            case MD_FILTER_LOOKUP:
-                if ((size==2 && all(tags+e->src,size,PORT)) || (size==address_size && all(tags+e->src,size,ADDRESS))) possible=!!e->operation;
+            case MD_FILTER_LOOKUP: {
+                struct md_filter_set *set=md_filter_set_find(f,0,NULL,e->target,0);
+                if (!set) return -ENOENT;
+                if ((size==2 && all(tags+e->src,size,PORT))
+                        || (!(set->flags&NFT_SET_INTERVAL) && size==address_size && all(tags+e->src,size,ADDRESS))) possible=!!e->operation;
                 else if (all(known+e->src,size,1)) {
-                    struct md_filter_set *set=md_filter_set_find(f,0,NULL,e->target,0);
-                    if (!set) return -ENOENT;
-                    int found=0;
-                    for (size_t b=0;b<set->count;++b) if (!memcmp(values+e->src,set->elements[b].key,size)) { found=1; break; }
+                    int found=md_filter_set_lookup(set,values+e->src)!=NULL;
                     possible=e->operation ? !found : found;
                 } else uncertain=1;
                 break;
+            }
             case MD_FILTER_NAT:
                 if (e->family && e->family!=address.family) { possible=0; break; }
                 if (e->operation==NFT_NAT_DNAT) return 1;
@@ -132,10 +137,11 @@ static int may_translate(struct md_network_filter *f,const struct md_filter_chai
                 struct md_filter_set *s=md_filter_set_find(f,chain->table,NULL,e->target,0);
                 if (!s) return -ENOENT;
                 int known_key=all(known+e->src,size,1);
+                const struct md_filter_element *selected=known_key ? md_filter_set_lookup(s,values+e->src) : NULL;
                 for (size_t b=0;b<s->count;++b) {
                     if (!*budget) return -E2BIG;
                     --*budget;
-                    if (known_key && memcmp(values+e->src,s->elements[b].key,size)) continue;
+                    if (s->elements[b].end || (known_key && selected!=s->elements+b)) continue;
                     struct md_filter_verdict v=s->elements[b].verdict;
                     if ((int)v.operation!=NFT_JUMP && (int)v.operation!=NFT_GOTO) continue;
                     struct md_filter_chain *target=md_filter_chain_find(f,chain->table,NULL,v.target,0);
@@ -219,10 +225,22 @@ int md_filter_ports(struct md_network_filter *f,struct md_ip_address uplink,stru
                 struct md_filter_set *s=md_filter_set_find(f,0,NULL,e->target,0);
                 if (!s) return -ENOENT;
                 for (size_t k=0;k<s->count;++k) {
-                    uint16_t item=0; memcpy(&item,s->elements[k].key,sizeof(item));
-                    int error=size==2 ? unique(candidates,&nc,1024,item)
-                        : unique_address(addresses,&na,256,md_ip_load(uplink.family,s->elements[k].key));
-                    if (error) return error;
+                    if (s->elements[k].end) continue;
+                    if (size==2) {
+                        uint16_t item=0; memcpy(&item,s->elements[k].key,2);
+                        unsigned first=ntohs(item),last=first;
+                        if (s->flags&NFT_SET_INTERVAL) {
+                            last=65535;
+                            if (k+1<s->count) { memcpy(&item,s->elements[k+1].key,2); last=ntohs(item)-1; }
+                        }
+                        if (last-first>=1024) return -ENOSPC;
+                        for (unsigned p=first;p<=last;++p) {
+                            int error=unique(candidates,&nc,1024,htons((uint16_t)p)); if (error) return error;
+                        }
+                    } else if (!(s->flags&NFT_SET_INTERVAL)) {
+                        int error=unique_address(addresses,&na,256,md_ip_load(uplink.family,s->elements[k].key));
+                        if (error) return error;
+                    }
                 }
             } else if (e->code==MD_FILTER_IMMEDIATE || e->code==MD_FILTER_META || e->code==MD_FILTER_CT
                     || e->code==MD_FILTER_FIB || e->code==MD_FILTER_BITWISE) memset(tags+e->dst,0,size);

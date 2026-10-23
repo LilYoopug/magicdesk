@@ -26,6 +26,9 @@ struct md_network_namespace *md_network_interface_owner(struct md_network_fabric
     return NULL;
 }
 struct md_ip_address md_network_interface_source(const struct md_network_interface *link,struct md_ip_address target) {
+    if (target.family==AF_INET6 && md_ip_multicast(target) && (target.bytes[1]&15)<=2) {
+        target=md_ip_any(AF_INET6); target.bytes[0]=0xfe; target.bytes[1]=0x80;
+    }
     struct md_ip_address best=md_ip_any(target.family);
     unsigned score=0;
     if (!link) return best;
@@ -47,6 +50,34 @@ int md_network_interface_has(const struct md_network_interface *link,struct md_i
                 || (link->kind==MD_LINK_LOOPBACK && address.family==AF_INET
                     && link->addresses[i].address.family==AF_INET && md_ip_is_loopback(address)))) return 1;
     return 0;
+}
+int md_network_interface_broadcast(const struct md_network_interface *link,struct md_ip_address address) {
+    if (address.family!=AF_INET) return 0;
+    if (address.v4==INADDR_BROADCAST) return 1;
+    if (!(link->info.flags&IFF_BROADCAST)) return 0;
+    for (unsigned i=0;i<link->address_count;++i) {
+        const struct md_network_ip_assignment *a=&link->addresses[i];
+        if (a->address.family!=AF_INET || a->prefix>=31) continue;
+        uint32_t mask=a->prefix ? UINT32_MAX<<(32-a->prefix) : 0;
+        if (ntohl(address.v4)==(ntohl(a->address.v4)|~mask)) return 1;
+    }
+    return 0;
+}
+unsigned md_network_address_type(struct md_network_namespace *n,struct md_ip_address address) {
+    if (md_ip_multicast(address)) return RTN_MULTICAST;
+    if (address.family==AF_INET && address.v4==INADDR_BROADCAST) return RTN_BROADCAST;
+    for (unsigned i=0;i<n->count;++i) {
+        if (md_network_interface_has(&n->links[i],address)) return RTN_LOCAL;
+        if (md_network_interface_broadcast(&n->links[i],address)) return RTN_BROADCAST;
+    }
+    return RTN_UNICAST;
+}
+struct md_ip_address md_network_route_source(struct md_network_namespace *n,const struct md_network_interface *link,
+        const struct md_network_route_entry *route,struct md_ip_address target) {
+    if (route && !md_ip_unspecified(route->source))
+        for (unsigned i=0;i<n->count;++i)
+            if (md_network_interface_has(&n->links[i],route->source)) return route->source;
+    return md_network_interface_source(link,target);
 }
 int md_network_interface_address(struct md_network_interface *link,struct md_network_ip_assignment address,int remove,int exclusive) {
     if (md_ip_unspecified(address.address) || address.prefix>md_ip_size(address.address)*8) return -EINVAL;
@@ -149,10 +180,24 @@ struct md_network_interface *md_network_route_lookup(struct md_network_namespace
         if (!l || !(l->info.flags&IFF_UP) || (output && output!=l->info.index)
                 || (md_ip_is_loopback(ip) && l->kind!=MD_LINK_LOOPBACK)
                 || (ip.family==AF_INET6 && l->ipv6.disabled)
-                || md_ip_unspecified(md_network_interface_source(l,ip))) continue;
+                || md_ip_unspecified(md_network_route_source(n,l,r,ip))) continue;
         best=l; selected=*r; prefix=r->prefix; metric=r->metric;
     }
-    if (result) *result=selected;
+    if (!best && md_ip_multicast(ip) && (output || ip.family==AF_INET6))
+        for (unsigned i=0;i<n->count;++i) {
+            struct md_network_interface *l=&n->links[i];
+            if (!(l->info.flags&IFF_UP) || (output ? output!=l->info.index : l->kind==MD_LINK_LOOPBACK)
+                    || (ip.family==AF_INET6 && l->ipv6.disabled) || md_ip_unspecified(md_network_interface_source(l,ip))) continue;
+            best=l;
+            selected=(struct md_network_route_entry){.destination=md_ip_network(ip,ip.family==AF_INET6 ? 8 : 4),
+                .prefix=ip.family==AF_INET6 ? 8 : 4,.gateway=md_ip_any(ip.family),.interface=l->info.index,
+                .scope=RT_SCOPE_LINK,.protocol=RTPROT_KERNEL,.metric=256};
+            break;
+        }
+    if (result) {
+        *result=selected;
+        if (!md_ip_unspecified(selected.source)) result->source=md_network_route_source(n,best,&selected,ip);
+    }
     return best;
 }
 int md_network_interface_reserve(struct md_network_namespace *n,unsigned extra) {

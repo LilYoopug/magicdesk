@@ -202,8 +202,9 @@ int md_network_route_reply(struct md_network_message *o,const struct nlmsghdr *h
         error=md_network_message_attribute(o,RTA_EXPIRES,&expires,sizeof(expires));
     }
     if (!error && (r->prefix || lookup)) error=ip_attribute(o,RTA_DST,lookup ? *lookup : r->destination);
-    struct md_ip_address source=md_network_interface_source(link,lookup ? *lookup : r->destination);
-    if (!error && (lookup || (r->protocol==RTPROT_KERNEL && r->destination.family==AF_INET))
+    struct md_ip_address source=md_ip_unspecified(r->source)
+        ? md_network_interface_source(link,lookup ? *lookup : r->destination) : r->source;
+    if (!error && (lookup || !md_ip_unspecified(r->source) || (r->protocol==RTPROT_KERNEL && r->destination.family==AF_INET))
             && !md_ip_unspecified(source)) error=ip_attribute(o,RTA_PREFSRC,source);
     return error;
 }
@@ -222,7 +223,8 @@ int md_network_routes(struct md_network_namespace *n,const struct nlmsghdr *h,ui
         if (m->rtm_src_len || m->rtm_tos || (m->rtm_flags&~(query ? RTM_F_LOOKUP_TABLE : 0))) return -EOPNOTSUPP;
         if (value.prefix>(m->rtm_family==AF_INET6 ? 128 : 32)) return -EINVAL;
         if (query && dump && (m->rtm_dst_len || m->rtm_protocol || m->rtm_scope || m->rtm_type || m->rtm_flags)) return -EOPNOTSUPP;
-        if (!query && m->rtm_type!=RTN_UNICAST) return -EOPNOTSUPP;
+        if (!query && m->rtm_type!=RTN_UNICAST
+                && !(h->nlmsg_type==RTM_DELROUTE && m->rtm_type==RTN_UNSPEC)) return -EOPNOTSUPP;
         struct md_netlink_cursor cursor={RTM_RTA(m),h->nlmsg_len-NLMSG_LENGTH(sizeof(*m))};
         struct md_netlink_attribute a; int error;
         while ((error=md_netlink_attribute_next(&cursor,&a))>0) {
@@ -233,6 +235,7 @@ int md_network_routes(struct md_network_namespace *n,const struct nlmsghdr *h,ui
             switch (a.type) {
             case RTA_DST: error=read_ip(&a,m->rtm_family,&value.destination); break;
             case RTA_GATEWAY: error=read_ip(&a,m->rtm_family,&value.gateway); break;
+            case RTA_PREFSRC: error=query ? -EINVAL : read_ip(&a,m->rtm_family,&value.source); break;
             case RTA_OIF: error=read_number(&a,&value.interface); break;
             case RTA_PRIORITY: error=read_number(&a,&value.metric); break;
             case RTA_TABLE: error=read_number(&a,&table); break;
@@ -304,6 +307,7 @@ int md_network_routes(struct md_network_namespace *n,const struct nlmsghdr *h,ui
             if (!md_ip_equal(value.destination,r->destination) || value.prefix!=r->prefix
                     || (value.interface && value.interface!=r->interface)
                     || (!md_ip_unspecified(value.gateway) && !md_ip_equal(value.gateway,r->gateway))
+                    || (!md_ip_unspecified(value.source) && !md_ip_equal(value.source,r->source))
                     || ((seen&(UINT64_C(1)<<RTA_PRIORITY)) && value.metric!=r->metric)) continue;
             memmove(n->routes+i,n->routes+i+1,(--n->route_count-i)*sizeof(*n->routes)); return 0;
         }
@@ -311,6 +315,11 @@ int md_network_routes(struct md_network_namespace *n,const struct nlmsghdr *h,ui
     }
     struct md_network_interface *link=md_network_interface_find(n,value.interface,NULL);
     if (!link) return -ENETUNREACH;
+    if (!md_ip_unspecified(value.source)) {
+        int local=0;
+        for (unsigned i=0;i<n->count;++i) local|=md_network_interface_has(&n->links[i],value.source);
+        if (!local) return -EINVAL;
+    }
     if (!md_ip_unspecified(value.gateway) && md_ip_unspecified(md_network_interface_source(link,value.gateway))) return -ENETUNREACH;
     if (value.valid_until) {
         int error=md_network_forward_timer(n->fabric);

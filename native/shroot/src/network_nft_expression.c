@@ -10,14 +10,21 @@
 #include <linux/netfilter/xt_conntrack.h>
 #include <linux/netfilter/xt_mark.h>
 #include <linux/netfilter/xt_addrtype.h>
+#include <linux/netfilter/xt_pkttype.h>
+#include <linux/netfilter/xt_rpfilter.h>
+#include <linux/netfilter_ipv4/ip_tables.h>
+#include <linux/netfilter_ipv6/ip6_tables.h>
 #include <stdlib.h>
 
 int md_nft_compat_revision(unsigned family,const char *name,unsigned revision,unsigned target) {
     static const struct { const char *name; unsigned target,revisions; } extensions[]={
         {"MARK",1,1U<<2},{"mark",0,1U<<1},{"addrtype",0,1U<<1},{"conntrack",0,1U<<3},
         {"DNAT",1,7},{"SNAT",1,7},{"MASQUERADE",1,1},
-        {"tcp",0,1},{"udp",0,1},{"comment",0,1}};
+        {"tcp",0,1},{"udp",0,1},{"comment",0,1},{"pkttype",0,1},{"rpfilter",0,1},
+        {"icmp",0,1},{"icmp6",0,1}};
     if ((family!=NFPROTO_IPV4 && family!=NFPROTO_IPV6) || !name) return -ENOENT;
+    if ((!strcmp(name,"icmp") && family!=NFPROTO_IPV4)
+            || (!strcmp(name,"icmp6") && family!=NFPROTO_IPV6)) return -ENOENT;
     if (family==NFPROTO_IPV6 && !revision && (!strcmp(name,"DNAT") || !strcmp(name,"SNAT"))) return -EPROTONOSUPPORT;
     for (size_t i=0;i<sizeof(extensions)/sizeof(*extensions);++i)
         if (target==extensions[i].target && !strcmp(name,extensions[i].name))
@@ -103,6 +110,32 @@ static int compat_match(struct md_network_filter *f,uint64_t table,const struct 
     if (error) return error;
     if (!md_nft_compat_supported(table_family(f,table),name,revision,0)) return -EOPNOTSUPP;
     const struct attribute *wire=&a[NFTA_MATCH_INFO];
+    if (!strcmp(name,"icmp") || !strcmp(name,"icmp6")) {
+        _Static_assert(sizeof(struct ipt_icmp)==4 && sizeof(struct ip6t_icmp)==4,"ICMP match ABI");
+        if (!wire->data || wire->flags || wire->size!=8) return -EINVAL;
+        const unsigned char *info=wire->data;
+        if (info[3]&~IPT_ICMP_INV) return -EINVAL;
+        e->code=MD_FILTER_ICMP_MATCH;
+        e->key=table_family(f,table)==NFPROTO_IPV4 ? IPPROTO_ICMP : IPPROTO_ICMPV6;
+        memcpy(e->value,info,4);
+        return 0;
+    }
+    if (!strcmp(name,"pkttype")) {
+        struct xt_pkttype_info info;
+        if (!wire->data || wire->flags || wire->size!=sizeof(info)) return -EINVAL;
+        memcpy(&info,wire->data,sizeof(info));
+        if (info.pkttype<0 || info.pkttype>255 || (info.invert!=0 && info.invert!=1)) return -EINVAL;
+        e->code=MD_FILTER_PACKET_TYPE; e->key=(unsigned)info.pkttype; e->operation=(unsigned)info.invert;
+        return 0;
+    }
+    if (!strcmp(name,"rpfilter")) {
+        struct xt_rpfilter_info info;
+        if (!wire->data || wire->flags || wire->size!=8) return -EINVAL;
+        memcpy(&info,wire->data,sizeof(info));
+        if (info.flags&~(XT_RPFILTER_LOOSE|XT_RPFILTER_VALID_MARK|XT_RPFILTER_ACCEPT_LOCAL|XT_RPFILTER_INVERT)) return -EINVAL;
+        e->code=MD_FILTER_REVERSE_PATH; e->key=info.flags;
+        return 0;
+    }
     if (!strcmp(name,"addrtype")) {
         struct xt_addrtype_info_v1 info;
         if (!wire->data || wire->flags || wire->size!=sizeof(info)) return -EINVAL;
@@ -243,13 +276,14 @@ static int expression(struct md_network_filter *f,uint64_t table,
         FIELDS(BIT(NFTA_META_KEY)|BIT(NFTA_META_DREG)|BIT(NFTA_META_SREG));
         NUM(NFTA_META_KEY,e->key);
         e->code=a[NFTA_META_SREG].data ? MD_FILTER_META_SET : MD_FILTER_META;
-        e->size=(e->key==NFT_META_NFPROTO || e->key==NFT_META_L4PROTO) ? 1
+        e->size=(e->key==NFT_META_NFPROTO || e->key==NFT_META_L4PROTO || e->key==NFT_META_PKTTYPE) ? 1
             : (e->key==NFT_META_IIFNAME || e->key==NFT_META_OIFNAME) ? 16 : 4;
         if (e->code==MD_FILTER_META_SET) {
             if (e->key!=NFT_META_MARK || a[NFTA_META_DREG].data) return -EOPNOTSUPP;
             REG(NFTA_META_SREG,4,e->src,0);
         } else {
             if (e->key!=NFT_META_NFPROTO && e->key!=NFT_META_L4PROTO && e->key!=NFT_META_MARK
+                    && e->key!=NFT_META_PKTTYPE
                     && e->key!=NFT_META_IIF && e->key!=NFT_META_OIF && e->key!=NFT_META_IIFNAME && e->key!=NFT_META_OIFNAME) return -EOPNOTSUPP;
             REG(NFTA_META_DREG,e->size,e->dst,1);
         }
@@ -306,8 +340,15 @@ static int expression(struct md_network_filter *f,uint64_t table,
     } else if (!strcmp(name,"fib")) {
         FIELDS(BIT(NFTA_FIB_DREG)|BIT(NFTA_FIB_RESULT)|BIT(NFTA_FIB_FLAGS));
         NUM(NFTA_FIB_RESULT,e->key); NUM(NFTA_FIB_FLAGS,e->operation);
-        if (e->key!=NFT_FIB_RESULT_ADDRTYPE || (e->operation!=NFTA_FIB_F_DADDR && e->operation!=NFTA_FIB_F_SADDR)) return -EOPNOTSUPP;
-        e->code=MD_FILTER_FIB; e->size=4; REG(NFTA_FIB_DREG,4,e->dst,1);
+        unsigned address=e->operation&(NFTA_FIB_F_DADDR|NFTA_FIB_F_SADDR);
+        unsigned device=e->operation&(NFTA_FIB_F_IIF|NFTA_FIB_F_OIF);
+        if ((address!=NFTA_FIB_F_DADDR && address!=NFTA_FIB_F_SADDR)
+                || device==(NFTA_FIB_F_IIF|NFTA_FIB_F_OIF)
+                || (e->operation&~(NFTA_FIB_F_SADDR|NFTA_FIB_F_DADDR|NFTA_FIB_F_IIF|NFTA_FIB_F_OIF|NFTA_FIB_F_MARK|NFTA_FIB_F_PRESENT))) return -EINVAL;
+        if (e->key!=NFT_FIB_RESULT_ADDRTYPE && e->key!=NFT_FIB_RESULT_OIF && e->key!=NFT_FIB_RESULT_OIFNAME) return -EINVAL;
+        if (e->key!=NFT_FIB_RESULT_ADDRTYPE && (e->operation&NFTA_FIB_F_OIF)) return -EINVAL;
+        e->code=MD_FILTER_FIB; e->size=e->key==NFT_FIB_RESULT_OIFNAME ? 16 : 4;
+        REG(NFTA_FIB_DREG,e->size,e->dst,1);
     } else if (!strcmp(name,"lookup")) {
         FIELDS(BIT(NFTA_LOOKUP_SET)|BIT(NFTA_LOOKUP_SET_ID)|BIT(NFTA_LOOKUP_SREG)|BIT(NFTA_LOOKUP_DREG)|BIT(NFTA_LOOKUP_FLAGS));
         const char *name=NULL; uint64_t id=0,flags=0;

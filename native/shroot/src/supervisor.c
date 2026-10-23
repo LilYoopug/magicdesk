@@ -5387,7 +5387,7 @@ static void buffer_descriptor_start(struct thread *t) {
         struct md_network_target resolver={.context=t,.resolve=network_namespace_capture};
         struct md_network_request *request=span.data;
         int sending=nr==SYS_sendto || nr==SYS_sendmsg;
-        const struct md_network_address *destination=sending ? &request->destination : NULL;
+        const struct md_network_send *destination=sending ? &request->destination : NULL;
         if (span.size<sizeof(*request)) result=-EOVERFLOW;
         else if (md_device_events_is(object)) {
             uint32_t groups=0;

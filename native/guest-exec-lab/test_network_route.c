@@ -398,9 +398,20 @@ void test_network_route(void) {
     h=request(&p,RTM_NEWLINK,NLM_F_CREATE|NLM_F_EXCL);
     ((struct ifinfomsg *)NLMSG_DATA(h))->ifi_family=AF_INET6;
     assert(ack(n,&root,h,NULL)==-EINVAL);
+    h=request(&p,RTM_NEWLINK,0);
+    *(struct ifinfomsg *)NLMSG_DATA(h)=(struct ifinfomsg){.ifi_family=AF_INET6,.ifi_index=1};
+    struct rtattr *af=attr(h,IFLA_AF_SPEC,NULL,0),*inet6=attr(h,AF_INET6,NULL,0);
+    unsigned char addrgen_mode=1;
+    attr(h,IFLA_INET6_ADDR_GEN_MODE,&addrgen_mode,1);
+    inet6->rta_len=(char *)h+h->nlmsg_len-(char *)inet6;
+    af->rta_len=(char *)h+h->nlmsg_len-(char *)af;
+    assert(!ack(n,&root,h,NULL));
+    assert(md_network_interface_find(n,1,NULL)->ipv6.addr_gen_mode==1);
     const unsigned queries[]={RTM_GETLINK,RTM_GETADDR,RTM_GETROUTE};
-    for (unsigned q=0;q<3;++q) for (unsigned padding=1;padding<=4;padding*=4) {
-        h=request(&p,queries[q],NLM_F_DUMP);
+    const unsigned dump_flags[]={NLM_F_ROOT,NLM_F_MATCH,NLM_F_DUMP};
+    for (unsigned q=0;q<3;++q) for (unsigned padding=1;padding<=4;padding*=4)
+            for (unsigned flag=0;flag<3;++flag) {
+        h=request(&p,queries[q],dump_flags[flag]);
         h->nlmsg_len=NLMSG_LENGTH(padding);
         length=md_network_route(n,&user,h,h->nlmsg_len,91,0,NULL,reply.bytes,sizeof(reply),NULL);
         assert(length>0);

@@ -121,10 +121,12 @@ static int parse_link(const struct nlmsghdr *h,struct link_change *change,struct
     if (h->nlmsg_len<NLMSG_LENGTH(sizeof(struct ifinfomsg))) return -EINVAL;
     const struct ifinfomsg *m=NLMSG_DATA(h);
     int ipv6_query=h->nlmsg_type==RTM_GETLINK && m->ifi_family==AF_INET6;
+    int ipv6_update=m->ifi_family==AF_INET6 && m->ifi_index>0
+        && (h->nlmsg_type==RTM_SETLINK || (h->nlmsg_type==RTM_NEWLINK && !(h->nlmsg_flags&NLM_F_CREATE)));
     int ipv4_query=h->nlmsg_type==RTM_GETLINK && m->ifi_family==AF_INET;
     int local_query=h->nlmsg_type==RTM_GETLINK && m->ifi_family==AF_UNIX;
     if (m->ifi_index<0 || (m->ifi_family!=AF_UNSPEC && m->ifi_family!=AF_PACKET
-            && m->ifi_family!=AF_BRIDGE && !ipv6_query && !ipv4_query && !local_query)) return -EINVAL;
+            && m->ifi_family!=AF_BRIDGE && !ipv6_query && !ipv6_update && !ipv4_query && !local_query)) return -EINVAL;
     *change=(struct link_change){.index=(unsigned)m->ifi_index,.change=m->ifi_change,.flags=m->ifi_flags,
         .family=m->ifi_family};
     int error=attributes(IFLA_RTA(m),h->nlmsg_len-NLMSG_LENGTH(sizeof(*m)),a,IFLA_MAX);
@@ -418,6 +420,7 @@ static int route_present(const struct md_network_route_entry *routes,unsigned co
     for (unsigned i=0;i<count;++i) {
         const struct md_network_route_entry *b=&routes[i];
         if (md_ip_equal(a->destination,b->destination) && md_ip_equal(a->gateway,b->gateway)
+                && md_ip_equal(a->source,b->source) && !memcmp(&a->metrics,&b->metrics,sizeof(a->metrics))
                 && a->prefix==b->prefix && a->interface==b->interface && a->metric==b->metric
                 && a->scope==b->scope && a->protocol==b->protocol && a->nexthop==b->nexthop
                 && a->valid_until==b->valid_until && a->preference==b->preference) return 1;
@@ -620,7 +623,8 @@ long md_network_route(struct md_network_namespace *n,const struct md_identity *i
         void *data,size_t capacity,const struct md_network_publication *publication) {
     if (size<sizeof(*h) || h->nlmsg_len!=size || !(h->nlmsg_flags&NLM_F_REQUEST)) return -EINVAL;
     int query=md_network_route_query(h->nlmsg_type);
-    int dump=query && (h->nlmsg_flags&NLM_F_DUMP)==NLM_F_DUMP;
+    /* rtnetlink accepts either ROOT or MATCH, not only their DUMP union. */
+    int dump=query && (h->nlmsg_flags&NLM_F_DUMP);
     int strict=!!(options&MD_NETWORK_ROUTE_STRICT);
     int error=query && strict ? strict_query(h,dump) : 0;
     const struct nlmsghdr *original=h;

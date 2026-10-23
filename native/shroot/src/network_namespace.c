@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
-#include "network_icmp6.h"
+#include "network_raw6.h"
+#include "network_raw4.h"
 #include "network_internal.h"
 #include "network_route.h"
 #include "network_generic.h"
@@ -203,7 +204,8 @@ struct network_socket {
     int peer, receiver, family, type, protocol, bound;
     struct md_socket_filter filter;
     struct md_network_ethernet ethernet;
-    struct md_network_icmp6 icmp6;
+    struct md_network_raw6 raw6;
+    struct md_network_raw4 raw4;
     int capped_ack;
     int packet_info, pass_credentials, extended_ack, strict_check;
     struct md_network_listener listener;
@@ -222,9 +224,14 @@ static void socket_destroy(struct md_fd_object *object) {
         md_network_ethernet_detach(&socket->ethernet);
         pthread_mutex_unlock(&socket->space->fabric->lock);
     }
-    if (socket->icmp6.space) {
+    if (socket->raw6.space) {
         pthread_mutex_lock(&socket->space->fabric->lock);
-        md_network_icmp6_detach(&socket->icmp6);
+        md_network_raw6_detach(&socket->raw6);
+        pthread_mutex_unlock(&socket->space->fabric->lock);
+    }
+    if (socket->raw4.space) {
+        pthread_mutex_lock(&socket->space->fabric->lock);
+        md_network_raw4_detach(&socket->raw4);
         pthread_mutex_unlock(&socket->space->fabric->lock);
     }
     if (socket->peer>=0) close(socket->peer);
@@ -261,8 +268,9 @@ int md_network_interface_ioctl(unsigned long command) {
         || command==SIOCGIFHWADDR || command==SIOCSIFHWADDR || command==SIOCBRADDIF
         || command==SIOCSIFFLAGS || command==SIOCSIFMTU;
 }
-int md_network_netlink_destination(const struct md_network_address *destination,uint32_t *groups) {
+int md_network_netlink_destination(const struct md_network_send *destination,uint32_t *groups) {
     *groups=0;
+    if (destination && destination->control_size) return -EOPNOTSUPP;
     if (!destination || !destination->size) return 0;
     if (destination->size<sizeof(struct sockaddr_nl) || destination->size>sizeof(destination->value)) return -EINVAL;
     const struct sockaddr_nl *address=(const void *)&destination->value;
@@ -280,12 +288,15 @@ int md_network_socket_open(struct md_network_namespace *n, const struct md_ident
         if (!object) { int error=-errno; close(native); return error; }
         *out=object; *fd=native; return 0;
     }
-    int icmp6=family==AF_INET6 && (type&15)==SOCK_RAW && protocol==IPPROTO_ICMPV6;
-    if ((family==AF_INET || family==AF_INET6) && !icmp6 && md_network_endpoint_enabled(n))
+    int raw6=family==AF_INET6 && (type&15)==SOCK_RAW;
+    int raw4=family==AF_INET && (type&15)==SOCK_RAW;
+    if ((family==AF_INET || family==AF_INET6) && !raw6 && !raw4 && md_network_endpoint_enabled(n))
         return md_network_endpoint_open(n,identity->uid.fs,family,type,protocol,out,fd);
     int base=type&15;
-    if (icmp6) {
+    if (raw6 || raw4) {
         if (!md_identity_capable_in(identity,n->owner,CAP_NET_RAW)) return -EPERM;
+        if (raw4 && (protocol<=0 || protocol>255)) return -EPROTONOSUPPORT;
+        if (raw6 && protocol!=IPPROTO_ICMPV6 && protocol!=IPPROTO_UDP) return -EPROTONOSUPPORT;
     } else if (family==AF_NETLINK) {
         if (protocol!=NETLINK_ROUTE && protocol!=NETLINK_GENERIC && protocol!=NETLINK_NETFILTER) return -EPROTONOSUPPORT;
         if (base!=SOCK_RAW && base!=SOCK_DGRAM) return -ESOCKTNOSUPPORT;
@@ -319,9 +330,14 @@ int md_network_socket_open(struct md_network_namespace *n, const struct md_ident
         md_network_ethernet_attach(&s->ethernet,n,s->peer,base,protocol);
         pthread_mutex_unlock(&n->fabric->lock);
     }
-    if (icmp6) {
+    if (raw6) {
         pthread_mutex_lock(&n->fabric->lock);
-        md_network_icmp6_attach(&s->icmp6,n,s->peer);
+        md_network_raw6_attach(&s->raw6,n,s->peer,protocol);
+        pthread_mutex_unlock(&n->fabric->lock);
+    }
+    if (raw4) {
+        pthread_mutex_lock(&n->fabric->lock);
+        md_network_raw4_attach(&s->raw4,n,s->peer,protocol);
         pthread_mutex_unlock(&n->fabric->lock);
     }
     *out=&s->object; *fd=pair[0]; return 0;
@@ -344,7 +360,7 @@ unsigned md_network_broadcast(struct md_network_namespace *n,unsigned group,cons
     for (struct md_network_listener *s=n->listeners;s;s=s->next)
         if (s->protocol==NETLINK_ROUTE && (s->groups&(1U<<(group-1)))) {
             int r=packet(s->peer,group,data,size);
-            if (r && r!=-ECONNREFUSED) s->overflow=1;
+            if (r && r!=-ECONNREFUSED && !s->no_enobufs) s->overflow=1;
             if (r!=-ECONNREFUSED) ++published;
         }
     return published;
@@ -376,11 +392,12 @@ static int bind_port(struct network_socket *s,uint32_t requested,pid_t pid) {
     s->listener.port=port; s->bound=1; return 0;
 }
 long md_network_socket_call(struct md_fd_object *object, const struct md_identity *identity,
-        long nr, const unsigned long *a, void *data, size_t capacity, size_t size, pid_t pid,const struct md_network_address *destination,
+        long nr, const unsigned long *a, void *data, size_t capacity, size_t size, pid_t pid,const struct md_network_send *destination,
         const struct md_pid_identity *process,
         const struct md_network_target *resolver) {
     struct md_network_namespace *space=md_network_socket_namespace(object);
     if (!space || (!md_network_socket_control(object) && nr!=SYS_ioctl)) return -EBADF;
+    if (nr==SYS_writev) nr=SYS_write;
     struct network_socket *s=(void *)object;
     if ((nr==SYS_setsockopt || nr==SYS_getsockopt) && a[1]==SOL_SOCKET
             && (a[2]==SO_ATTACH_FILTER || a[2]==SO_DETACH_FILTER || a[2]==SO_LOCK_FILTER)) {
@@ -404,11 +421,13 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
     }
     if (nr==SYS_read || nr==SYS_readv || nr==SYS_recvfrom || nr==SYS_recvmsg) {
         pthread_mutex_lock(&s->space->fabric->lock);
-        int result=(s->listener.overflow || s->ethernet.overflow || s->icmp6.overflow) ? -ENOBUFS
-            : s->icmp6.space ? md_network_icmp6_options(&s->icmp6)
-            : s->family==AF_PACKET ? MD_NETWORK_PACKET_ETHERNET : (s->packet_info ? MD_NETWORK_PACKET_INFO : 0)
+        int result=(s->listener.overflow || s->ethernet.overflow || s->raw6.overflow || s->raw4.overflow) ? -ENOBUFS
+            : s->raw4.space ? md_network_raw4_options(&s->raw4)
+            : s->raw6.space ? md_network_raw6_options(&s->raw6)
+            : s->family==AF_PACKET ? MD_NETWORK_PACKET_ETHERNET | (s->ethernet.auxiliary ? MD_NETWORK_PACKET_AUXDATA : 0)
+            : (s->packet_info ? MD_NETWORK_PACKET_INFO : 0)
                 | (s->pass_credentials ? MD_NETWORK_PACKET_CREDENTIALS : 0);
-        s->listener.overflow=s->ethernet.overflow=s->icmp6.overflow=0;
+        s->listener.overflow=s->ethernet.overflow=s->raw6.overflow=s->raw4.overflow=0;
         pthread_mutex_unlock(&s->space->fabric->lock);
         return result;
     }
@@ -447,15 +466,22 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
     }
     int socket_query=nr==SYS_getsockopt && a[1]==SOL_SOCKET && (a[2]==SO_DOMAIN || a[2]==SO_TYPE
         || a[2]==SO_PROTOCOL || a[2]==SO_ERROR || a[2]==SO_PASSCRED);
-    if (s->icmp6.space && !socket_query) {
+    if (s->raw6.space && !socket_query) {
         pthread_mutex_lock(&space->fabric->lock);
         int binding=nr==SYS_setsockopt && a[1]==SOL_SOCKET && (a[2]==SO_BINDTODEVICE
 #ifdef SO_BINDTOIFINDEX
             || a[2]==SO_BINDTOIFINDEX
 #endif
             );
-        long result=binding && s->icmp6.device && !md_identity_capable_in(identity,space->owner,CAP_NET_RAW)
-            ? -EPERM : md_network_icmp6_call(&s->icmp6,nr,a,data,capacity,size,destination);
+        long result=binding && s->raw6.device && !md_identity_capable_in(identity,space->owner,CAP_NET_RAW)
+            ? -EPERM : md_network_raw6_call(&s->raw6,nr,a,data,capacity,size,destination);
+        pthread_mutex_unlock(&space->fabric->lock); return result;
+    }
+    if (s->raw4.space && !socket_query) {
+        pthread_mutex_lock(&space->fabric->lock);
+        int binding=nr==SYS_setsockopt && a[1]==SOL_SOCKET && a[2]==SO_BINDTODEVICE;
+        long result=binding && s->raw4.device && !md_identity_capable_in(identity,space->owner,CAP_NET_RAW)
+            ? -EPERM : md_network_raw4_call(&s->raw4,nr,a,data,capacity,size,destination);
         pthread_mutex_unlock(&space->fabric->lock); return result;
     }
     if (s->family==AF_PACKET && !(nr==SYS_getsockopt && a[1]==SOL_SOCKET)) {
@@ -473,6 +499,8 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
             case NETLINK_CAP_ACK: value=s->capped_ack; break;
             case NETLINK_EXT_ACK: value=s->extended_ack; break;
             case NETLINK_GET_STRICT_CHK: value=s->strict_check; break;
+            case NETLINK_BROADCAST_ERROR: value=s->listener.broadcast_error; break;
+            case NETLINK_NO_ENOBUFS: value=s->listener.no_enobufs; break;
             case NETLINK_LIST_MEMBERSHIPS: value=(int)s->listener.groups; break;
             default: pthread_mutex_unlock(&s->space->fabric->lock); return -ENOPROTOOPT;
             }
@@ -490,8 +518,8 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
             pthread_mutex_unlock(&s->space->fabric->lock); break;
         case SO_ERROR:
             pthread_mutex_lock(&s->space->fabric->lock);
-            value=s->listener.overflow || s->ethernet.overflow || s->icmp6.overflow ? ENOBUFS : 0;
-            s->listener.overflow=s->ethernet.overflow=s->icmp6.overflow=0;
+            value=s->listener.overflow || s->ethernet.overflow || s->raw6.overflow || s->raw4.overflow ? ENOBUFS : 0;
+            s->listener.overflow=s->ethernet.overflow=s->raw6.overflow=s->raw4.overflow=0;
             pthread_mutex_unlock(&s->space->fabric->lock); break;
         default: return -EOPNOTSUPP;
         }
@@ -519,6 +547,13 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
         else if (a[2]==NETLINK_EXT_ACK) s->extended_ack=!!value;
         else if (a[2]==NETLINK_CAP_ACK) s->capped_ack=!!value;
         else if (a[2]==NETLINK_GET_STRICT_CHK) s->strict_check=!!value;
+        /* Kernel topology producers and netlink_sendmsg both ignore the
+         * multicast return code. This subscriber option cannot roll back a
+         * committed link change; receiver overrun is controlled separately. */
+        else if (a[2]==NETLINK_BROADCAST_ERROR) s->listener.broadcast_error=!!value;
+        else if (a[2]==NETLINK_NO_ENOBUFS) {
+            s->listener.no_enobufs=!!value;
+        }
         else result=-ENOPROTOOPT;
         pthread_mutex_unlock(&s->space->fabric->lock);
         return result;
@@ -579,7 +614,7 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
             for (struct md_network_listener *p=s->space->listeners;p;p=p->next)
                 if (p!=&s->listener && p->protocol==s->protocol && (p->groups&(1U<<(group-1)))) {
                     int r=packet_from(p->peer,&header,data,size);
-                    if (r && r!=-ECONNREFUSED) p->overflow=1;
+                    if (r && r!=-ECONNREFUSED && !p->no_enobufs) p->overflow=1;
                 }
             pthread_mutex_unlock(&s->space->fabric->lock);
         }

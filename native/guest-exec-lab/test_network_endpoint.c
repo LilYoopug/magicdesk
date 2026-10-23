@@ -10,10 +10,131 @@
 #include <fcntl.h>
 #include <net/if.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+static void endpoint_option(struct md_fd_object *o,int fd,unsigned level,unsigned option,void *value,socklen_t size) {
+    int error=md_network_endpoint_sockopt(o,fd,1,level,option,value,&size);
+    if (error) fprintf(stderr,"endpoint option %u/%u: %d\n",level,option,error);
+    assert(!error);
+}
+static void tcp_reuse(unsigned family) {
+    struct md_network_namespace *root=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
+    struct md_network_namespace *n=md_network_namespace_copy(root,NULL);
+    assert(n);
+    struct md_identity identity=md_identity_new(0,0);
+    unsigned index;
+    assert(!md_network_interface_add(n,MD_LINK_BRIDGE,"tcp-reuse",&index));
+    struct md_network_interface *link=md_network_interface_find(n,index,NULL);
+    link->info.flags|=IFF_UP; test_network_v4(link,htonl(0x0a590001),24);
+    md_network_interface_up(link);
+    struct md_inet_address local={.ip=family==AF_INET ? md_ip_v4(htonl(0x0a590001))
+        : md_network_interface_source(link,md_ip_loopback(AF_INET6)),.port=htons(18765)};
+    struct sockaddr_storage wire; socklen_t length;
+    assert(!md_inet_encode(&local,0,&wire,&length));
+    struct md_fd_object *objects[2]; int fds[2],one=1;
+    for (unsigned i=0;i<2;++i) {
+        assert(!md_network_endpoint_open(n,0,family,SOCK_STREAM,0,&objects[i],&fds[i]));
+        endpoint_option(objects[i],fds[i],SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one));
+        assert(!md_network_endpoint_device_set(objects[i],&identity,"tcp-reuse"));
+        assert(!md_network_endpoint_bind(objects[i],fds[i],&identity,(void *)&wire,length));
+    }
+    struct md_network_flow_path path={.destination=n->inode,
+        .translated={.destination=local.ip,.destination_port=local.port,.input=index}};
+    struct md_inet_address native; const void *selected=NULL;
+    assert(md_network_endpoint_resolve(n->fabric,&path,SOCK_STREAM,&native,&selected)==-ECONNREFUSED);
+    assert(!md_network_endpoint_listen(objects[0],fds[0],1));
+    assert(!md_network_endpoint_resolve(n->fabric,&path,SOCK_STREAM,&native,&selected) && selected==objects[0]);
+    assert(md_network_endpoint_listen(objects[1],fds[1],1)==-EADDRINUSE);
+    close(fds[0]); md_fd_object_release(objects[0]);
+    assert(!md_network_endpoint_listen(objects[1],fds[1],1));
+    assert(!md_network_endpoint_resolve(n->fabric,&path,SOCK_STREAM,&native,&selected) && selected==objects[1]);
+    close(fds[1]); md_fd_object_release(objects[1]);
+    md_identity_release(&identity); md_network_namespace_release(n); md_network_namespace_release(root);
+    printf("PASS IPv%u TCP reuse: bind-only sockets, listen conflicts and listener selection\n",family==AF_INET ? 4 : 6);
+}
+static void multicast(unsigned family) {
+    struct md_network_namespace *root=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
+    struct md_network_namespace *n=md_network_namespace_copy(root,NULL),*other=md_network_namespace_copy(root,NULL);
+    assert(n && other);
+    struct md_identity identity=md_identity_new(0,0);
+    unsigned index,isolated;
+    assert(!md_network_interface_add(n,MD_LINK_BRIDGE,"multicast",&index));
+    assert(!md_network_interface_add(other,MD_LINK_BRIDGE,"isolated",&isolated));
+    struct md_network_interface *link=md_network_interface_find(n,index,NULL);
+    struct md_network_interface *away=md_network_interface_find(other,isolated,NULL);
+    link->info.flags|=IFF_UP; away->info.flags|=IFF_UP;
+    test_network_v4(link,htonl(0x0a580001),24); test_network_v4(away,htonl(0x0a580001),24);
+    md_network_interface_up(link); md_network_interface_up(away);
+    struct md_inet_address group={.ip=md_ip_v4(htonl(0xe00000fb)),.port=htons(5353)};
+    if (family==AF_INET6) { group.ip=md_ip_any(AF_INET6); group.ip.bytes[0]=0xff; group.ip.bytes[1]=2; group.ip.bytes[15]=0xfb; }
+    struct md_inet_address any={.ip=md_ip_any(family),.port=group.port};
+    struct sockaddr_storage wire; socklen_t length;
+    struct md_fd_object *objects[5]; int fds[5];
+    int one=1,zero=0;
+    for (unsigned i=0;i<5;++i) {
+        assert(!md_network_endpoint_open(i==3 ? other : n,0,family,SOCK_DGRAM,0,&objects[i],&fds[i]));
+        if (i==4) continue;
+        endpoint_option(objects[i],fds[i],SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one));
+        endpoint_option(objects[i],fds[i],family==AF_INET ? IPPROTO_IP : IPPROTO_IPV6,
+            family==AF_INET ? IP_MULTICAST_ALL : IPV6_MULTICAST_ALL,&zero,sizeof(zero));
+        assert(!md_inet_encode(&any,0,&wire,&length));
+        assert(!md_network_endpoint_bind(objects[i],fds[i],&identity,(void *)&wire,length));
+        if (i==2) continue;
+        unsigned selected=i==3 ? isolated : index;
+        if (family==AF_INET) {
+            struct ip_mreqn request={.imr_multiaddr.s_addr=group.ip.v4,.imr_ifindex=(int)selected};
+            endpoint_option(objects[i],fds[i],IPPROTO_IP,IP_ADD_MEMBERSHIP,&request,sizeof(request));
+        } else {
+            struct ipv6_mreq request={.ipv6mr_multiaddr=group.ip.v6,.ipv6mr_interface=selected};
+            endpoint_option(objects[i],fds[i],IPPROTO_IPV6,IPV6_ADD_MEMBERSHIP,&request,sizeof(request));
+        }
+    }
+    if (family==AF_INET) {
+        struct ip_mreqn request={.imr_ifindex=(int)index};
+        endpoint_option(objects[4],fds[4],IPPROTO_IP,IP_MULTICAST_IF,&request,sizeof(request));
+    } else endpoint_option(objects[4],fds[4],IPPROTO_IPV6,IPV6_MULTICAST_IF,&index,sizeof(index));
+    assert(!md_inet_encode(&group,0,&wire,&length));
+    assert(!md_network_endpoint_autobind(objects[4],fds[4],&identity,(void *)&wire,length,0));
+    struct sockaddr_storage target; socklen_t target_size;
+    assert(!md_network_endpoint_destination(objects[4],(void *)&wire,length,&target,&target_size));
+    assert(!connect(fds[4],(void *)&target,target_size));
+    assert(!md_network_endpoint_connected(objects[4],fds[4],(void *)&wire,length));
+    for (unsigned round=0;round<2;++round) {
+        assert(write(fds[4],"m",1)==1);
+        for (unsigned i=round;i<2;++i) {
+            struct pollfd ready={.fd=fds[i],.events=POLLIN};
+            assert(poll(&ready,1,2000)==1 && (ready.revents&POLLIN));
+            char byte=0; struct sockaddr_storage source; socklen_t source_size=sizeof(source);
+            assert(recvfrom(fds[i],&byte,1,0,(void *)&source,&source_size)==1 && byte=='m');
+            struct md_network_packet_info info;
+            assert(!md_network_endpoint_source_info(objects[i],&source,&source_size,&info));
+            assert(info.interface==index && md_ip_equal(info.destination,group.ip) && info.hops_set && info.hops==1);
+        }
+        struct pollfd quiet[]={{.fd=fds[2],.events=POLLIN},{.fd=fds[3],.events=POLLIN},{.fd=fds[0],.events=POLLIN}};
+        assert(!poll(quiet,round ? 3 : 2,30));
+        if (!round) {
+            if (family==AF_INET) {
+                struct ip_mreqn request={.imr_multiaddr.s_addr=group.ip.v4,.imr_ifindex=(int)index};
+                endpoint_option(objects[0],fds[0],IPPROTO_IP,IP_DROP_MEMBERSHIP,&request,sizeof(request));
+            } else {
+                struct ipv6_mreq request={.ipv6mr_multiaddr=group.ip.v6,.ipv6mr_interface=index};
+                endpoint_option(objects[0],fds[0],IPPROTO_IPV6,IPV6_DROP_MEMBERSHIP,&request,sizeof(request));
+            }
+        }
+    }
+    endpoint_option(objects[4],fds[4],family==AF_INET ? IPPROTO_IP : IPPROTO_IPV6,
+        family==AF_INET ? IP_MULTICAST_LOOP : IPV6_MULTICAST_LOOP,&zero,sizeof(zero));
+    assert(write(fds[4],"n",1)==1);
+    struct pollfd quiet={.fd=fds[1],.events=POLLIN};
+    assert(!poll(&quiet,1,50));
+    for (unsigned i=0;i<5;++i) { close(fds[i]); md_fd_object_release(objects[i]); }
+    md_identity_release(&identity); md_network_namespace_release(other); md_network_namespace_release(n); md_network_namespace_release(root);
+    printf("PASS IPv%u UDP multicast: reuse, fanout, leave, loop policy, source metadata and namespace isolation\n",family==AF_INET ? 4 : 6);
+}
 
 static void device_binding(void) {
     struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
@@ -129,7 +250,10 @@ static void tcp_defaults(void) {
 }
 
 void test_network_endpoint(void) {
+    multicast(AF_INET);
+    multicast(AF_INET6);
     tcp_defaults();
+    tcp_reuse(AF_INET); tcp_reuse(AF_INET6);
     device_binding();
     struct md_network_namespace *root=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
     struct md_network_namespace *a=md_network_namespace_copy(root,NULL), *b=md_network_namespace_copy(root,NULL);

@@ -310,7 +310,8 @@ static int sets(struct md_network_filter *f,const struct nlmsghdr *h,uint32_t po
     if (!error) error=required_number(&a[NFTA_SET_KEY_LEN],&value.key_size);
     if (!error) error=blob(&a[NFTA_SET_USERDATA],value.userdata,&value.userdata_size);
     if (error) return error;
-    if (value.flags&~(NFT_SET_ANONYMOUS|NFT_SET_CONSTANT|NFT_SET_MAP) || !value.key_size || value.key_size>16) return -EOPNOTSUPP;
+    if (value.flags&~(NFT_SET_ANONYMOUS|NFT_SET_CONSTANT|NFT_SET_MAP|NFT_SET_INTERVAL)
+            || !value.key_size || value.key_size>16) return -EOPNOTSUPP;
     if (value.flags&NFT_SET_MAP) {
         uint64_t length=0;
         error=required_number(&a[NFTA_SET_DATA_TYPE],&value.data_type);
@@ -349,7 +350,8 @@ static int emit_elements(struct md_network_filter *f,struct md_filter_set *s,con
         PUT(md_network_message_nest(o,NFTA_SET_ELEM_KEY,&key));
         PUT(md_network_message_attribute(o,NFTA_DATA_VALUE,s->elements[i].key,s->key_size));
         PUT(md_network_message_end_nest(o,key));
-        if (s->flags&NFT_SET_MAP) {
+        if (s->elements[i].end) PUT(u32(o,NFTA_SET_ELEM_FLAGS,NFT_SET_ELEM_INTERVAL_END));
+        if ((s->flags&NFT_SET_MAP) && !s->elements[i].end) {
             size_t data=0;
             PUT(md_network_message_nest(o,NFTA_SET_ELEM_DATA,&data));
             PUT(md_nft_emit_verdict(f,s->table,&s->elements[i].verdict,o));
@@ -396,26 +398,29 @@ static int elements(struct md_network_filter *f,const struct nlmsghdr *h,uint32_
         if (!error) error=number(&b[NFTA_SET_ELEM_FLAGS],&flags,0);
         if (!error) error=nested(&b[NFTA_SET_ELEM_KEY],BIT(NFTA_DATA_VALUE),key,NFTA_DATA_MAX+1);
         if (error) return error;
-        if (flags) return -EOPNOTSUPP;
+        if (flags&~NFT_SET_ELEM_INTERVAL_END) return -EOPNOTSUPP;
+        if (flags && !(s->flags&NFT_SET_INTERVAL)) return -EINVAL;
         if (!key[NFTA_DATA_VALUE].data || key[NFTA_DATA_VALUE].flags || key[NFTA_DATA_VALUE].size!=s->key_size) return -EINVAL;
-        struct md_filter_element element={0};
+        struct md_filter_element element={.end=!!flags};
         memcpy(element.key,key[NFTA_DATA_VALUE].data,s->key_size);
-        if (operation!=NFT_MSG_DELSETELEM && (s->flags&NFT_SET_MAP)) {
+        if (operation!=NFT_MSG_DELSETELEM && (s->flags&NFT_SET_MAP) && !element.end) {
             error=md_nft_verdict(f,s->table,&b[NFTA_SET_ELEM_DATA],&element.verdict);
             if (error) return error;
         } else if (b[NFTA_SET_ELEM_DATA].data) return -EINVAL;
-        size_t index=0;
-        while (index<s->count && memcmp(key[NFTA_DATA_VALUE].data,s->elements[index].key,s->key_size)) ++index;
+        size_t index=md_filter_set_position(s,element.key,element.end);
+        int found=index<s->count && s->elements[index].end==element.end
+            && !memcmp(element.key,s->elements[index].key,s->key_size);
         if (operation==NFT_MSG_DELSETELEM) {
-            if (index==s->count) return -ENOENT;
+            if (!found) return -ENOENT;
             memmove(s->elements+index,s->elements+index+1,(s->count-index-1)*sizeof(*s->elements)); --s->count;
-        } else if (index<s->count) {
+        } else if (found) {
             if (h->nlmsg_flags&NLM_F_EXCL) return -EEXIST;
             s->elements[index]=element;
         } else {
             error=md_filter_reserve((void **)&s->elements,&s->capacity,s->count+1,sizeof(*s->elements),1024);
             if (error) return error;
-            s->elements[s->count++]=element;
+            memmove(s->elements+index+1,s->elements+index,(s->count-index)*sizeof(*s->elements));
+            s->elements[index]=element; ++s->count;
         }
     }
     return result;

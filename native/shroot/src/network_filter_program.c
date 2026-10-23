@@ -3,6 +3,8 @@
 #include <linux/netfilter.h>
 #include <linux/netfilter/nf_tables.h>
 #include <linux/rtnetlink.h>
+#include <linux/netfilter/xt_rpfilter.h>
+#include <linux/if_packet.h>
 #include <netinet/in.h>
 #include <string.h>
 
@@ -41,16 +43,25 @@ static int validate_chain(const struct md_network_filter *f,size_t chain,unsigne
     state[chain]=2; return 0;
 }
 int md_filter_validate(const struct md_network_filter *f) {
+    for (size_t i=0;i<f->set_count;++i) {
+        const struct md_filter_set *s=&f->sets[i];
+        for (size_t j=1;j<s->count;++j) {
+            int order=memcmp(s->elements[j-1].key,s->elements[j].key,s->key_size);
+            if (order>0 || (!order && s->elements[j-1].end<=s->elements[j].end)) return -EINVAL;
+            if ((s->flags&NFT_SET_INTERVAL) && s->elements[j-1].end==s->elements[j].end) return -EEXIST;
+        }
+    }
     unsigned char state[256]={0};
     unsigned char height[256]={0};
     unsigned contexts[256]={0};
     for (size_t i=0;i<f->chain_count;++i) {
         int error=validate_chain(f,i,state,height,0);
         if (error) return error;
-        if (f->chains[i].hook>=0) contexts[i]=f->chains[i].nat ? 1U<<f->chains[i].hook : 1U<<NF_INET_NUMHOOKS;
+        if (f->chains[i].hook>=0) contexts[i]=1U<<(f->chains[i].hook
+            +(f->chains[i].nat ? 0 : NF_INET_NUMHOOKS));
     }
-    /* A regular chain inherits every hook from which it is reachable. Validate
-     * NAT there too, so a jump cannot admit NAT in a filter/incorrect hook. */
+    /* Low bits describe NAT hooks, high bits filter hooks. Regular chains
+     * inherit every calling context, including jumps through verdict maps. */
     for (unsigned changed=1;changed;) {
         changed=0;
         for (size_t i=0;i<f->rule_count;++i) {
@@ -79,6 +90,14 @@ int md_filter_validate(const struct md_network_filter *f) {
             else if (e->code==MD_FILTER_NAT) allowed=e->operation==NFT_NAT_DNAT
                 ? (1U<<NF_INET_PRE_ROUTING)|(1U<<NF_INET_LOCAL_OUT)
                 : (1U<<NF_INET_POST_ROUTING)|(1U<<NF_INET_LOCAL_IN);
+            else if (e->code==MD_FILTER_FIB) {
+                if (e->key!=NFT_FIB_RESULT_ADDRTYPE || (e->operation&NFTA_FIB_F_IIF))
+                    allowed=(1U<<NF_INET_PRE_ROUTING)|(1U<<NF_INET_LOCAL_IN)|(1U<<NF_INET_FORWARD);
+                else if (e->operation&NFTA_FIB_F_OIF)
+                    allowed=(1U<<NF_INET_LOCAL_OUT)|(1U<<NF_INET_POST_ROUTING)|(1U<<NF_INET_FORWARD);
+                else continue;
+                allowed|=allowed<<NF_INET_NUMHOOKS;
+            }
             else continue;
             if (context&~allowed) return -EOPNOTSUPP;
         }
@@ -93,6 +112,19 @@ static int account_counter(struct md_filter_packet *p,struct md_filter_counter *
     if (!error) a->cells[a->count++]=counter;
     return error;
 }
+static int reverse_path(const struct md_filter_packet *p,unsigned flags) {
+    if (!p->input) return 0;
+    if (p->input==1) return 1;
+    if (md_ip_unspecified(p->source) && (p->source.family==AF_INET6
+            || p->packet_type==PACKET_BROADCAST || p->packet_type==PACKET_MULTICAST)) return 1;
+    if (!p->route) return 0;
+    unsigned query=NFTA_FIB_F_SADDR;
+    if (!(flags&XT_RPFILTER_LOOSE)) query|=NFTA_FIB_F_IIF;
+    if (flags&XT_RPFILTER_VALID_MARK) query|=NFTA_FIB_F_MARK;
+    struct md_filter_route_result route=p->route(p->route_context,p,query);
+    if (route.type!=RTN_UNICAST && !(route.type==RTN_LOCAL && (flags&XT_RPFILTER_ACCEPT_LOCAL))) return 0;
+    return !!route.interface;
+}
 static int evaluate_chain(struct md_network_filter *f,const struct md_filter_chain *c,
         struct md_filter_packet *p,unsigned depth) {
     if (depth>16) return -ELOOP;
@@ -106,6 +138,13 @@ static int evaluate_chain(struct md_network_filter *f,const struct md_filter_cha
             unsigned char *src=registers+e->src,*dst=registers+e->dst;
             uint32_t value=0;
             switch (e->code) {
+            case MD_FILTER_ICMP_MATCH: {
+                int matches=(e->key==IPPROTO_ICMP && e->value[0]==255)
+                    || (p->transport[0]==e->value[0] && p->transport[1]>=e->value[1]
+                        && p->transport[1]<=e->value[2]);
+                match=p->protocol==e->key && p->transport_size>=2 && (matches!=!!e->value[3]);
+                break;
+            }
             case MD_FILTER_TRANSPORT: {
                 const struct md_filter_transport *t=&e->transport;
                 match=p->protocol==t->protocol
@@ -145,7 +184,12 @@ static int evaluate_chain(struct md_network_filter *f,const struct md_filter_cha
                         header[0]=0x45; header[9]=(unsigned char)p->protocol;
                         memcpy(header+12,p->source.bytes,4); memcpy(header+16,p->destination.bytes,4);
                     }
-                } else { memcpy(header,&p->source_port,2); memcpy(header+2,&p->destination_port,2); }
+                } else if (p->protocol==IPPROTO_TCP || p->protocol==IPPROTO_UDP) {
+                    memcpy(header,&p->source_port,2); memcpy(header+2,&p->destination_port,2);
+                } else {
+                    if (e->aux+e->size>p->transport_size) { match=0; break; }
+                    memcpy(header,p->transport,p->transport_size);
+                }
                 if (e->aux+e->size>(e->key==NFT_PAYLOAD_NETWORK_HEADER
                         ? (p->destination.family==AF_INET6 ? 40U : 20U) : 4U)) { match=0; break; }
                 memset(dst,0,(e->size+3)&~3U); memcpy(dst,header+e->aux,e->size); break;
@@ -154,6 +198,7 @@ static int evaluate_chain(struct md_network_filter *f,const struct md_filter_cha
                 switch (e->key) {
                 case NFT_META_NFPROTO: value=p->destination.family==AF_INET6 ? NFPROTO_IPV6 : NFPROTO_IPV4; break;
                 case NFT_META_L4PROTO: value=p->protocol; break;
+                case NFT_META_PKTTYPE: value=p->packet_type; break;
                 case NFT_META_MARK: value=p->mark; break;
                 case NFT_META_IIF: value=p->input; break;
                 case NFT_META_OIF: value=p->output; break;
@@ -178,18 +223,27 @@ static int evaluate_chain(struct md_network_filter *f,const struct md_filter_cha
                 memcpy(&p->ctmark,src,4); break;
             case MD_FILTER_STATE_MATCH: match=!!(p->state&e->key)!=!!e->operation; break;
             case MD_FILTER_MARK_MATCH: match=((p->mark&e->aux)==e->key)!=!!e->operation; break;
+            case MD_FILTER_PACKET_TYPE: match=(p->packet_type==e->key)!=!!e->operation; break;
+            case MD_FILTER_REVERSE_PATH:
+                match=reverse_path(p,e->key)!=!!(e->key&XT_RPFILTER_INVERT); break;
             case MD_FILTER_ADDRESS_TYPE:
                 match=(!e->key || (!!(e->key&(1U<<p->source_fib_type))!=!!(e->operation&MD_FILTER_INVERT_SOURCE)))
                     && (!e->aux || (!!(e->aux&(1U<<p->fib_type))!=!!(e->operation&MD_FILTER_INVERT_DESTINATION)));
                 break;
-            case MD_FILTER_FIB:
-                value=e->operation==NFTA_FIB_F_SADDR ? p->source_fib_type : p->fib_type;
+            case MD_FILTER_FIB: {
+                struct md_filter_route_result route={.type=e->operation&NFTA_FIB_F_SADDR ? p->source_fib_type : p->fib_type};
+                if (p->route) route=p->route(p->route_context,p,e->operation);
+                memset(dst,0,e->size);
+                if (e->key==NFT_FIB_RESULT_ADDRTYPE) value=route.type;
+                else if (e->operation&NFTA_FIB_F_PRESENT) value=!!route.interface;
+                else if (e->key==NFT_FIB_RESULT_OIFNAME) { memcpy(dst,route.name,16); break; }
+                else value=route.interface;
                 memcpy(dst,&value,4); break;
+            }
             case MD_FILTER_LOOKUP: {
                 struct md_filter_set *s=md_filter_set_find(f,c->table,NULL,e->target,0);
-                int found=0;
                 if (!s) return -ENOENT;
-                for (size_t k=0;k<s->count;++k) if (!memcmp(src,s->elements[k].key,s->key_size)) { found=1; break; }
+                int found=md_filter_set_lookup(s,src)!=NULL;
                 match=e->operation ? !found : found; break;
             }
             case MD_FILTER_NAT:
@@ -213,10 +267,9 @@ static int evaluate_chain(struct md_network_filter *f,const struct md_filter_cha
                 if (e->code==MD_FILTER_VERDICT_MAP) {
                     struct md_filter_set *s=md_filter_set_find(f,c->table,NULL,e->target,0);
                     if (!s) return -ENOENT;
-                    size_t k=0;
-                    while (k<s->count && memcmp(src,s->elements[k].key,s->key_size)) ++k;
-                    if (k==s->count) { match=0; break; }
-                    v=s->elements[k].verdict;
+                    const struct md_filter_element *element=md_filter_set_lookup(s,src);
+                    if (!element) { match=0; break; }
+                    v=element->verdict;
                 }
                 if ((int)v.operation==NFT_JUMP || (int)v.operation==NFT_GOTO) {
                     struct md_filter_chain *target=md_filter_chain_find(f,c->table,NULL,v.target,0);

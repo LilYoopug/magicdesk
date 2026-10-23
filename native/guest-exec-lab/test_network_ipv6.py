@@ -45,9 +45,33 @@ def router_discovery():
             allow(router, 133)
             client.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_TCLASS, 192)
             assert client.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_TCLASS) == 192
-            client.sendmsg([struct.pack('!BBHI', 133, 0, 0, 0)], [], 0, ('ff02::2', 0))
+            client.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 23)
+            solicitation = struct.pack('!BBHI', 133, 0, 0, 0)
+            for kind, value, expected in (
+                    (socket.IPV6_HOPLIMIT, struct.pack('=i', 256), errno.EINVAL),
+                    (socket.IPV6_HOPLIMIT, struct.pack('=i', -2), errno.EINVAL),
+                    (socket.IPV6_TCLASS, b'\x01', errno.EINVAL),
+                    (socket.IPV6_PKTINFO, b'\x00' * 19, errno.EINVAL),
+                    (socket.IPV6_PKTINFO, socket.inet_pton(socket.AF_INET6, links[1][1])
+                     + struct.pack('=I', links[0][0]), errno.EADDRNOTAVAIL),
+                    (socket.IPV6_PKTINFO, b'\x00' * 16 + struct.pack('=I', links[1][0]), errno.EINVAL)):
+                try:
+                    client.sendmsg([solicitation], [(socket.IPPROTO_IPV6, kind, value)], 0, ('ff02::2', 0))
+                except OSError as error:
+                    assert error.errno == expected, (kind, error)
+                else:
+                    raise AssertionError(('invalid ancillary accepted', kind, value))
+            client.sendmsg([solicitation], [
+                (socket.IPPROTO_IPV6, socket.IPV6_PKTINFO,
+                 socket.inet_pton(socket.AF_INET6, links[0][1]) + struct.pack('=I', links[0][0])),
+                (socket.IPPROTO_IPV6, socket.IPV6_HOPLIMIT, struct.pack('=i', 255)),
+                (socket.IPPROTO_IPV6, socket.IPV6_TCLASS, struct.pack('=i', 160)),
+            ], 0, ('ff02::2', 0))
             packet = capture.recv(256)
-            assert len(packet) == 48 and (struct.unpack('!I', packet[:4])[0] >> 20) & 255 == 192, packet
+            assert len(packet) == 48 and (struct.unpack('!I', packet[:4])[0] >> 20) & 255 == 160, packet
+            assert client.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS) == 23
+            assert client.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_TCLASS) == 192
+            client.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 255)
             client.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_TCLASS, -1)
             assert client.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_TCLASS) == 0
             data, control, flags, source = router.recvmsg(64, 256)
@@ -63,6 +87,38 @@ def router_discovery():
             received = client.recvmsg(64, 256)
             assert peek == received and received[0][0] == 134 and len(received[0]) == 16, received
             assert received[3][0] == links[1][1] and received[3][3] == links[0][0], received
+            for hook, device in (('input', 'iifname mdrd1'), ('output', 'oifname mdrd0')):
+                command('nft', '-f', '-', data=f'''
+table ip6 md_icmp_policy {{
+    chain check {{ type filter hook {hook} priority 0; policy accept;
+        {device} ip6 saddr {{ fe80::/64, fd42::/64 }} icmpv6 type nd-router-solicit counter drop
+    }}
+}}
+''')
+                try:
+                    if hook == 'output':
+                        try:
+                            client.sendto(solicitation, ('ff02::2', 0))
+                        except OSError as error:
+                            assert error.errno == errno.EACCES, error
+                        else:
+                            raise AssertionError('output firewall accepted ICMPv6')
+                    else:
+                        client.sendto(solicitation, ('ff02::2', 0))
+                    router.settimeout(0.1)
+                    try:
+                        router.recv(64)
+                    except socket.timeout:
+                        pass
+                    else:
+                        raise AssertionError('firewall delivered blocked ICMPv6')
+                    rules = command('nft', 'list', 'table', 'ip6', 'md_icmp_policy')
+                    assert 'counter packets 1 bytes 8' in rules, rules
+                finally:
+                    router.settimeout(5)
+                    command('nft', 'delete', 'table', 'ip6', 'md_icmp_policy')
+                client.sendto(solicitation, ('ff02::2', 0))
+                assert router.recv(64)[0] == 133
             allow(client, 129)
             client.sendto(struct.pack('!BBHHH', 128, 0, 0, 123, 1) + b'echo',
                           (links[1][1], 0, 0, links[0][0]))
@@ -76,7 +132,40 @@ def router_discovery():
             assert data[0] == 136 and data[8:24] == target and data[4] & 0x40, data
     finally:
         command('ip', 'link', 'del', 'mdrd0')
-    print('PASS ICMPv6: RS/RA, interface-scoped multicast, hop limit, timestamps, echo and neighbor discovery', flush=True)
+    print('PASS ICMPv6: RS/RA, interface-scoped multicast, hop limit, timestamps, echo, neighbor discovery and live firewall with IPv6 interval sets', flush=True)
+
+
+def raw_udp():
+    with socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_UDP) as raw, \
+            socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as server, \
+            socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as client:
+        for stream in (raw, server, client):
+            stream.settimeout(5)
+        raw.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'lo\0')
+        assert raw.getsockopt(socket.IPPROTO_IPV6, 7) == -1  # IPV6_CHECKSUM
+        try:
+            raw.setsockopt(socket.IPPROTO_IPV6, 7, 5)
+        except OSError as error:
+            assert error.errno == errno.EINVAL, error
+        else:
+            raise AssertionError('odd raw checksum offset accepted')
+        raw.setsockopt(socket.IPPROTO_IPV6, 7, 6)
+        assert raw.getsockopt(socket.IPPROTO_IPV6, 7) == 6
+        server.bind(('::1', 0))
+        client.bind(('::1', 0))
+        src, dst = client.getsockname()[1], server.getsockname()[1]
+        packet = struct.pack('!HHHH', src, dst, 12, 0) + b'raw6'
+        assert raw.sendto(packet, ('::1', 0)) == len(packet)
+        data, peer = server.recvfrom(128)
+        assert data == b'raw6' and peer[0:2] == ('::1', src), (data, peer)
+        outgoing, _ = raw.recvfrom(128)
+        assert outgoing[:6] == packet[:6] and outgoing[8:] == b'raw6' and outgoing[6:8] != b'\0\0', outgoing
+        server.sendto(b'answer', peer)
+        assert client.recv(128) == b'answer'
+        incoming, peer = raw.recvfrom(128)
+        assert struct.unpack('!HHH', incoming[:6]) == (dst, src, 14) and incoming[8:] == b'answer', incoming
+        assert peer[0] == '::1', peer
+    print('PASS raw UDPv6: checksum option, raw/native delivery, retained reply and ordinary UDP peer', flush=True)
 
 
 def udp_reconnect():
@@ -126,6 +215,7 @@ def command(*argv, data=None):
 
 def guest():
     router_discovery()
+    raw_udp()
     udp_reconnect()
     addresses = json.loads(command('ip', '-j', '-6', 'address'))
     assert any(a['local'] == '::1' for link in addresses for a in link['addr_info'])

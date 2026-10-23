@@ -5,6 +5,7 @@
 #include "network_nft_objects.h"
 #include "network_flow.h"
 #include "network_internal.h"
+#include "network_profile.h"
 #include "guest_identity.h"
 #include <assert.h>
 #include <errno.h>
@@ -18,6 +19,9 @@
 #include <linux/netfilter/xt_conntrack.h>
 #include <linux/netfilter/xt_mark.h>
 #include <linux/netfilter/xt_addrtype.h>
+#include <linux/netfilter/xt_pkttype.h>
+#include <linux/netfilter/xt_rpfilter.h>
+#include <linux/if_packet.h>
 #include <linux/rtnetlink.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -142,6 +146,61 @@ static void nat_hook_order(void) {
     }
     n->filter=NULL; md_network_namespace_release(n);
     puts("PASS retained NAT hook order: raw wire tuple, reverse translation, post-NAT filter, TCP/UDP and policy changes before first payload");
+}
+static void native_fib_publication(void) {
+    for (unsigned v6=0;v6<2;++v6) {
+        struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
+        assert(n);
+        uint32_t enabled[2]={1};
+        assert(!md_network_parameter_write(n,v6 ? MD_NET_IPV6_FORWARD : MD_NET_IPV4_FORWARD,
+            MD_NET_SCOPE_ALL,enabled));
+        struct md_filter_chain chains[]={
+            {.table=1,.handle=2,.hook=NF_INET_PRE_ROUTING,.priority=-200,.policy=NF_DROP},
+            {.table=1,.handle=3,.hook=NF_INET_PRE_ROUTING,.priority=-100,.nat=1,.policy=NF_ACCEPT},
+            {.table=1,.handle=4,.hook=NF_INET_PRE_ROUTING,.priority=0,.policy=NF_DROP}};
+        struct md_filter_rule rules[5]={{.chain=2,.count=2},{.chain=2,.count=3},
+            {.chain=3,.count=1},{.chain=4,.count=2},{.chain=4,.count=3}};
+        for (unsigned i=0;i<4;i+=3) {
+            rules[i].expressions[0]=(struct md_filter_expression){.code=MD_FILTER_STATE_MATCH,.key=2};
+            rules[i].expressions[1]=(struct md_filter_expression){.code=MD_FILTER_VERDICT,.operation=NF_ACCEPT};
+        }
+        for (unsigned i=1;i<5;i+=3) {
+            rules[i].expressions[0]=(struct md_filter_expression){.code=MD_FILTER_FIB,
+                .key=NFT_FIB_RESULT_ADDRTYPE,.operation=NFTA_FIB_F_DADDR,.size=4};
+            rules[i].expressions[1]=(struct md_filter_expression){.code=MD_FILTER_COMPARE,
+                .operation=NFT_CMP_EQ,.size=4,.value={i==4 ? RTN_UNICAST : RTN_LOCAL}};
+            rules[i].expressions[2]=(struct md_filter_expression){.code=MD_FILTER_VERDICT,.operation=NF_ACCEPT};
+        }
+        struct md_ip_address source,host,target;
+        assert(!md_network_profile_ip(v6 ? "2001:db8::2" : "192.0.2.2",&source));
+        assert(!md_network_profile_ip(v6 ? "2001:db8::1" : "192.0.2.1",&host));
+        assert(!md_network_profile_ip(v6 ? "2001:db8:2::1" : "198.51.100.1",&target));
+        rules[2].expressions[0]=(struct md_filter_expression){.code=MD_FILTER_NAT,
+            .operation=NFT_NAT_DNAT,.constant=1,.key=1,.aux=1,.nat_port=htons(8080)};
+        memcpy(rules[2].expressions[0].value,target.bytes,md_ip_size(target));
+        struct md_network_filter_table table={.handle=1,.family=NFPROTO_INET};
+        struct md_network_filter f={.tables=&table,.count=1,.chains=chains,.chain_count=3,.rules=rules,.rule_count=5};
+        assert(!md_filter_validate(&f));
+        n->filter=&f;
+        struct md_filter_packet original={.source=source,.destination=host,.source_port=htons(32000),
+            .destination_port=htons(18080),.protocol=IPPROTO_TCP,.state=8},p=original;
+        struct md_network_flow_path path;
+        assert(!md_network_flow_route(n,&p,1,0,&path) && p.dnat && md_ip_equal(p.destination,target));
+        assert(!md_network_flow_check(n->fabric,&path,0));
+        assert(!md_network_flow_check(n->fabric,&path,1));
+        p=original;
+        assert(md_network_flow_route(n,&p,1,2,&path)==-EACCES);
+        /* Port-only DNAT retains the native address, not a route to the uplink. */
+        rules[2].expressions[0].key=0;
+        rules[4].expressions[1].value[0]=RTN_LOCAL;
+        p=original;
+        assert(!md_network_flow_route(n,&p,1,0,&path) && p.dnat && path.destination==n->inode
+            && md_ip_equal(p.destination,host) && p.destination_port==htons(8080));
+        assert(!md_network_flow_check(n->fabric,&path,0));
+        assert(!md_network_flow_check(n->fabric,&path,1));
+        n->filter=NULL; md_network_namespace_release(n);
+    }
+    puts("PASS native FIB publication: IPv4/IPv6 local ownership, DNAT stages, port-only redirect, raw isolation and retained replies");
 }
 static void native_nat_update(void) {
     struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
@@ -280,14 +339,48 @@ static void program(void) {
     assert(md_filter_evaluate(&f,NF_INET_PRE_ROUTING,&packet)==-EACCES);
     puts("PASS nft program: transitive hook validation, cycle rejection, source-dependent finite publication and real tuple evaluation");
 }
+static void fib_hook_validation(void) {
+    struct md_network_filter_table table={.handle=1,.family=NFPROTO_INET};
+    struct md_filter_chain chains[]={
+        {.table=1,.handle=2,.hook=NF_INET_PRE_ROUTING,.policy=NF_ACCEPT},
+        {.table=1,.handle=3,.hook=-1},
+        {.table=1,.handle=4,.hook=NF_INET_LOCAL_OUT,.policy=NF_ACCEPT}};
+    struct md_filter_rule rules[]={
+        {.chain=2,.count=1,.expressions={{.code=MD_FILTER_VERDICT,.operation=NFT_JUMP,.target=3}}},
+        {.chain=3,.count=1,.expressions={{.code=MD_FILTER_FIB,.key=NFT_FIB_RESULT_OIF,.size=4}}},
+        {.chain=4,.count=1,.expressions={{.code=MD_FILTER_VERDICT,.operation=NFT_GOTO,.target=3}}}};
+    struct md_network_filter f={.tables=&table,.count=1,.chains=chains,.chain_count=3,
+        .rules=rules,.rule_count=2};
+    struct md_filter_expression *e=&rules[1].expressions[0];
+    const unsigned results[]={NFT_FIB_RESULT_OIF,NFT_FIB_RESULT_OIFNAME,NFT_FIB_RESULT_ADDRTYPE};
+    const unsigned devices[]={0,NFTA_FIB_F_IIF,NFTA_FIB_F_OIF};
+    for (unsigned i=0;i<3;++i) for (unsigned j=0;j<3;++j) {
+        if (i<2 && j==2) continue;
+        e->key=results[i]; e->operation=NFTA_FIB_F_SADDR|devices[j];
+        for (unsigned nat=0;nat<2;++nat) for (unsigned hook=0;hook<NF_INET_NUMHOOKS;++hook) {
+            chains[0].nat=nat; chains[0].hook=hook;
+            int valid=i<2 || j==1 ? hook==NF_INET_PRE_ROUTING || hook==NF_INET_LOCAL_IN || hook==NF_INET_FORWARD
+                : j==2 ? hook==NF_INET_LOCAL_OUT || hook==NF_INET_POST_ROUTING || hook==NF_INET_FORWARD : 1;
+            assert(md_filter_validate(&f)==(valid ? 0 : -EOPNOTSUPP));
+        }
+    }
+    chains[0].hook=NF_INET_PRE_ROUTING; chains[0].nat=0;
+    e->key=NFT_FIB_RESULT_OIF; e->operation=NFTA_FIB_F_SADDR|NFTA_FIB_F_IIF;
+    assert(!md_filter_validate(&f));
+    f.rule_count=3;
+    assert(md_filter_validate(&f)==-EOPNOTSUPP);
+    rules[2].count=0;
+    assert(!md_filter_validate(&f));
+    puts("PASS nft fib hook validation: all hooks, filter/NAT, inherited jump/goto and shared-chain rejection");
+}
 static void verdict_maps(void) {
     struct md_network_filter_table table={.handle=1,.family=NFPROTO_IPV4};
     struct md_filter_chain chains[2]={
         {.table=1,.handle=2,.hook=NF_INET_LOCAL_IN,.policy=NF_ACCEPT},
         {.table=1,.handle=3,.hook=-1}};
     struct md_filter_element elements[2]={
-        {.key="lo",.verdict={NFT_JUMP,3}},
-        {.key="eth0",.verdict={NF_DROP,0}}};
+        {.key="eth0",.verdict={NF_DROP,0}},
+        {.key="lo",.verdict={NFT_JUMP,3}}};
     struct md_filter_set set={.table=1,.handle=4,.flags=NFT_SET_MAP,.key_size=16,.data_type=NFT_DATA_VERDICT,
         .elements=elements,.count=2};
     struct md_filter_rule rules[2]={
@@ -313,6 +406,69 @@ static void verdict_maps(void) {
     assert(md_filter_validate(&f)==-EOPNOTSUPP);
     free(accounting.cells);
     puts("PASS verdict maps: return, denial, miss, cycle and transitive NAT rejection; explicit counter accounting");
+}
+static void interval_sets(void) {
+    struct md_network_filter *f=md_network_filter_copy(NULL); assert(f);
+    assert(!md_network_filter_add(f,NFPROTO_IPV6,"intervals",NULL,0));
+    struct packet request,reply;
+    struct md_network_message o={.data=request.data,.capacity=sizeof(request.data)};
+    struct md_network_message out={.data=reply.data,.capacity=sizeof(reply.data)};
+    add(&o,(NFNL_SUBSYS_NFTABLES<<8)|NFT_MSG_NEWSET,NLM_F_CREATE,NFPROTO_IPV6);
+    assert(!md_network_message_attribute(&o,NFTA_SET_TABLE,"intervals",10));
+    assert(!md_network_message_attribute(&o,NFTA_SET_NAME,"prefixes",9));
+    uint32_t flags=htonl(NFT_SET_INTERVAL),type=htonl(8),length=htonl(16);
+    assert(!md_network_message_attribute(&o,NFTA_SET_FLAGS,&flags,4));
+    assert(!md_network_message_attribute(&o,NFTA_SET_KEY_TYPE,&type,4));
+    assert(!md_network_message_attribute(&o,NFTA_SET_KEY_LEN,&length,4));
+    assert(!md_nft_objects(f,o.message,43,&out) && f->set_count==1);
+    struct md_filter_set *s=&f->sets[0];
+    /* Out-of-order insertion, two adjacent ranges, an initial end sentinel,
+     * and a final range extending through the largest IPv6 address. */
+    const unsigned values[]={0x40,0x20,0,0x30,0x20,0x10};
+    const unsigned ends[]={0,0,1,1,1,0};
+    for (unsigned i=0;i<6;++i) {
+        o.size=out.size=0;
+        add(&o,(NFNL_SUBSYS_NFTABLES<<8)|NFT_MSG_NEWSETELEM,NLM_F_CREATE|NLM_F_EXCL,NFPROTO_IPV6);
+        assert(!md_network_message_attribute(&o,NFTA_SET_ELEM_LIST_TABLE,"intervals",10));
+        assert(!md_network_message_attribute(&o,NFTA_SET_ELEM_LIST_SET,"prefixes",9));
+        size_t list,item,key;
+        assert(!md_network_message_nest(&o,NFTA_SET_ELEM_LIST_ELEMENTS,&list));
+        assert(!md_network_message_nest(&o,NFTA_LIST_ELEM,&item));
+        assert(!md_network_message_nest(&o,NFTA_SET_ELEM_KEY,&key));
+        unsigned char address[16]={(unsigned char)values[i]};
+        assert(!md_network_message_attribute(&o,NFTA_DATA_VALUE,address,16));
+        assert(!md_network_message_end_nest(&o,key));
+        flags=htonl(ends[i] ? NFT_SET_ELEM_INTERVAL_END : 0);
+        assert(!md_network_message_attribute(&o,NFTA_SET_ELEM_FLAGS,&flags,4));
+        assert(!md_network_message_end_nest(&o,item));
+        assert(!md_network_message_end_nest(&o,list));
+        assert(!md_nft_objects(f,o.message,43,&out));
+        assert(md_nft_objects(f,o.message,43,&out)==-EEXIST);
+    }
+    assert(!md_filter_validate(f) && s->count==6);
+    for (unsigned value=0;value<256;++value) {
+        unsigned char key[16]={(unsigned char)value};
+        int expected=(value>=0x10 && value<0x30) || value>=0x40;
+        assert(!!md_filter_set_lookup(s,key)==expected);
+        memset(key+1,255,15);
+        assert(!!md_filter_set_lookup(s,key)==expected);
+    }
+    s->elements[4].end=0;
+    assert(md_filter_validate(f)==-EEXIST); s->elements[4].end=1;
+    o.size=out.size=0;
+    add(&o,(NFNL_SUBSYS_NFTABLES<<8)|NFT_MSG_GETSETELEM,NLM_F_DUMP,NFPROTO_IPV6);
+    assert(!md_network_message_attribute(&o,NFTA_SET_ELEM_LIST_TABLE,"intervals",10));
+    assert(!md_network_message_attribute(&o,NFTA_SET_ELEM_LIST_SET,"prefixes",9));
+    assert(!md_nft_objects(f,o.message,43,&out));
+    struct nlmsghdr *dump=(void *)out.data;
+    dump->nlmsg_type=(NFNL_SUBSYS_NFTABLES<<8)|NFT_MSG_NEWSETELEM; dump->nlmsg_flags=NLM_F_CREATE;
+    s->count=0;
+    o.size=0; assert(!md_nft_objects(f,dump,43,&o));
+    assert(s->count==6 && !md_filter_validate(f));
+    unsigned char boundary[16]={0x20};
+    assert(md_filter_set_lookup(s,boundary)==s->elements+3);
+    md_network_filter_free(f);
+    puts("PASS nft interval sets: sorted insertion, boundaries, adjacent ranges, sentinel, IPv6 maximum, overlap rejection and dump roundtrip");
 }
 static void policy_counters(void) {
     struct md_filter_chain chains[2]={
@@ -703,7 +859,106 @@ static void compat_revisions(void) {
     md_identity_release(&root); md_network_namespace_release(n);
     puts("PASS xt revision negotiation: absent extension differs from unsupported revision");
 }
+static void packet_route_matches(void) {
+    struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
+    assert(n);
+    unsigned other;
+    assert(!md_network_interface_add(n,MD_LINK_BRIDGE,"reverse-test",&other));
+    struct md_network_filter_table table={.handle=1,.family=NFPROTO_IPV4};
+    struct md_filter_chain chain={.table=1,.handle=2,.hook=NF_INET_PRE_ROUTING,.policy=NF_DROP};
+    struct md_filter_rule rule={.chain=2};
+    struct md_network_filter f={.tables=&table,.count=1,.chains=&chain,.chain_count=1,.rules=&rule,.rule_count=1};
+    n->filter=&f;
+    for (unsigned kind=0;kind<2;++kind) for (unsigned flags=0;flags<(kind ? 16U : 2U);++flags) {
+        const char *name=kind ? "rpfilter" : "pkttype";
+        assert(md_nft_compat_supported(NFPROTO_IPV4,name,0,0));
+        struct packet packet;
+        struct md_network_message o={.data=packet.data,.capacity=sizeof(packet.data)};
+        add(&o,(NFNL_SUBSYS_NFTABLES<<8)|NFT_MSG_NEWRULE,0,NFPROTO_IPV4);
+        size_t start=o.size,entry,data;
+        assert(!md_network_message_nest(&o,NFTA_LIST_ELEM,&entry));
+        assert(!md_network_message_attribute(&o,NFTA_EXPR_NAME,"match",6));
+        assert(!md_network_message_nest(&o,NFTA_EXPR_DATA,&data));
+        assert(!md_network_message_attribute(&o,NFTA_MATCH_NAME,name,strlen(name)+1));
+        uint32_t revision=0;
+        assert(!md_network_message_attribute(&o,NFTA_MATCH_REV,&revision,4));
+        unsigned char info[8]={0};
+        if (kind) info[0]=flags;
+        else { struct xt_pkttype_info type={.pkttype=PACKET_HOST,.invert=(int)flags}; memcpy(info,&type,sizeof(type)); }
+        assert(!md_network_message_attribute(&o,NFTA_MATCH_INFO,info,sizeof(info)));
+        assert(!md_network_message_end_nest(&o,data));
+        assert(!md_network_message_end_nest(&o,entry));
+        rule=(struct md_filter_rule){.chain=2};
+        assert(!md_nft_expressions(&f,1,&rule,o.data+start,o.size-start));
+        rule.expressions[rule.count++]=(struct md_filter_expression){.code=MD_FILTER_VERDICT,.operation=NF_ACCEPT};
+        for (unsigned wrong=0;wrong<2;++wrong) {
+            struct md_filter_packet p={.source=md_ip_v4(htonl(0xc0000201)),.destination=md_ip_loopback(AF_INET),
+                .protocol=IPPROTO_UDP,.state=8,.packet_type=wrong ? PACKET_MULTICAST : PACKET_HOST};
+            struct md_network_flow_path path;
+            int allowed=kind ? ((!wrong || (flags&XT_RPFILTER_LOOSE))!=!!(flags&XT_RPFILTER_INVERT))
+                : ((!wrong)!=!!flags);
+            assert(md_network_flow_route(n,&p,1,wrong ? other : 2,&path)==(allowed ? 0 : -EACCES));
+        }
+        free(rule.wire);
+    }
+    rule=(struct md_filter_rule){.chain=2,.count=3,.expressions={
+        {.code=MD_FILTER_FIB,.key=NFT_FIB_RESULT_OIF,.operation=NFTA_FIB_F_SADDR|NFTA_FIB_F_IIF|NFTA_FIB_F_PRESENT,.size=4},
+        {.code=MD_FILTER_COMPARE,.operation=NFT_CMP_EQ,.size=4,.value={1}},
+        {.code=MD_FILTER_VERDICT,.operation=NF_ACCEPT}}};
+    for (unsigned wrong=0;wrong<2;++wrong) {
+        struct md_filter_packet p={.source=md_ip_v4(htonl(0xc0000201)),.destination=md_ip_loopback(AF_INET),.protocol=IPPROTO_UDP,.state=8};
+        struct md_network_flow_path path;
+        assert(md_network_flow_route(n,&p,1,wrong ? other : 2,&path)==(wrong ? -EACCES : 0));
+    }
+    n->filter=NULL; md_network_namespace_release(n);
+    puts("PASS packet type and reverse-path predicates: wire parsing, inversion, loose/strict routing and nft fib presence");
+}
+static void compat_icmp(void) {
+    for (unsigned ipv6=0;ipv6<2;++ipv6) for (unsigned invert=0;invert<2;++invert)
+        for (unsigned wildcard=0;wildcard<2;++wildcard) {
+        unsigned family=ipv6 ? NFPROTO_IPV6 : NFPROTO_IPV4,protocol=ipv6 ? IPPROTO_ICMPV6 : IPPROTO_ICMP;
+        const char *name=ipv6 ? "icmp6" : "icmp";
+        assert(md_nft_compat_supported(family,name,0,0));
+        assert(!md_nft_compat_supported(ipv6 ? NFPROTO_IPV4 : NFPROTO_IPV6,name,0,0));
+        struct md_network_filter_table table={.handle=1,.family=family};
+        struct md_filter_chain chain={.table=1,.handle=2,.hook=NF_INET_LOCAL_IN,.policy=NF_DROP};
+        struct md_filter_rule rule={.chain=2};
+        struct md_network_filter f={.tables=&table,.count=1,.chains=&chain,.chain_count=1,.rules=&rule,.rule_count=1};
+        struct packet packet;
+        struct md_network_message o={.data=packet.data,.capacity=sizeof(packet.data)};
+        add(&o,(NFNL_SUBSYS_NFTABLES<<8)|NFT_MSG_NEWRULE,0,family);
+        size_t start=o.size,entry,data;
+        assert(!md_network_message_nest(&o,NFTA_LIST_ELEM,&entry));
+        assert(!md_network_message_attribute(&o,NFTA_EXPR_NAME,"match",6));
+        assert(!md_network_message_nest(&o,NFTA_EXPR_DATA,&data));
+        assert(!md_network_message_attribute(&o,NFTA_MATCH_NAME,name,strlen(name)+1));
+        uint32_t revision=0;
+        assert(!md_network_message_attribute(&o,NFTA_MATCH_REV,&revision,4));
+        unsigned char info[8]={wildcard ? 255 : (ipv6 ? 128 : 8),1,3,invert};
+        assert(!md_network_message_attribute(&o,NFTA_MATCH_INFO,info,sizeof(info)));
+        assert(!md_network_message_end_nest(&o,data));
+        assert(!md_network_message_end_nest(&o,entry));
+        assert(!md_nft_expressions(&f,1,&rule,o.data+start,o.size-start));
+        rule.expressions[rule.count++]=(struct md_filter_expression){.code=MD_FILTER_VERDICT,.operation=NF_ACCEPT};
+        assert(!md_filter_validate(&f));
+        for (unsigned type=0;type<256;++type) for (unsigned code=0;code<5;++code) {
+            struct md_filter_packet p={.source=md_ip_loopback(ipv6 ? AF_INET6 : AF_INET),
+                .destination=md_ip_loopback(ipv6 ? AF_INET6 : AF_INET),.protocol=protocol,
+                .transport={type,code},.transport_size=4};
+            int match=(!ipv6 && wildcard) || (type==info[0] && code>=1 && code<=3);
+            assert(md_filter_evaluate(&f,NF_INET_LOCAL_IN,&p)==((match!=!!invert) ? 0 : -EACCES));
+            p.protocol=IPPROTO_UDP;
+            assert(md_filter_evaluate(&f,NF_INET_LOCAL_IN,&p)==-EACCES);
+            p.protocol=protocol; p.transport_size=1;
+            assert(md_filter_evaluate(&f,NF_INET_LOCAL_IN,&p)==-EACCES);
+        }
+        free(rule.wire);
+    }
+    puts("PASS xt ICMP: family/revision admission, type/code ranges, IPv4 wildcard, inversion and short payloads");
+}
 void test_network_nft(void) {
+    compat_icmp();
+    packet_route_matches();
     compat_revisions();
     compat_transport();
     compat_nat();
@@ -713,10 +968,13 @@ void test_network_nft(void) {
     compat_mark();
     compat_addrtype();
     program();
+    fib_hook_validation();
     verdict_maps();
+    interval_sets();
     policy_counters();
     reverse_policy();
     nat_hook_order();
+    native_fib_publication();
     native_nat_update();
     native_disjoint_update();
     struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);

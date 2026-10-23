@@ -32,11 +32,13 @@ static long address(void *target,socklen_t capacity,void *length,const struct md
     struct sockaddr_nl source={.nl_family=AF_NETLINK,.nl_pid=packet->port,
         .nl_groups=packet->group ? 1U<<(packet->group-1) : 0};
     struct sockaddr_in6 ipv6={.sin6_family=AF_INET6};
-    memcpy(&ipv6.sin6_addr,packet->ipv6.source,16);
-    if (IN6_IS_ADDR_LINKLOCAL(&ipv6.sin6_addr)) ipv6.sin6_scope_id=packet->ipv6.interface;
-    const void *value=options&MD_NETWORK_PACKET_IPV6 ? (const void *)&ipv6
+    struct sockaddr_in ipv4={.sin_family=AF_INET};
+    memcpy(&ipv4.sin_addr,packet->ip.source,4);
+    memcpy(&ipv6.sin6_addr,packet->ip.source,16);
+    if (IN6_IS_ADDR_LINKLOCAL(&ipv6.sin6_addr)) ipv6.sin6_scope_id=packet->ip.interface;
+    const void *value=options&MD_NETWORK_PACKET_IPV4 ? (const void *)&ipv4 : options&MD_NETWORK_PACKET_IPV6 ? (const void *)&ipv6
         : options&MD_NETWORK_PACKET_ETHERNET ? (const void *)&packet->ethernet : (const void *)&source;
-    socklen_t size=options&MD_NETWORK_PACKET_IPV6 ? sizeof(ipv6)
+    socklen_t size=options&MD_NETWORK_PACKET_IPV4 ? sizeof(ipv4) : options&MD_NETWORK_PACKET_IPV6 ? sizeof(ipv6)
         : options&MD_NETWORK_PACKET_ETHERNET ? sizeof(packet->ethernet) : sizeof(source);
     long error=md_write_memory(target,value,capacity<size ? capacity : size);
     return error ? error : md_write_memory(length,&size,sizeof(size));
@@ -108,7 +110,9 @@ long md_network_packet_receive(long nr,const unsigned long *a) {
     }
     long options=error ? error : receive_state();
     struct msghdr native={.msg_iov=vectors,.msg_iovlen=count};
-    long result=options<0 ? options : RAW3(recvmsg,a[0],&native,flags);
+    /* The native result retains post-BPF length for PACKET_AUXDATA even when
+     * the application buffer truncates it. Its requested return mode is below. */
+    long result=options<0 ? options : RAW3(recvmsg,a[0],&native,flags|MSG_TRUNC);
     if (head) {
         if (result>=(long)sizeof(packet)) {
             memcpy(&packet,head,sizeof(packet));
@@ -129,15 +133,27 @@ long md_network_packet_receive(long nr,const unsigned long *a) {
     if (!error && nr==SYS_recvmsg) {
         original.msg_flags=native.msg_flags;
         size_t used=0;
+        if (options&MD_NETWORK_PACKET_AUXDATA) {
+            packet.auxiliary.tp_snaplen=(uint32_t)result;
+            error=control_item(&original,&used,SOL_PACKET,PACKET_AUXDATA,&packet.auxiliary,sizeof(packet.auxiliary));
+        }
+        if (options&MD_NETWORK_PACKET_IPV4_INFO) {
+            struct in_pktinfo info={.ipi_ifindex=(int)packet.ip.interface};
+            memcpy(&info.ipi_addr,packet.ip.destination,4);
+            info.ipi_spec_dst.s_addr=packet.ip.local4;
+            error=control_item(&original,&used,IPPROTO_IP,IP_PKTINFO,&info,sizeof(info));
+        }
+        if (!error && (options&MD_NETWORK_PACKET_IPV4_TTL))
+            error=control_item(&original,&used,IPPROTO_IP,IP_TTL,&packet.ip.hops,sizeof(packet.ip.hops));
         if (options&MD_NETWORK_PACKET_IPV6_INFO) {
-            struct in6_pktinfo info={.ipi6_ifindex=packet.ipv6.interface};
-            memcpy(&info.ipi6_addr,packet.ipv6.destination,16);
+            struct in6_pktinfo info={.ipi6_ifindex=packet.ip.interface};
+            memcpy(&info.ipi6_addr,packet.ip.destination,16);
             error=control_item(&original,&used,IPPROTO_IPV6,IPV6_PKTINFO,&info,sizeof(info));
         }
         if (!error && (options&MD_NETWORK_PACKET_IPV6_HOPS))
-            error=control_item(&original,&used,IPPROTO_IPV6,IPV6_HOPLIMIT,&packet.ipv6.hops,sizeof(packet.ipv6.hops));
+            error=control_item(&original,&used,IPPROTO_IPV6,IPV6_HOPLIMIT,&packet.ip.hops,sizeof(packet.ip.hops));
         if (!error && (options&MD_NETWORK_PACKET_TIMESTAMP)) {
-            struct timeval timestamp={.tv_sec=packet.ipv6.seconds,.tv_usec=packet.ipv6.microseconds};
+            struct timeval timestamp={.tv_sec=packet.ip.seconds,.tv_usec=packet.ip.microseconds};
             error=control_item(&original,&used,SOL_SOCKET,SO_TIMESTAMP,&timestamp,sizeof(timestamp));
         }
         if (options&MD_NETWORK_PACKET_INFO) {
@@ -157,5 +173,6 @@ long md_network_packet_receive(long nr,const unsigned long *a) {
         if (!error) error=md_write_memory((char *)a[1]+offsetof(struct msghdr,msg_flags),
             &original.msg_flags,sizeof(original.msg_flags));
     }
+    if (!(flags&MSG_TRUNC) && (size_t)result>total) result=(long)total;
     return error ? error : result;
 }

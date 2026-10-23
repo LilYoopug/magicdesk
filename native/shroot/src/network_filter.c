@@ -1,5 +1,6 @@
 #include "network_filter.h"
 #include <errno.h>
+#include <linux/netfilter/nf_tables.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -119,6 +120,22 @@ void md_filter_rule_delete(struct md_network_filter *f,size_t index) {
     free(f->rules[index].wire);
     memmove(f->rules+index,f->rules+index+1,(f->rule_count-index-1)*sizeof(*f->rules)); --f->rule_count;
 }
+size_t md_filter_set_position(const struct md_filter_set *s,const void *key,unsigned end) {
+    size_t low=0,high=s->count;
+    while (low<high) {
+        size_t mid=low+(high-low)/2;
+        int order=memcmp(s->elements[mid].key,key,s->key_size);
+        /* At a shared boundary the old interval ends before the new starts. */
+        if (order<0 || (!order && s->elements[mid].end>end)) low=mid+1;
+        else high=mid;
+    }
+    return low;
+}
+const struct md_filter_element *md_filter_set_lookup(const struct md_filter_set *s,const void *key) {
+    size_t at=md_filter_set_position(s,key,0);
+    if (at<s->count && !s->elements[at].end && !memcmp(s->elements[at].key,key,s->key_size)) return s->elements+at;
+    return (s->flags&NFT_SET_INTERVAL) && at && !s->elements[at-1].end ? s->elements+at-1 : NULL;
+}
 void md_filter_chain_delete(struct md_network_filter *f,size_t index) {
     uint64_t handle=f->chains[index].handle;
     for (size_t i=0;i<f->rule_count;)
@@ -137,7 +154,8 @@ size_t md_filter_verdict_count(const struct md_network_filter *f,const struct md
 }
 struct md_filter_verdict md_filter_verdict_at(const struct md_network_filter *f,const struct md_filter_expression *e,size_t at) {
     if (e->code==MD_FILTER_VERDICT) return (struct md_filter_verdict){e->operation,e->target};
-    for (size_t i=0;i<f->set_count;++i) if (f->sets[i].handle==e->target) return f->sets[i].elements[at].verdict;
+    for (size_t i=0;i<f->set_count;++i) if (f->sets[i].handle==e->target)
+        return f->sets[i].elements[at].end ? (struct md_filter_verdict){NFT_CONTINUE,0} : f->sets[i].elements[at].verdict;
     return (struct md_filter_verdict){0};
 }
 void md_filter_account(struct md_filter_accounting *a,size_t bytes) {

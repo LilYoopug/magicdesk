@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "network_calls.h"
-#include "network_transport.h"
+#include "network_endpoint.h"
 #include "network_packet.h"
 #include "adapter_buffer.h"
 #include "fs_buffer.h"
@@ -22,7 +22,7 @@
 #include <sys/ioctl.h>
 #include <sys/uio.h>
 
-_Static_assert(sizeof(((struct md_network_address *)0)->value)==sizeof(struct sockaddr_storage),"socket address transport");
+_Static_assert(sizeof(((struct md_network_send *)0)->value)==sizeof(struct sockaddr_storage),"socket address transport");
 
 long md_network_open(const unsigned long *a) {
     long memory=md_adapter_buffer_take(); if (memory<0) return memory;
@@ -117,7 +117,7 @@ static long data_send_batch(const unsigned long *a) {
 }
 long md_network_data_call(long nr,const unsigned long *a) {
     int device=(nr==SYS_setsockopt || nr==SYS_getsockopt) && a[1]==SOL_SOCKET && a[2]==SO_BINDTODEVICE;
-    int transport=(nr==SYS_setsockopt || nr==SYS_getsockopt) && md_network_transport_option(a[1],a[2]);
+    int transport=(nr==SYS_setsockopt || nr==SYS_getsockopt) && md_network_endpoint_option(a[1],a[2]);
     int option=device || transport;
     if (nr==SYS_read || nr==SYS_write || nr==SYS_readv || nr==SYS_writev
             || md_socket_payload_native(nr,a[4])
@@ -147,10 +147,10 @@ long md_network_data_call(long nr,const unsigned long *a) {
             ((char *)&frame->io.address)[length]=0;
         }
     } else if (transport && nr==SYS_setsockopt) {
-        if ((int)a[4]<(int)sizeof(int)) result=-EINVAL;
+        if ((int)a[4]<0 || a[4]>sizeof(frame->io.control)) result=-EINVAL;
         else {
-            frame->io.address_size=sizeof(int);
-            result=md_read_memory(&frame->io.address,(void *)a[3],sizeof(int));
+            frame->io.address_size=a[4];
+            result=md_read_memory(frame->io.control,(void *)a[3],a[4]);
         }
     } else if (option) result=md_read_memory(&frame->io.address_size,(void *)a[4],sizeof(socklen_t));
     if (nr==SYS_bind || nr==SYS_connect) {
@@ -164,7 +164,7 @@ long md_network_data_call(long nr,const unsigned long *a) {
         &frame->capture,&frame->input.socket,1);
     if (result==MD_IPC_TASK_IO) result=md_guest_buffer_control(MD_FS_BUFFER_IPC_RECEIVE,0,0);
     if (!result && option && nr==SYS_getsockopt)
-        result=output((void *)a[3],(void *)a[4],&frame->io.address,frame->io.address_size);
+        result=output((void *)a[3],(void *)a[4],device ? (void *)&frame->io.address : frame->io.control,frame->io.address_size);
     if (!result && (nr==SYS_getsockname || nr==SYS_getpeername || ((nr==SYS_accept || nr==SYS_accept4) && a[1])))
         result=output((void *)a[1],(void *)a[2],&frame->io.address,frame->io.address_size);
     long dropped=md_guest_buffer_control(MD_FS_BUFFER_RECEIVED_DROP,0,0);
@@ -269,23 +269,26 @@ static long control_call(long nr,const unsigned long *a,int events) {
     }
     size_t size=0; const void *input=NULL;
     unsigned filter_capacity=0;
-    struct md_network_address destination={0};
+    struct md_network_send destination={0};
     struct msghdr message={0};
-    struct iovec vectors[64];
+    int gathered=nr==SYS_sendmsg || nr==SYS_writev;
+    struct md_socket_vectors vectors;
     if (nr==SYS_sendmsg) {
         long error=md_read_memory(&message,(void *)a[1],sizeof(message)); if (error) return error;
-        if (a[2]&~(MSG_DONTWAIT|MSG_NOSIGNAL) || message.msg_controllen) return -EOPNOTSUPP;
-        if (message.msg_iovlen>64) return -EMSGSIZE;
+        if (a[2]&~(MSG_DONTWAIT|MSG_NOSIGNAL)) return -EOPNOTSUPP;
+        if (message.msg_controllen>sizeof(destination.control)) return -EMSGSIZE;
+        destination.control_size=message.msg_controllen;
+        if (destination.control_size) {
+            error=md_read_memory(destination.control,message.msg_control,destination.control_size);
+            if (error) return error;
+        }
         if (message.msg_name) {
             if (message.msg_namelen<sizeof(sa_family_t) || message.msg_namelen>sizeof(destination.value)) return -EINVAL;
             destination.size=message.msg_namelen;
             error=md_read_memory(&destination.value,message.msg_name,destination.size); if (error) return error;
         }
-        error=md_read_memory(vectors,message.msg_iov,message.msg_iovlen*sizeof(*vectors)); if (error) return error;
-        for (size_t i=0;i<message.msg_iovlen;++i) {
-            if (vectors[i].iov_len>MD_NETWORK_BUFFER_SIZE-size) return -EMSGSIZE;
-            size+=vectors[i].iov_len;
-        }
+    } else if (nr==SYS_writev) {
+        message.msg_iov=(void *)a[1]; message.msg_iovlen=a[2];
     }
     else if (nr==SYS_ioctl) { size=sizeof(struct ifreq); input=(void *)a[2]; }
     else if (nr==SYS_bind || nr==SYS_connect) { size=a[2]; input=(void *)a[1]; }
@@ -315,17 +318,32 @@ static long control_call(long nr,const unsigned long *a,int events) {
         if (error) return error;
     }
     if (size>MD_NETWORK_BUFFER_SIZE) return -EMSGSIZE;
-    long memory=md_adapter_buffer_take(); if (memory<0) return memory;
+    if (gathered) {
+        long error=md_socket_vectors_open(&vectors,&message);
+        if (error) return error;
+        for (size_t i=0;i<message.msg_iovlen;++i) {
+            if (message.msg_iov[i].iov_len>MD_NETWORK_BUFFER_SIZE-size) {
+                md_socket_vectors_close(&vectors); return -EMSGSIZE;
+            }
+            size+=message.msg_iov[i].iov_len;
+        }
+    }
+    long memory=md_adapter_buffer_take();
+    if (memory<0) {
+        if (gathered) md_socket_vectors_close(&vectors);
+        return memory;
+    }
     struct md_network_request *request=(void *)memory;
     request->destination=destination;
     void *data=request->data;
     long result=0;
-    if (nr==SYS_sendmsg) {
+    if (gathered) {
         size_t offset=0;
         for (size_t i=0;!result && i<message.msg_iovlen;++i) {
-            result=md_read_memory((char *)data+offset,vectors[i].iov_base,vectors[i].iov_len);
-            offset+=vectors[i].iov_len;
+            result=md_read_memory((char *)data+offset,message.msg_iov[i].iov_base,message.msg_iov[i].iov_len);
+            offset+=message.msg_iov[i].iov_len;
         }
+        md_socket_vectors_close(&vectors);
     } else if (size) result=md_read_memory(data,input,size);
     if (!result) result=md_guest_buffer_control(MD_BUFFER_NETWORK_CALL,size,0);
     if (!result && nr==SYS_ioctl && a[1]!=SIOCSIFHWADDR && a[1]!=SIOCBRADDIF)

@@ -169,9 +169,18 @@ selection and incoming endpoint lookup. Accepted TCP sockets inherit it. An idle
 bound socket can change the binding transactionally, releasing or restoring its
 external port reservation; existing direct/relayed flows reject retargeting with
 `EBUSY`. Bound flows use the existing relay so link deletion/down is checked;
-unbound sockets retain their existing fast path. General raw IP sockets, TCP/UDP
-multicast subscriptions/broadcast, routed recvmmsg and unsupported outgoing
-ancillary types are unsupported.
+unbound sockets retain their existing fast path. Routed recvmmsg and unsupported
+outgoing ancillary types remain unsupported.
+
+`network_multicast` owns IPv4/IPv6 memberships, output interface, loopback and
+hop limits. UDP broadcast and multicast share the existing forwarding worker,
+bounded queues and link traversal. Each receiving socket gets an independent
+native datagram queue; reuse-address listeners retain their own subscriptions.
+Filters and counters run once per namespace ingress, not once per subscriber.
+Leave, final close, interface replacement and namespace teardown retire the same
+membership owner. Ordinary unicast does not traverse multicast listeners.
+`test_network_multicast.py` verifies namespace isolation, fanout, leave/loop,
+ancillary information and unicast replies with Base and lazy entry.
 This is not packet-level isolation: native ephemeral backing ports remain
 reachable, and inherited native descriptions retain authority. Independent
 supervisor transfer of these typed network owners is unsupported rather than
@@ -186,12 +195,22 @@ addresses derived from MANAGETEMPADDR /64 templates. Address expiry, deprecation
 temporary-address rotation and route expiry share the existing forwarding timer;
 ordinary packet IO does not scan deadlines or read a clock for these controls.
 
-`network_icmp6` supplies namespace-owned raw ICMPv6 control sockets on the same
+`network_raw6` supplies namespace-owned raw ICMPv6 control sockets on the same
 Ethernet fabric: router solicitation/advertisement transport, neighbor discovery,
 local echo, scope, interface membership, traffic class and ancillary metadata. It does not open
 Android raw sockets. Userspace networkd can process advertisements and install
 SLAAC addresses/routes. This is not a kernel RA client: unsupported `accept_ra`
 modes and unimplemented controls still fail explicitly.
+It also supports raw UDPv6, including `IPV6_CHECKSUM`, on that fabric.
+`network_raw4` provides raw IPv4 transport, `IP_HDRINCL`, checksums, source
+selection and broadcast permission. Raw UDP and ordinary UDP share endpoint
+lookup, live filtering and retained reverse NAT; replies reach both ordinary
+UDP endpoints and admitted raw observers. No packet privileges are requested
+from Android. General IP forwarding, fragmentation and arbitrary raw IPv6
+protocols are not implied. `test_network_dhcp.py` runs an unmodified dhcpcd in
+a separate guest namespace against a fixture server, checking IPv4/IPv6 lease
+and renewal, DNS options, installed routes and bidirectional UDP. This exercises
+DHCP transport, not a built-in Shroot DHCP server or Android network control.
 IPv6 route metrics accept MTU and hop limit, with `QUICKACK=0` retaining native
 adaptive TCP acknowledgements. `network_transport` combines route/interface
 limits with application socket options at connection or addressed-send preparation.
@@ -221,7 +240,9 @@ namespace. No operation opens Android's netfilter socket or changes its firewall
 Queries and mutations require CAP_NET_ADMIN in the namespace's user owner.
 
 The implemented ABI covers generation queries, tables, base/regular chains,
-rules, exact-key sets and verdict maps, including dumps, deletion, userdata and handles.
+rules, exact-key/interval sets and verdict maps, including dumps, deletion,
+userdata and handles. Ordered set lookup uses binary search; interval ends,
+adjacent ranges and the maximum-key sentinel retain their wire representation.
 `network_nft_objects` owns object operations; `network_nft_expression` validates
 register use and translates the supported expression ABI to typed operations.
 Complete begin/end batches use a private
@@ -236,11 +257,13 @@ Requests and replies are bounded at 64 KiB in the mapped adapter slot. A ruleset
 has at most 256 tables, 256 chains, 1024 rules, 64 expressions per rule and 1024
 elements per set. Overflow fails explicitly. Incomplete batches are rejected,
 not retained across socket calls. Loops, excessive jump depth and transitive
-NAT placement in incompatible hooks are rejected before commit.
+NAT/FIB placement in incompatible hooks are rejected before commit, including
+chains reached through verdict maps. These checks do not run on packet IO.
 
-`network_filter_program` evaluates immediate/verdict, metadata, supported IPv4
-address/protocol and TCP/UDP port payload, compare/range/bitwise, conntrack
-state/mark/status, local/source-route classification, exact-set and verdict-map lookup, single-target
+`network_filter_program` evaluates immediate/verdict, metadata, supported IPv4/IPv6
+address/protocol and TCP/UDP port or ICMP type/code payload, compare/range/bitwise,
+conntrack state/mark/status, local/source-route classification, reverse-path and
+packet-type predicates, set and verdict-map lookup, single-target
 DNAT/SNAT and masquerade operations. ACCEPT ends a chain, not a hook; later
 base chains may deny it. RETURN applies the base policy. Rule counters and
 optional base-chain policy counters retain their values in transactional
@@ -249,10 +272,13 @@ without walking rules for each transfer. A base-chain counter applies only when
 evaluation reaches its policy, not an explicit ACCEPT/DROP rule. Counters measure
 logical UDP datagrams/TCP chunks and payload bytes, not kernel packets, headers,
 retransmissions or connection attempts rejected before relay admission.
-Logging, queues, dynamic/interval sets, flowtables, unsupported table flags,
+REJECT, logging, queues, dynamic sets, flowtables, unsupported table flags,
 monitoring groups and other netfilter subsystems return errors, not fake success.
+In particular, REJECT is not implemented as DROP: native TCP reset and UDP error
+delivery are separate from denying a flow. Stock configurations that require
+REJECT, including firewalld, are not certified by an ACCEPT/DROP/NAT test.
 The iptables-nft rule-compat attribute is validation metadata, not a packet
-predicate; expressions still supply the matches. IPv4 revision-zero TCP/UDP
+predicate; expressions still supply the matches. Revision-zero TCP/UDP
 matches become typed transport predicates with inclusive source/destination
 port ranges and inversion, without altering nft registers. DNAT/SNAT targets
 (revisions 0, 1 and 2)
@@ -260,6 +286,9 @@ translate a single address/port into the same typed NAT operation. Revision
 queries advertise these supported adapters and distinguish an absent extension
 (`ENOENT`) from an unsupported revision (`EPROTONOSUPPORT`). This lets clients
 negotiate an older supported ABI without misdiagnosing a missing module.
+Revision-zero ICMP/ICMPv6 matches retain type/code bounds and inversion;
+`pkttype` and `rpfilter` use the common packet and route model. FIB queries share
+that model for address type, output interface/name and interface presence.
 TCP flags/options, NAT address/port
 ranges, randomization and other xtables extensions are rejected. Rule/chain deletion accepts their dumped metadata but
 uses the live handle/reference graph, never the caller's stale use count.
@@ -267,6 +296,10 @@ uses the live handle/reference graph, never the caller's stale use count.
 `network_flow` records logical OUTPUT/PREROUTING/FORWARD/POSTROUTING/INPUT steps,
 original/translated tuples and reverse established traffic through bridge/veth
 topology. Each translating step retains its before/after tuple and hook priority.
+A native listener's accepted local address remains local for FIB queries in its
+owning namespace, even when Android's address is not a guest interface address.
+This authority is attached to that flow, not a global address list. DNAT changes
+the queried tuple; raw ingress and child namespaces do not inherit ownership.
 Revalidation replays the retained mapping between base chains, not before the
 entire hook: early raw rules see wire addresses, later filters see translated
 addresses. Reverse translation uses the corresponding destination/source NAT

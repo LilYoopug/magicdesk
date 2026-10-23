@@ -14,6 +14,7 @@
 #include <poll.h>
 #include <linux/if_addr.h>
 #include <net/if.h>
+#include <netinet/udp.h>
 #include <sys/syscall.h>
 #include <stdio.h>
 #include <string.h>
@@ -187,7 +188,7 @@ static void raw_bindings(void) {
     assert(!md_network_socket_call(socket,&root,SYS_setsockopt,args,name,sizeof(name),5,1,NULL,NULL,NULL));
     assert(md_network_socket_call(socket,&user,SYS_setsockopt,args,name,sizeof(name),0,1,NULL,NULL,NULL)==-EPERM);
     struct md_inet_address local={.ip=link->addresses[0].address,.scope=index};
-    struct md_network_address to={0}; socklen_t length;
+    struct md_network_send to={0}; socklen_t length;
     struct sockaddr_storage wire=encode(local,AF_INET6,&length);
     memcpy(to.value,&wire,length); to.size=length;
     unsigned char echo[8]={128,0,0,0,0,1,0,1};
@@ -210,6 +211,48 @@ static int hops_received(int fd) {
     struct cmsghdr *c=CMSG_FIRSTHDR(&message);
     assert(c && c->cmsg_level==IPPROTO_IPV6 && c->cmsg_type==IPV6_HOPLIMIT);
     int value; memcpy(&value,CMSG_DATA(c),sizeof(value)); return value;
+}
+static void raw_datagrams(int family) {
+    struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
+    struct md_identity root=md_identity_new(0,0);
+    struct md_fd_object *raw,*server,*client; int r,s,c;
+    assert(!md_network_socket_open(n,&root,family,SOCK_RAW,IPPROTO_UDP,&raw,&r));
+    assert(!md_network_endpoint_open(n,0,family,SOCK_DGRAM,0,&server,&s));
+    assert(!md_network_endpoint_open(n,0,family,SOCK_DGRAM,0,&client,&c));
+    socklen_t size;
+    struct sockaddr_storage local=encode((struct md_inet_address){.ip=md_ip_loopback(family)},family,&size);
+    assert(!md_network_endpoint_bind(server,s,&root,(void *)&local,size));
+    assert(!md_network_endpoint_bind(client,c,&root,(void *)&local,size));
+    struct sockaddr_storage source,target;
+    assert(!md_network_endpoint_name(client,c,0,&source,&size));
+    struct md_inet_address from,to;
+    assert(!md_inet_decode((void *)&source,size,&from));
+    assert(!md_network_endpoint_name(server,s,0,&target,&size));
+    assert(!md_inet_decode((void *)&target,size,&to));
+    unsigned long args[6]={0,IPPROTO_IPV6,IPV6_CHECKSUM}; int offset=6;
+    if (family==AF_INET6)
+        assert(!md_network_socket_call(raw,&root,SYS_setsockopt,args,&offset,sizeof(offset),sizeof(offset),1,NULL,NULL,NULL));
+    struct { struct udphdr header; char data[4]; } packet={
+        .header={.source=from.port,.dest=to.port,.len=htons(12)},.data={'p','i','n','g'}};
+    struct md_network_send destination={.size=size}; memcpy(destination.value,&target,size);
+    assert(md_network_socket_call(raw,&root,SYS_sendto,args,&packet,sizeof(packet),sizeof(packet),1,
+        &destination,NULL,NULL)==sizeof(packet));
+    struct sockaddr_storage peer=receive_packet(server,s,&size);
+    struct md_inet_address actual;
+    assert(!md_inet_decode((void *)&peer,size,&actual) && md_inet_equal(&actual,&from));
+    unsigned char data[sizeof(struct md_network_packet)+32];
+    size_t header=sizeof(struct md_network_packet)+(family==AF_INET ? 20 : 0);
+    ready(r); assert(recv(r,data,sizeof(data),0)==(ssize_t)(header+12));
+    assert(!memcmp(data+header+8,"ping",4));
+    send_packet(server,s,&peer,size);
+    peer=receive_packet(client,c,&size);
+    assert(!md_inet_decode((void *)&peer,size,&actual) && md_inet_equal(&actual,&to));
+    ready(r); assert(recv(r,data,sizeof(data),0)==(ssize_t)(header+12));
+    struct udphdr reply; memcpy(&reply,data+header,sizeof(reply));
+    assert(reply.source==to.port && reply.dest==from.port && !memcmp(data+header+8,"ping",4));
+    close(r); close(s); close(c);
+    md_fd_object_release(raw); md_fd_object_release(server); md_fd_object_release(client);
+    md_identity_release(&root); md_network_namespace_release(n);
 }
 static void transport_policy(void) {
     struct md_network_profile profile={.policy=MD_NETWORK_BRIDGE};
@@ -277,6 +320,7 @@ static void transport_policy(void) {
 void test_network_ipv6(void) {
     transport_policy();
     literals(); policy(); temporary_addresses(); raw_bindings();
+    raw_datagrams(AF_INET); raw_datagrams(AF_INET6);
     for (unsigned tcp=0;tcp<2;++tcp) for (unsigned v6=0;v6<2;++v6)
         exchange(v6 ? AF_INET6 : AF_INET,tcp ? SOCK_STREAM : SOCK_DGRAM);
     puts("PASS IPv6: literal grammar, scoped policy, proc, IPv6-only defaults and dual-stack TCP/UDP round trips");

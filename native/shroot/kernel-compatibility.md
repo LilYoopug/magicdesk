@@ -600,8 +600,12 @@ active-flow retargeting fails explicitly with `EBUSY`.
 IPv6 endpoints use baseline AF_INET6, IPV6_V6ONLY and packet-information socket
 options. Address lifetimes, route preference and single nexthop objects are
 guest rtnetlink ABI implemented by `network_route_ip`/`network_nexthop`, not
-host route mutations. `network_icmp6` implements guest raw ICMPv6 on existing
-logical Ethernet queues without host raw-socket privileges. IPv6 lifetime and
+host route mutations. `network_raw6` implements guest raw ICMPv6 and UDPv6 on
+existing logical Ethernet queues, including the baseline `IPV6_CHECKSUM` ABI,
+without host raw-socket privileges. `network_raw4` uses the same queues for
+IPv4; raw UDP and multicast reuse native UDP relay sockets. DHCP and multicast
+fixtures check both families and namespace boundaries without changing Android
+routes or requesting newer kernel operations. IPv6 lifetime and
 temporary-address maintenance reuse the forwarding owner's monotonic timerfd
 and baseline getrandom; no newer kernel dependency is introduced. Unsupported
 control modes fail explicitly. `test_network_ipv6.{c,py}`, resource tests and

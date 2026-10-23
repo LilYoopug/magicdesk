@@ -19,7 +19,7 @@ struct md_network_ip_assignment {
     int64_t temporary_preferred, temporary_valid, regenerate_at;
 };
 struct md_network_route_entry {
-    struct md_ip_address destination, gateway;
+    struct md_ip_address destination, gateway, source;
     unsigned prefix, interface, metric, protocol, scope, nexthop;
     int64_t valid_until;
     unsigned char preference;
@@ -57,6 +57,7 @@ struct md_network_fabric {
     int64_t configuration_deadline;
 };
 struct md_network_namespace {
+    struct md_network_multicast *multicast;
     atomic_uint references;
     uint64_t inode, next_policy;
     struct md_user_namespace *owner;
@@ -71,13 +72,14 @@ struct md_network_namespace {
     int64_t configuration_deadline;
     struct md_network_nexthop nexthops[MD_NETWORK_MAX_ROUTES];
     uint32_t unprivileged_port, ping_groups[2], local_ports[2];
-    uint32_t next_port, ipv4_forward, bindv6only;
+    uint32_t next_port, next_ip_id, ipv4_forward, bindv6only;
     uint32_t tcp_keepalive[3];
     struct md_network_ipv4_policy all, defaults;
     struct md_network_ipv6_policy all6, defaults6;
     struct md_network_listener *listeners;
     struct md_network_ethernet *ethernet;
-    struct md_network_icmp6 *icmp6;
+    struct md_network_raw6 *raw6;
+    struct md_network_raw4 *raw4;
     struct md_network_filter *filter;
 };
 /* Weak listeners are removed under the fabric lock before final FD release.
@@ -86,7 +88,7 @@ struct md_network_listener {
     struct md_network_listener *next;
     int peer, protocol;
     uint32_t groups, port;
-    int overflow;
+    int overflow, no_enobufs, broadcast_error;
 };
 static inline int md_network_forwarding(const struct md_network_namespace *n,unsigned family,unsigned input) {
     if (family!=AF_INET6) return n->ipv4_forward;
@@ -113,7 +115,11 @@ static inline struct md_network_interface *md_network_route_find(struct md_netwo
     return md_network_route_lookup(n,ip,0,route);
 }
 struct md_ip_address md_network_interface_source(const struct md_network_interface *,struct md_ip_address);
+struct md_ip_address md_network_route_source(struct md_network_namespace *,const struct md_network_interface *,
+    const struct md_network_route_entry *,struct md_ip_address);
 int md_network_interface_has(const struct md_network_interface *,struct md_ip_address);
+int md_network_interface_broadcast(const struct md_network_interface *,struct md_ip_address);
+unsigned md_network_address_type(struct md_network_namespace *,struct md_ip_address);
 int md_network_interface_address(struct md_network_interface *,struct md_network_ip_assignment,int,int);
 void md_network_interface_up(struct md_network_interface *);
 void md_network_interface_ipv6_flush(struct md_network_namespace *,struct md_network_interface *);

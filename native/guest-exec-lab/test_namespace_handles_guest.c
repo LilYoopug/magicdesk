@@ -155,7 +155,9 @@ static void retained_proc_chroot(void) {
                 assert(!mount("proc",path,"proc",0,NULL));
             }
             assert(!unshare(CLONE_NEWUSER));
-            int proc=open(path,O_PATH|O_DIRECTORY|O_CLOEXEC); assert(proc>=0);
+            int proc=open(path,O_PATH|O_DIRECTORY|O_CLOEXEC);
+            if (proc<0) fprintf(stderr,"proc chroot open mode=%u path=%s errno=%d\n",mode,path,errno);
+            assert(proc>=0);
             char root[128]; snprintf(root,sizeof(root),"%s/self/%s",path,mode&2 ? "fd" : "fdinfo");
             if (mode&4) {
                 void *stack=malloc(65536); assert(stack);
@@ -513,24 +515,29 @@ static void routing_policy(int fd) {
             assert(sendto(fd,&query,query.header.nlmsg_len,0,(void *)&kernel,sizeof(kernel))==query.header.nlmsg_len);
             union { struct nlmsghdr align; unsigned char bytes[1024]; } answer;
             ssize_t count=recv(fd,answer.bytes,sizeof(answer.bytes),0); assert(count>0);
-            unsigned remaining=(unsigned)count,rules=0,done=0;
+            unsigned remaining=(unsigned)count,rules=0,done=0,counts[2]={0};
             for (struct nlmsghdr *h=&answer.align;NLMSG_OK(h,remaining);h=NLMSG_NEXT(h,remaining)) {
                 assert(h->nlmsg_seq==67);
                 if (h->nlmsg_type==NLMSG_DONE) { ++done; continue; }
-                assert(h->nlmsg_type==RTM_NEWRULE && !i && families[family]!=AF_INET6 && rules<3);
+                assert(h->nlmsg_type==RTM_NEWRULE && !i);
                 const struct fib_rule_hdr *rule=NLMSG_DATA(h);
+                assert(rule->family==AF_INET || rule->family==AF_INET6);
+                assert(!families[family] || rule->family==families[family]);
+                unsigned slot=rule->family==AF_INET6, index=counts[slot]++;
+                assert(index<(slot ? 2U : 3U));
                 const unsigned tables[]={RT_TABLE_LOCAL,RT_TABLE_MAIN,RT_TABLE_DEFAULT};
                 const unsigned priorities[]={0,32766,32767};
-                assert(rule->family==AF_INET && rule->table==tables[rules] && rule->action==FR_ACT_TO_TBL);
+                assert(rule->table==tables[index] && rule->action==FR_ACT_TO_TBL);
                 unsigned priority=0;
                 int size=(int)h->nlmsg_len-(int)NLMSG_LENGTH(sizeof(*rule));
                 for (struct rtattr *a=(void *)((char *)rule+NLMSG_ALIGN(sizeof(*rule)));RTA_OK(a,size);a=RTA_NEXT(a,size))
                     if (a->rta_type==FRA_PRIORITY) {
                         assert(RTA_PAYLOAD(a)==sizeof(priority)); memcpy(&priority,RTA_DATA(a),sizeof(priority));
                     }
-                assert(!size && priority==priorities[rules]); ++rules;
+                assert(!size && priority==priorities[index]); ++rules;
             }
-            assert(!remaining && done==1 && rules==(!i && families[family]!=AF_INET6 ? 3U : 0U));
+            unsigned expected=i ? 0 : families[family]==AF_INET ? 3 : families[family]==AF_INET6 ? 2 : 5;
+            assert(!remaining && done==1 && rules==expected);
         }
     struct { struct nlmsghdr header; struct fib_rule_hdr body; } change={
         .header={.nlmsg_len=sizeof(change),.nlmsg_type=RTM_NEWRULE,.nlmsg_flags=NLM_F_REQUEST|NLM_F_ACK},
@@ -553,6 +560,17 @@ static void offline_network(void) {
     assert(!setsockopt(route,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout)));
     socklen_t length=sizeof(actual);
     int route_copy=dup(route); assert(route_copy>=0);
+    const int netlink_options[]={NETLINK_BROADCAST_ERROR,NETLINK_NO_ENOBUFS};
+    for (unsigned i=0;i<sizeof(netlink_options)/sizeof(netlink_options[0]);++i) {
+        int value=0; socklen_t size=sizeof(value);
+        assert(!getsockopt(route,SOL_NETLINK,netlink_options[i],&value,&size) && !value);
+        value=7;
+        assert(!setsockopt(route,SOL_NETLINK,netlink_options[i],&value,sizeof(value)));
+        assert(!getsockopt(route_copy,SOL_NETLINK,netlink_options[i],&value,&size) && value==1);
+        value=0;
+        assert(!setsockopt(route_copy,SOL_NETLINK,netlink_options[i],&value,sizeof(value)));
+        assert(!getsockopt(route,SOL_NETLINK,netlink_options[i],&value,&size) && !value);
+    }
     assert(!getsockopt(route_copy,SOL_SOCKET,SO_SNDTIMEO,&actual,&length));
     assert(length==sizeof(actual) && actual.tv_sec==60 && !actual.tv_usec);
     timeout.tv_sec=0; timeout.tv_usec=20000;
@@ -720,6 +738,7 @@ static void pidfd_namespaces(void) {
 }
 int test_namespace_handles_guest(void) {
     alarm(60);
+    assert(!chmod("/",0755) && !chmod("/tmp",01777));
     pidfd_namespaces();
     directory_handles();
     process_directory();

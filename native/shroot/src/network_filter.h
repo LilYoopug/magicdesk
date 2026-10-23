@@ -19,7 +19,8 @@ enum md_filter_opcode {
     MD_FILTER_PAYLOAD, MD_FILTER_COMPARE, MD_FILTER_RANGE, MD_FILTER_BITWISE,
     MD_FILTER_CT, MD_FILTER_CT_SET, MD_FILTER_FIB, MD_FILTER_LOOKUP,
     MD_FILTER_NAT, MD_FILTER_MASQUERADE, MD_FILTER_VERDICT_MAP, MD_FILTER_COUNTER,
-    MD_FILTER_TRANSPORT, MD_FILTER_STATE_MATCH, MD_FILTER_MARK_MATCH, MD_FILTER_ADDRESS_TYPE
+    MD_FILTER_TRANSPORT, MD_FILTER_STATE_MATCH, MD_FILTER_MARK_MATCH, MD_FILTER_ADDRESS_TYPE,
+    MD_FILTER_PACKET_TYPE, MD_FILTER_REVERSE_PATH, MD_FILTER_ICMP_MATCH
 };
 struct md_filter_counter { uint64_t packets, bytes; };
 enum { MD_FILTER_INVERT_SOURCE=1, MD_FILTER_INVERT_DESTINATION=2 };
@@ -66,7 +67,7 @@ struct md_filter_rule {
     unsigned char userdata[256];
 };
 struct md_filter_verdict { unsigned operation; uint64_t target; };
-struct md_filter_element { unsigned char key[16]; struct md_filter_verdict verdict; };
+struct md_filter_element { unsigned char key[16]; unsigned end; struct md_filter_verdict verdict; };
 struct md_filter_set {
     uint64_t table, handle;
     uint32_t id, flags, key_type, key_size, data_type;
@@ -75,6 +76,7 @@ struct md_filter_set {
     size_t count, capacity, userdata_size;
     unsigned char userdata[256];
 };
+struct md_filter_route_result { unsigned type, interface; char name[16]; };
 /* Flow coordinates are network byte order; register metadata is native byte
  * order, as in the nftables expression ABI. Callers own route/conntrack state. */
 struct md_filter_packet {
@@ -82,11 +84,15 @@ struct md_filter_packet {
     uint16_t source_port, destination_port;
     unsigned protocol, state, mark, ctmark, status;
     unsigned input, output, fib_type, source_fib_type;
+    unsigned packet_type;
+    unsigned char transport[4], transport_size;
     char input_name[16], output_name[16];
     unsigned snat, dnat, masquerade;
     struct md_ip_address masquerade_address;
     struct md_filter_accounting *accounting;
     unsigned unmediated; /* Admission probe: reject reached per-packet effects. */
+    void *route_context;
+    struct md_filter_route_result (*route)(void *,const struct md_filter_packet *,unsigned);
 };
 struct md_filter_rewrite {
     struct md_ip_address source, destination;
@@ -117,6 +123,8 @@ void md_network_filter_delete(struct md_network_filter *,unsigned,const char *,u
 int md_filter_reserve(void **,size_t *,size_t,size_t,size_t);
 struct md_filter_chain *md_filter_chain_find(struct md_network_filter *,uint64_t,const char *,uint64_t,uint32_t);
 struct md_filter_set *md_filter_set_find(struct md_network_filter *,uint64_t,const char *,uint64_t,uint32_t);
+size_t md_filter_set_position(const struct md_filter_set *,const void *,unsigned end);
+const struct md_filter_element *md_filter_set_lookup(const struct md_filter_set *,const void *);
 void md_filter_rule_delete(struct md_network_filter *,size_t);
 void md_filter_chain_delete(struct md_network_filter *,size_t);
 void md_filter_set_delete(struct md_network_filter *,size_t);

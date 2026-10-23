@@ -2,11 +2,17 @@
 #include "network_forward.h"
 #include "network_endpoint.h"
 #include "network_route.h"
+#include "network_raw4.h"
+#include "network_raw6.h"
+#include "network_link.h"
 #include <limits.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/netfilter.h>
+#include <linux/rtnetlink.h>
+#include <linux/if_packet.h>
 #include <netinet/in.h>
+#include <net/if.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -22,6 +28,9 @@ struct listener {
     struct md_inet_address address, client, target;
     struct md_network_flow_path path;
     int64_t deadline;
+    unsigned group_output, group_started;
+    uint64_t group_policy;
+    int group_hops;
 };
 struct stream_buffer { size_t begin, end; unsigned char data[65536]; };
 struct datagram { struct datagram *next; size_t size; unsigned char data[]; };
@@ -38,6 +47,9 @@ struct flow {
     struct md_filter_accounting accounting[2];
     unsigned started;
     unsigned front_family;
+    unsigned packet_input;
+    uint64_t packet_policy, packet_destination;
+    int group, group_hops;
     int64_t deadline;
 };
 struct md_network_forward {
@@ -132,7 +144,7 @@ static void account(struct flow *c,unsigned direction,size_t bytes) {
 }
 static int interests(struct md_network_forward *f,struct flow *c) {
     for (unsigned leg=0;leg<2;++leg) {
-        if (!leg && c->borrowed) continue;
+        if ((!leg && c->borrowed) || c->fd[leg]<0) continue;
         uint32_t events=0;
         if (c->connecting) { if (leg) events|=EPOLLOUT; }
         else if (c->type==SOCK_DGRAM) {
@@ -149,7 +161,7 @@ static int interests(struct md_network_forward *f,struct flow *c) {
     return 0;
 }
 static struct flow *new_flow(struct md_network_forward *f,struct listener *l,int front,
-        const struct md_inet_address *client,struct md_network_flow_path *path,const struct md_inet_address *target) {
+        const struct md_inet_address *client,struct md_network_flow_path *path,const struct md_inet_address *target,const void *receiver) {
     if (f->flows==1024 || f->next_id>UINT64_MAX/4) { errno=ENOSPC; return NULL; }
     struct flow *c=calloc(1,sizeof(*c));
     if (!c) return NULL;
@@ -157,7 +169,8 @@ static struct flow *new_flow(struct md_network_forward *f,struct listener *l,int
     c->listener=l->external ? l->id : 0; c->space=l->space; c->endpoint=l->external ? NULL : l->endpoint;
     c->client=*client; c->path=*path; c->gateway=l->address;
     c->front_family=l->address.ip.family;
-    if (c->type==SOCK_DGRAM && path->destination) {
+    c->receiver=receiver;
+    if (!receiver && c->type==SOCK_DGRAM && path->destination) {
         struct md_inet_address ignored;
         int error=md_network_endpoint_resolve(f->fabric,path,c->type,&ignored,&c->receiver);
         if (error) { free(c); errno=-error; return NULL; }
@@ -180,7 +193,7 @@ static struct flow *new_flow(struct md_network_forward *f,struct listener *l,int
         c->buffer=calloc(2,sizeof(*c->buffer)); if (!c->buffer) goto failed;
     }
     c->deadline=c->type==SOCK_DGRAM || c->connecting ? now_ms()+30000 : INT64_MAX;
-    for (unsigned leg=0;leg<2;++leg) if (leg || !c->borrowed)
+    for (unsigned leg=0;leg<2;++leg) if (c->fd[leg]>=0 && (leg || !c->borrowed))
         if (watch(f,EPOLL_CTL_ADD,c->fd[leg],c->id,leg,0)) goto failed;
     c->next=f->connections; f->connections=c; ++f->flows;
     int error=interests(f,c);
@@ -223,16 +236,59 @@ static void tcp_accept(struct md_network_forward *f,struct listener *l) {
         struct md_network_flow_path path;
         struct md_inet_address target;
         if (md_inet_name(fd,0,&local) || incoming_path(f,l,&client,&local,&path,&target)) { close(fd); continue; }
-        struct flow *c=new_flow(f,l,fd,&client,&path,&target);
+        struct flow *c=new_flow(f,l,fd,&client,&path,&target,NULL);
         if (!c) close(fd);
         if (!l->external) { drop_listener(f,l); return; }
     }
 }
-static int datagram_send(struct flow *c,unsigned direction,const void *data,size_t size) {
+static int packet_reply(struct md_network_forward *f,struct flow *c,const void *data,size_t size) {
+    struct md_network_namespace *n=md_network_space_find(f->fabric,c->space);
+    struct md_network_interface *input=n ? md_network_interface_find(n,c->packet_input,NULL) : NULL;
+    if (!input || input->policy_id!=c->packet_policy) return -ENETUNREACH;
+    /* check()/account() already walked the retained path in reverse, including
+     * live filters and conntrack's inverse NAT. A fresh route here would apply
+     * NEW policy again and lose the original source address/port. */
+    struct md_network_interface *link=md_network_local_interface(n,c->path.original.source,1);
+    struct md_network_namespace *receiver=n;
+    if (!link) {
+        link=md_network_neighbor(n,input,c->path.original.source);
+        receiver=link ? md_network_interface_owner(f->fabric,link->info.index) : NULL;
+    }
+    if (!receiver) return -ENETUNREACH;
+    c->packet_destination=receiver->inode;
+    struct md_inet_address source={.ip=c->path.original.destination,.port=c->path.original.destination_port};
+    struct md_inet_address destination={.ip=c->path.original.source,.port=c->path.original.source_port};
+    md_network_raw4_reply(receiver,link,&source,&destination,data,size);
+    md_network_raw6_reply(receiver,link,&source,&destination,data,size);
+    struct md_network_flow_path path={.destination=receiver->inode,
+        .translated={.source=source.ip,.source_port=source.port,.destination=destination.ip,
+            .destination_port=destination.port,.protocol=IPPROTO_UDP}};
+    struct md_inet_address target;
+    const void *endpoint=NULL;
+    int error=md_network_endpoint_resolve(f->fabric,&path,SOCK_DGRAM,&target,&endpoint);
+    if (error==-ECONNREFUSED) return 0;
+    if (error) return error;
+    if (!endpoint) return 0;
+    ssize_t sent=md_inet_sendto(c->fd[0],data,size,MSG_DONTWAIT|MSG_NOSIGNAL,&target,0);
+    return sent<0 ? -errno : (size_t)sent==size ? 0 : -EIO;
+}
+static int datagram_send(struct md_network_forward *f,struct flow *c,unsigned direction,const void *data,size_t size) {
     /* A retained tuple describes queued packets, not authority to deliver to a
      * new socket which happens to reuse the closed peer's native port. */
     if ((!direction && c->receiver_closed)
-            || (direction && !c->borrowed && !c->endpoint)) return -ECONNREFUSED;
+            || (direction && !c->borrowed && !c->endpoint && !c->packet_input)) return -ECONNREFUSED;
+    if (c->group) {
+        if (direction) return -EOPNOTSUPP;
+        struct md_network_namespace *n=md_network_space_find(f->fabric,c->path.destination);
+        struct md_network_interface *link=n ? md_network_interface_find(n,c->path.translated.input,NULL) : NULL;
+        if (!link || link->policy_id!=c->packet_policy) return -ENETUNREACH;
+        struct md_inet_address ignored;
+        const void *receiver=NULL;
+        int joined=md_network_multicast_subscribed(n,link,c->path.translated.destination);
+        while ((receiver=md_network_endpoint_group_next(n,link,&c->path.translated,joined,receiver,&ignored)) && receiver!=c->receiver) {}
+        if (!receiver) return -ECONNREFUSED;
+    }
+    if (direction && c->packet_input) return packet_reply(f,c,data,size);
     ssize_t sent=direction ? md_inet_sendto(c->fd[0],data,size,MSG_DONTWAIT|MSG_NOSIGNAL,&c->client,c->front_family)
         : send(c->fd[1],data,size,MSG_DONTWAIT|MSG_NOSIGNAL);
     return sent<0 ? -errno : (size_t)sent==size ? 0 : -EIO;
@@ -245,30 +301,31 @@ static void listener_interests(struct md_network_forward *f,uint64_t id) {
         if (c->borrowed && c->listener==id && c->datagrams[1].head) { events|=EPOLLOUT; break; }
     watch(f,EPOLL_CTL_MOD,l->fd,l->id,2,events);
 }
-static void datagram_submit(struct md_network_forward *f,struct flow *c,unsigned direction,const void *data,size_t size) {
-    int denied=check(f,c,direction);
-    account(c,direction,size);
-    if (denied) return;
+static int datagram_submit(struct md_network_forward *f,struct flow *c,unsigned direction,const void *data,size_t size) {
+    int denied=c->group ? 0 : check(f,c,direction);
+    if (!c->group) account(c,direction,size);
+    if (denied) return -EACCES;
     struct datagram_queue *q=&c->datagrams[direction];
     if (!q->head) {
-        int error=datagram_send(c,direction,data,size);
-        if (!error) { c->deadline=now_ms()+30000; return; }
-        if (error!=-EAGAIN && error!=-EWOULDBLOCK && error!=-EINTR) { ++f->dropped_datagrams; return; }
+        int error=datagram_send(f,c,direction,data,size);
+        if (!error) { c->deadline=now_ms()+30000; return 0; }
+        if (error!=-EAGAIN && error!=-EWOULDBLOCK && error!=-EINTR) { ++f->dropped_datagrams; return 0; }
     }
     struct datagram *d=q->count<64 && size<=262144-q->bytes ? malloc(sizeof(*d)+size) : NULL;
-    if (!d) { ++f->dropped_datagrams; return; }
+    if (!d) { ++f->dropped_datagrams; return 0; }
     d->next=NULL; d->size=size; memcpy(d->data,data,size);
     if (q->tail) q->tail->next=d; else q->head=d;
     q->tail=d; q->bytes+=size; ++q->count;
     c->deadline=now_ms()+30000;
     interests(f,c);
     if (c->borrowed && direction) listener_interests(f,c->listener);
+    return 0;
 }
 static void datagram_flush(struct md_network_forward *f,struct flow *c,unsigned direction) {
     struct datagram_queue *q=&c->datagrams[direction];
     for (unsigned budget=0;q->head && budget<16;++budget) {
         struct datagram *d=q->head;
-        int error=check(f,c,direction) ? -EACCES : datagram_send(c,direction,d->data,d->size);
+        int error=check(f,c,direction) ? -EACCES : datagram_send(f,c,direction,d->data,d->size);
         if (error==-EAGAIN || error==-EWOULDBLOCK || error==-EINTR) break;
         if (error && error!=-EACCES) ++f->dropped_datagrams;
         q->head=d->next; q->bytes-=d->size; --q->count; free(d);
@@ -283,10 +340,86 @@ static void udp_receive(struct md_network_forward *f,struct flow *c,unsigned leg
         struct md_inet_address source;
         ssize_t bytes=md_inet_recvfrom(c->fd[leg],data,sizeof(data),MSG_DONTWAIT,&source);
         if (bytes<0) return;
+        if (c->group) continue;
         if (!leg && !same(&source,&c->client)) continue;
         datagram_submit(f,c,leg,data,(size_t)bytes);
         if (c->datagrams[leg].count>=64 || c->datagrams[leg].bytes>=262144) break;
     }
+}
+struct group_delivery {
+    struct md_network_forward *owner;
+    struct listener *sender;
+    struct md_network_namespace *space;
+    struct md_network_interface *output;
+    struct md_network_flow_path path;
+    const void *data;
+    size_t size;
+    int hops, loop, local_delivered;
+};
+static void group_deliver(struct md_network_forward *f,struct listener *sender,
+        struct md_network_namespace *n,struct md_network_interface *link,
+        struct md_network_flow_path *path,int hops,const void *data,size_t size) {
+    struct md_inet_address target;
+    const void *receiver=NULL;
+    int joined=md_network_multicast_subscribed(n,link,path->translated.destination);
+    while ((receiver=md_network_endpoint_group_next(n,link,&path->translated,joined,receiver,&target))) {
+        struct flow *c=f->connections;
+        while (c && !(c->group && c->endpoint==sender->endpoint && c->receiver==receiver
+                && c->group_hops==hops && c->path.translated.input==link->info.index
+                && md_ip_equal(c->path.original.source,path->original.source)
+                && md_ip_equal(c->path.original.destination,path->original.destination)
+                && c->path.original.source_port==path->original.source_port
+                && c->path.original.destination_port==path->original.destination_port)) c=c->next;
+        if (!c) {
+            c=new_flow(f,sender,-1,&sender->client,path,&target,receiver);
+            if (!c) { ++f->dropped_datagrams; continue; }
+            c->group=1; c->group_hops=hops; c->packet_policy=link->policy_id;
+            int v6=target.ip.family==AF_INET6,native_hops=hops ? hops : 1;
+            if (setsockopt(c->fd[1],v6 ? IPPROTO_IPV6 : IPPROTO_IP,v6 ? IPV6_UNICAST_HOPS : IP_TTL,
+                    &native_hops,sizeof(native_hops))) {
+                drop_flow(f,c); ++f->dropped_datagrams; continue;
+            }
+        }
+        datagram_submit(f,c,0,data,size);
+    }
+}
+static void group_visit(void *context,struct md_network_namespace *n,struct md_network_interface *link,int outgoing) {
+    struct group_delivery *d=context;
+    if (outgoing || (n==d->space && (!d->loop || link!=d->output))
+            || (!d->hops && (n!=d->space || link!=d->output))) return;
+    if (n==d->space && link==d->output) {
+        if (d->local_delivered) return;
+        d->local_delivered=1;
+    }
+    struct md_network_flow_path path=d->path;
+    /* Output was evaluated and accounted once, before the L2 fanout. Each
+     * recipient owns only its input hooks, queue and native receive socket. */
+    path.count=0;
+    int error=md_network_flow_group_input(n,link,&path);
+    struct md_filter_accounting accounting={0};
+    int denied=md_network_flow_accounting(d->owner->fabric,&path,0,!d->sender->group_started,&accounting);
+    md_filter_account(&accounting,d->size); free(accounting.cells);
+    if (error || denied) return;
+    group_deliver(d->owner,d->sender,n,link,&path,d->hops,d->data,d->size);
+}
+static void group_send(struct md_network_forward *f,struct listener *l,const void *data,size_t size) {
+    struct md_network_namespace *n=md_network_space_find(f->fabric,l->space);
+    struct md_network_interface *link=n ? md_network_interface_find(n,l->group_output,NULL) : NULL;
+    const struct md_network_multicast *m=md_network_endpoint_multicast(l->endpoint,l->path.original.destination.family);
+    if (!m || !link || link->policy_id!=l->group_policy || !(link->info.flags&IFF_UP)) return;
+    struct group_delivery d={.owner=f,.sender=l,.space=n,.output=link,.data=data,.size=size,
+        .hops=l->group_hops<0 ? m->hops : l->group_hops,.loop=m->loop};
+    struct md_filter_packet p=l->path.original;
+    p.state=l->group_started ? 2 : 8;
+    int routed=md_network_flow_group_output(n,link,&p,&d.path);
+    struct md_filter_accounting accounting={0};
+    int error=md_network_flow_accounting(f->fabric,&d.path,0,!l->group_started,&accounting);
+    md_filter_account(&accounting,size); free(accounting.cells);
+    if (error || routed) return;
+    if (link->kind!=MD_LINK_LOOPBACK) group_visit(&d,n,link,0);
+    if (md_network_link_walk(n,link,0,group_visit,&d)) ++f->dropped_datagrams;
+    l->group_started=1;
+    l->deadline=now_ms()+30000;
 }
 static void udp_accept(struct md_network_forward *f,struct listener *l) {
     unsigned char data[65536];
@@ -299,6 +432,10 @@ static void udp_accept(struct md_network_forward *f,struct listener *l) {
         ssize_t bytes=recvmsg(l->fd,&message,MSG_DONTWAIT);
         if (bytes<0) return;
         if (md_inet_decode((void *)&wire,message.msg_namelen,&client)) continue;
+        if (l->group_output) {
+            if (same(&client,&l->client)) group_send(f,l,data,(size_t)bytes);
+            continue;
+        }
         struct md_inet_address local=l->address;
         for (struct cmsghdr *h=CMSG_FIRSTHDR(&message);h;h=CMSG_NXTHDR(&message,h))
             if (h->cmsg_level==IPPROTO_IP && h->cmsg_type==IP_PKTINFO && h->cmsg_len==CMSG_LEN(sizeof(struct in_pktinfo))) {
@@ -314,7 +451,7 @@ static void udp_accept(struct md_network_forward *f,struct listener *l) {
         if (!c) {
             struct md_network_flow_path path; struct md_inet_address target;
             if (incoming_path(f,l,&client,&local,&path,&target)) continue;
-            c=new_flow(f,l,l->fd,&client,&path,&target);
+            c=new_flow(f,l,l->fd,&client,&path,&target,NULL);
             if (!c) continue;
         }
         datagram_submit(f,c,0,data,(size_t)bytes);
@@ -457,7 +594,7 @@ int md_network_forward_bind(struct md_network_namespace *n,const void *endpoint,
     r->owner=n->fabric->forward;
     struct listener *l=r->owner->ports;
     while (l && !(l->external && l->space==n->inode && l->type==type && same(&l->address,address))) l=l->next;
-    if (l && l->endpoint==endpoint) { free(r); return 0; }
+    if (l && (l->endpoint==endpoint || (l->endpoint && type==SOCK_DGRAM))) { free(r); return 0; }
     if (l && l->endpoint) { free(r); return -EADDRINUSE; }
     if (!l) {
         l=new_listener(r->owner,n->inode,type,*address,1,0,v6only);
@@ -580,23 +717,113 @@ int md_network_forward_route(struct md_network_namespace *n,const void *endpoint
     if (type==SOCK_DGRAM) {
         epoll_ctl(f->epoll,EPOLL_CTL_DEL,l->fd,NULL);
         int fd=l->fd;
-        struct flow *c=new_flow(f,l,fd,&l->client,path,target);
+        struct flow *c=new_flow(f,l,fd,&l->client,path,target,NULL);
         if (!c) { drop_listener(f,l); return -errno; }
         l->fd=-1; drop_listener(f,l);
     }
     wake(f); return 0;
 }
-int md_network_forward_source(struct md_network_namespace *n,int type,struct md_inet_address *address,struct md_ip_address *local) {
+int md_network_forward_datagram(struct md_network_namespace *n,unsigned input,
+        const struct md_filter_packet *packet,unsigned hops,const void *data,size_t size) {
+    struct md_network_interface *link=md_network_interface_find(n,input,NULL);
+    if (!link) return -ENODEV;
+    int error=ensure(n->fabric); if (error) return error;
+    struct md_network_forward *f=n->fabric->forward;
+    if (md_ip_multicast(packet->destination) || md_network_interface_broadcast(link,packet->destination)) {
+        struct md_network_flow_path path={.original=*packet,.translated=*packet,.mediated=1,
+            .generation=n->fabric->policy_generation};
+        path.original.packet_type=path.translated.packet_type=md_ip_multicast(packet->destination)
+            ? PACKET_MULTICAST : PACKET_BROADCAST;
+        path.original.fib_type=path.translated.fib_type=md_ip_multicast(packet->destination)
+            ? RTN_MULTICAST : RTN_BROADCAST;
+        error=md_network_flow_group_input(n,link,&path);
+        struct md_filter_accounting accounting={0};
+        int denied=md_network_flow_accounting(n->fabric,&path,0,1,&accounting);
+        md_filter_account(&accounting,size); free(accounting.cells);
+        if (error || denied) return error ? error : denied;
+        struct listener sender={.space=n->inode,.type=SOCK_DGRAM,
+            .address={.ip=md_ip_loopback(packet->source.family)}};
+        group_deliver(f,&sender,n,link,&path,(int)hops,data,size);
+        wake(f); return 0;
+    }
+    struct flow *c=f->connections;
+    while (c) {
+        const struct md_filter_packet *original=&c->path.original;
+        if (c->space==n->inode && c->packet_input==input && c->packet_policy==link->policy_id
+                && !c->receiver_closed
+                && md_ip_equal(original->source,packet->source) && md_ip_equal(original->destination,packet->destination)
+                && original->source_port==packet->source_port && original->destination_port==packet->destination_port) break;
+        c=c->next;
+    }
+    if (!c) {
+        /* A retained UDP tuple keeps its NAT binding. Only a new flow routes
+         * through NEW rules; generation changes recheck live filter policy. */
+        struct md_network_flow_path path;
+        struct md_filter_packet p=*packet;
+        error=md_network_flow_route(n,&p,1,input,&path);
+        struct md_inet_address target;
+        const void *endpoint=NULL;
+        if (!error) error=md_network_endpoint_resolve(n->fabric,&path,SOCK_DGRAM,&target,&endpoint);
+        if (error || !endpoint) {
+            /* Raw observers still receive admitted UDP without a UDP socket.
+             * Count the actual packet (including a denied one), not each tap. */
+            if (error && error!=-ECONNREFUSED && error!=-EACCES) return error;
+            struct md_filter_accounting accounting={0};
+            int verdict=md_network_flow_accounting(n->fabric,&path,0,1,&accounting);
+            md_filter_account(&accounting,size); free(accounting.cells);
+            return verdict ? verdict : error==-ECONNREFUSED ? 0 : error;
+        }
+        struct listener l={.space=n->inode,.type=SOCK_DGRAM,.address={.ip=md_ip_loopback(packet->source.family)}};
+        int fd=socket_bound(SOCK_DGRAM,&l.address,1);
+        if (fd<0) return fd;
+        c=new_flow(f,&l,fd,&l.address,&path,&target,endpoint);
+        if (!c) { error=-errno; close(fd); return error; }
+        c->packet_input=input; c->packet_policy=link->policy_id;
+    }
+    error=datagram_submit(f,c,0,data,size);
+    int watched=interests(f,c);
+    if (watched) { drop_flow(f,c); if (!error) error=watched; }
+    wake(f); return error;
+}
+int md_network_forward_group(struct md_network_namespace *n,const void *endpoint,const struct md_inet_address *client,
+        struct md_filter_packet *packet,unsigned output,int hops,struct md_inet_address *destination) {
+    struct md_network_route_entry route;
+    struct md_network_interface *link=md_network_route_lookup(n,packet->destination,output,&route);
+    if (!link || !(link->info.flags&IFF_UP)) return -ENETUNREACH;
+    if (md_ip_unspecified(packet->source)) packet->source=md_network_route_source(n,link,&route,packet->destination);
+    if (md_ip_unspecified(packet->source)) return -EADDRNOTAVAIL;
+    int error=ensure(n->fabric); if (error) return error;
+    struct md_network_forward *f=n->fabric->forward;
+    for (struct listener *l=f->ports;l;l=l->next)
+        if (l->group_output==link->info.index && l->group_policy==link->policy_id && l->endpoint==endpoint
+                && l->group_hops==hops && md_ip_equal(l->path.original.source,packet->source)
+                && md_ip_equal(l->path.original.destination,packet->destination)
+                && l->path.original.destination_port==packet->destination_port) {
+            *destination=l->address; return 0;
+        }
+    struct md_inet_address address={.ip=md_ip_loopback(packet->source.family)};
+    struct listener *l=new_listener(f,n->inode,SOCK_DGRAM,address,0,1,1);
+    if (!l) return -errno;
+    l->endpoint=endpoint; l->client=*client; l->client.ip=address.ip;
+    l->group_output=link->info.index; l->group_policy=link->policy_id; l->group_hops=hops;
+    /* A connected socket keeps this carrier across membership/rule changes.
+     * Evaluate and account actual packets in the relay, before fanout. */
+    l->path.original=*packet; l->active=1;
+    *destination=l->address; wake(f); return 0;
+}
+int md_network_forward_source(struct md_network_namespace *n,int type,struct md_inet_address *address,struct md_network_packet_info *info) {
     struct md_network_forward *f=n->fabric->forward;
     if (!f || !md_ip_is_loopback(address->ip)) return 0;
     for (struct flow *c=f->connections;c;c=c->next) {
         if (c->type!=type) continue;
         if (c->remote.ip.family==address->ip.family && c->remote.port==address->port && c->path.destination==n->inode) {
-            if (local) *local=c->path.translated.destination;
+            if (info) *info=(struct md_network_packet_info){.destination=c->path.translated.destination,
+                .interface=c->path.translated.input,.hops=c->group_hops,.hops_set=c->group};
             address->ip=c->path.translated.source; address->port=c->path.translated.source_port; return 1;
         }
-        if (c->gateway.ip.family==address->ip.family && c->gateway.port==address->port && c->space==n->inode && !c->borrowed) {
-            if (local) *local=c->path.original.source;
+        if (c->gateway.ip.family==address->ip.family && c->gateway.port==address->port
+                && (c->packet_input ? c->packet_destination==n->inode : c->space==n->inode) && !c->borrowed) {
+            if (info) *info=(struct md_network_packet_info){.destination=c->path.original.source};
             address->ip=c->path.original.destination; address->port=c->path.original.destination_port; return 1;
         }
     }
@@ -607,7 +834,7 @@ int md_network_forward_destination(struct md_network_namespace *n,const void *en
     struct md_network_forward *f=n->fabric->forward;
     if (!f) return 0;
     for (struct flow *c=f->connections;c;c=c->next) {
-        if (c->type!=type) continue;
+        if (c->type!=type || c->group) continue;
         /* Addressed UDP keeps the established mapping too. The relay checks
          * the current generation; sendto must not re-run NEW/NAT each time. */
         if (type==SOCK_DGRAM && c->endpoint==endpoint
@@ -642,7 +869,8 @@ void md_network_forward_endpoint_disconnected(struct md_network_namespace *n,con
     while (l) {
         struct listener *next=l->next;
         if (l->endpoint==endpoint && (unbound || !l->external)) {
-            l->endpoint=NULL;
+            l->endpoint=l->external && l->type==SOCK_DGRAM ? md_network_endpoint_publication(n,endpoint,l->type,&l->address) : NULL;
+            if (l->endpoint) { l=next; continue; }
             l->endpoint_listening=0;
             if (!l->external || !l->published) drop_listener(f,l);
         }

@@ -4,9 +4,11 @@
 #include <linux/netfilter/nf_tables.h>
 #include <linux/netfilter_ipv4.h>
 #include <linux/rtnetlink.h>
+#include <linux/if_packet.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <string.h>
+#include <stdlib.h>
 
 struct md_network_namespace *md_network_space_find(struct md_network_fabric *f,uint64_t inode) {
     for (struct md_network_namespace *n=f->spaces;n;n=n->next) if (n->inode==inode) return n;
@@ -56,8 +58,36 @@ static struct md_filter_rewrite tuple(const struct md_filter_packet *p) {
     return (struct md_filter_rewrite){.source=p->source,.destination=p->destination,
         .source_port=p->source_port,.destination_port=p->destination_port};
 }
+struct route_context { struct md_network_namespace *space; const struct md_network_flow_path *path; };
+static int native_local(const struct route_context *context,struct md_ip_address address) {
+    return context->path->native_space==context->space->inode
+        && md_ip_equal(address,context->path->native_address);
+}
+static unsigned address_type(const struct route_context *context,struct md_ip_address address) {
+    return native_local(context,address) ? RTN_LOCAL : md_network_address_type(context->space,address);
+}
+static struct md_filter_route_result filter_route(void *opaque,const struct md_filter_packet *p,unsigned flags) {
+    const struct route_context *context=opaque;
+    struct md_network_namespace *n=context->space;
+    struct md_ip_address address=flags&NFTA_FIB_F_SADDR ? p->source : p->destination;
+    unsigned index=flags&NFTA_FIB_F_OIF ? p->output : 0;
+    if (address.family==AF_INET6 && (flags&NFTA_FIB_F_IIF)) index=p->input;
+    struct md_network_interface *link=md_network_route_lookup(n,address,index,NULL);
+    if (!index && native_local(context,address)) link=md_network_interface_find(n,1,NULL);
+    struct md_filter_route_result result={.type=RTN_UNREACHABLE};
+    if (link) {
+        result.type=address_type(context,address);
+        if (!(flags&NFTA_FIB_F_IIF) || link->info.index==p->input) {
+            result.interface=link->info.index;
+            memcpy(result.name,link->info.name,sizeof(result.name));
+        }
+    }
+    return result;
+}
 static int hook(struct md_network_namespace *n,unsigned which,struct md_filter_packet *p,struct md_network_flow_path *path) {
-    p->source_fib_type=md_network_local_interface(n,p->source,0) ? RTN_LOCAL : RTN_UNICAST;
+    struct route_context context={n,path};
+    p->source_fib_type=address_type(&context,p->source);
+    p->fib_type=address_type(&context,p->destination);
     if (path->count==16) return -ELOOP;
     struct md_network_flow_step *step=&path->steps[path->count++];
     *step=(struct md_network_flow_step){.space=n->inode,.hook=which,.packet=*p};
@@ -71,7 +101,9 @@ static int hook(struct md_network_namespace *n,unsigned which,struct md_filter_p
                 && (f->chains[i].hook==(int)which || f->chains[i].hook==(int)reverse_hook(which))
                 && requires_mediation(f,&f->chains[i],0)) path->mediated=1;
     int priority=0;
+    p->route_context=&context; p->route=filter_route;
     int error=md_filter_evaluate_transition(f,which,p,NULL,&priority);
+    p->route_context=NULL; p->route=NULL;
     step->after=tuple(p); step->after.priority=priority;
     if (p->snat || p->dnat) path->mediated=1;
     return error;
@@ -86,26 +118,73 @@ static struct md_network_interface *bridge_peer(struct md_network_namespace *n,c
     }
     return NULL;
 }
+int md_network_flow_packet_policy(struct md_network_namespace *n,const struct md_network_interface *link,
+        struct md_filter_packet *p,int input,size_t bytes) {
+    if (!n->filter || !n->filter->chain_count) return 0;
+    struct md_filter_accounting accounting={0};
+    struct md_network_flow_path path={0};
+    p->accounting=&accounting;
+    p->fib_type=md_network_address_type(n,p->destination);
+    p->packet_type=p->fib_type==RTN_MULTICAST ? PACKET_MULTICAST
+        : p->fib_type==RTN_BROADCAST ? PACKET_BROADCAST : PACKET_HOST;
+    interface(p,input ? link : NULL,1); interface(p,input ? NULL : link,0);
+    int error=hook(n,input ? NF_INET_PRE_ROUTING : NF_INET_LOCAL_OUT,p,&path);
+    if (!error) error=hook(n,input ? NF_INET_LOCAL_IN : NF_INET_POST_ROUTING,p,&path);
+    /* Raw packets are already materialized. A tuple-only NAT change must not
+     * masquerade as rewriting their headers and checksum. */
+    if (!error && (p->snat || p->dnat)) error=-EOPNOTSUPP;
+    md_filter_account(&accounting,bytes); free(accounting.cells); p->accounting=NULL;
+    return error;
+}
+int md_network_flow_group_output(struct md_network_namespace *n,struct md_network_interface *out,
+        struct md_filter_packet *p,struct md_network_flow_path *path) {
+    *path=(struct md_network_flow_path){.generation=n->fabric->policy_generation,.mediated=1};
+    p->packet_type=md_ip_multicast(p->destination) ? PACKET_MULTICAST : PACKET_BROADCAST;
+    p->fib_type=md_ip_multicast(p->destination) ? RTN_MULTICAST : RTN_BROADCAST;
+    interface(p,NULL,1); interface(p,out,0);
+    path->original=*p;
+    int error=hook(n,NF_INET_LOCAL_OUT,p,path);
+    if (!error) error=hook(n,NF_INET_POST_ROUTING,p,path);
+    if (!error && (p->snat || p->dnat)) error=-EOPNOTSUPP;
+    path->translated=*p; return error;
+}
+int md_network_flow_group_input(struct md_network_namespace *n,struct md_network_interface *in,
+        struct md_network_flow_path *path) {
+    struct md_filter_packet p=path->translated;
+    int error=md_network_ingress(n,in,p.source,p.destination);
+    interface(&p,in,1); interface(&p,NULL,0);
+    if (!error) error=hook(n,NF_INET_PRE_ROUTING,&p,path);
+    if (!error) error=hook(n,NF_INET_LOCAL_IN,&p,path);
+    if (!error && (p.snat || p.dnat)) error=-EOPNOTSUPP;
+    path->translated=p; path->destination=n->inode; return error;
+}
 int md_network_flow_route(struct md_network_namespace *from,struct md_filter_packet *p,int external,
         unsigned output,struct md_network_flow_path *path) {
     *path=(struct md_network_flow_path){.generation=from->fabric->policy_generation};
+    /* Only the native listener knows its accepted destination is local.
+     * A raw ingress packet supplies an interface, not this authority. */
+    if (external && !output) { path->native_space=from->inode; path->native_address=p->destination; }
+    struct route_context context={from,path};
     struct md_network_namespace *n=from;
+    if (md_ip_multicast(p->destination)) p->packet_type=PACKET_MULTICAST;
+    else if (md_network_address_type(n,p->destination)==RTN_BROADCAST) p->packet_type=PACKET_BROADCAST;
     struct md_network_route_entry origin={0};
     struct md_network_interface *out=md_network_route_lookup(n,p->destination,output,&origin);
     if (!external) path->transport=md_network_route_transport(out,&origin);
-    if (!external && md_ip_unspecified(p->source)) p->source=md_network_interface_source(out,p->destination);
+    if (!external && md_ip_unspecified(p->source)) p->source=md_network_route_source(n,out,&origin,p->destination);
     interface(p,out,0);
-    p->fib_type=external || md_network_local_interface(n,p->destination,0) ? RTN_LOCAL : RTN_UNICAST;
+    p->fib_type=address_type(&context,p->destination);
     path->original=*p;
     int arrived=external;
     unsigned ingress_port=0;
-    if (external) interface(p,md_ip_is_loopback(p->source)
-        ? md_network_interface_find(n,1,NULL) : md_network_route_find(n,p->source,NULL),1);
+    if (external) interface(p,output ? md_network_interface_find(n,output,NULL)
+        : md_ip_is_loopback(p->source) ? md_network_interface_find(n,1,NULL) : md_network_route_find(n,p->source,NULL),1);
     int error=hook(n,external ? NF_INET_PRE_ROUTING : NF_INET_LOCAL_OUT,p,path);
     while (!error) {
         struct md_network_interface *local=md_network_local_interface(n,p->destination,1);
         if (local && md_ip_linklocal(p->destination) && n==from && output && local->info.index!=output) local=NULL;
-        if (local || (external && n==from && !p->dnat)) {
+        context.space=n;
+        if (local || native_local(&context,p->destination)) {
             interface(p,NULL,0);
             if (!arrived) interface(p,local,1);
             error=hook(n,NF_INET_LOCAL_IN,p,path);
@@ -158,7 +237,7 @@ int md_network_flow_route(struct md_network_namespace *from,struct md_filter_pac
         ingress_port=out->kind==MD_LINK_VETH ? out->peer : 0;
         n=next; arrived=1; external=0;
         interface(p,input,1); interface(p,md_network_route_find(n,p->destination,NULL),0);
-        p->fib_type=md_network_local_interface(n,p->destination,0) ? RTN_LOCAL : RTN_UNICAST;
+        p->fib_type=md_network_address_type(n,p->destination);
         error=hook(n,NF_INET_PRE_ROUTING,p,path);
     }
     path->translated=*p; return error;
@@ -177,6 +256,8 @@ static int check_path(struct md_network_fabric *f,struct md_network_flow_path *p
             if (!in || !md_network_bridge_forward(in,out)) return -EACCES;
         }
         struct md_filter_packet p=s->packet;
+        struct route_context context={n,path};
+        p.route_context=&context; p.route=filter_route;
         struct md_filter_rewrite rewrite=s->after;
         /* NEW data may arrive after a ruleset change. Keep its admitted NAT
          * binding (including no translation), while evaluating current filters. */
@@ -203,10 +284,10 @@ static int check_path(struct md_network_fabric *f,struct md_network_flow_path *p
                 ? NF_IP_PRI_NAT_DST : NF_IP_PRI_NAT_SRC;
         }
         if (!override && hook==NF_INET_FORWARD && !md_network_forwarding(n,p.destination.family,p.input)) return -ENETUNREACH;
-        p.fib_type=md_network_local_interface(n,p.destination,0) ? RTN_LOCAL : RTN_UNICAST;
-        p.source_fib_type=md_network_local_interface(n,p.source,0) ? RTN_LOCAL : RTN_UNICAST;
-        rewrite.fib_type=md_network_local_interface(n,rewrite.destination,0) ? RTN_LOCAL : RTN_UNICAST;
-        rewrite.source_fib_type=md_network_local_interface(n,rewrite.source,0) ? RTN_LOCAL : RTN_UNICAST;
+        p.fib_type=address_type(&context,p.destination);
+        p.source_fib_type=address_type(&context,p.source);
+        rewrite.fib_type=address_type(&context,rewrite.destination);
+        rewrite.source_fib_type=address_type(&context,rewrite.source);
         /* Existing connections retain even an untranslated NAT binding. The
          * evaluator skips NAT chains for them, including counters and jumps;
          * only live filter chains can revoke their native data path. */

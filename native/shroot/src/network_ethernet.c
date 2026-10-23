@@ -1,7 +1,9 @@
 #define _GNU_SOURCE
 #include "network_ethernet.h"
 #include "network_internal.h"
-#include "network_icmp6.h"
+#include "network_raw6.h"
+#include "network_raw4.h"
+#include "network_link.h"
 #include <errno.h>
 #include <limits.h>
 #include <linux/if_ether.h>
@@ -74,62 +76,30 @@ static void deliver(struct md_network_namespace *n,const struct md_network_inter
         if (outgoing ? s->ignore_outgoing || s->protocol!=htons(ETH_P_ALL)
                 : s->protocol!=htons(ETH_P_ALL) && s->protocol!=frame->h_proto) continue;
         size_t skip=s->type==SOCK_DGRAM ? sizeof(*frame) : 0;
+        header.auxiliary=(struct tpacket_auxdata){.tp_status=TP_STATUS_USER,
+            .tp_len=(uint32_t)(size-skip),.tp_snaplen=(uint32_t)(size-skip),.tp_net=skip ? 0 : ETH_HLEN};
         struct iovec vectors[]={{&header,sizeof(header)},{(char *)frame+skip,size-skip}};
         struct msghdr message={.msg_iov=vectors,.msg_iovlen=2};
         if (sendmsg(s->peer,&message,MSG_DONTWAIT|MSG_NOSIGNAL)<0 && errno!=ECONNREFUSED) s->overflow=1;
     }
 }
-struct hop { struct md_network_namespace *space; struct md_network_interface *link; int outgoing; };
-static void enqueue(struct hop *queue,size_t *count,struct md_network_namespace *n,struct md_network_interface *link,int outgoing) {
-    if (!link || !(link->info.flags&IFF_UP)) return;
-    for (size_t i=0;i<*count;++i) if (queue[i].space==n && queue[i].link==link && queue[i].outgoing==outgoing) return;
-    queue[(*count)++]=(struct hop){n,link,outgoing};
+struct frame_delivery { const struct md_network_ethernet *sender; const struct ethhdr *frame; size_t size; };
+static void frame_visit(void *context,struct md_network_namespace *n,struct md_network_interface *link,int outgoing) {
+    const struct frame_delivery *d=context;
+    deliver(n,link,d->sender,d->frame,d->size,outgoing);
+    if (!outgoing && d->frame->h_proto==htons(ETH_P_IPV6)) md_network_raw6_receive(n,link,d->frame,d->size);
+    if (!outgoing && d->frame->h_proto==htons(ETH_P_IP)) md_network_raw4_receive(n,link,d->frame,d->size);
 }
 int md_network_ethernet_transmit(struct md_network_namespace *space,struct md_network_interface *source,
         const struct md_network_ethernet *s,const void *data,size_t size) {
     const struct ethhdr *frame=data;
-    /* Every interface can be visited once in each direction. Allocate before
-     * publication, then walk iteratively so bridge/veth cycles cannot recurse. */
-    size_t capacity=0;
-    for (struct md_network_namespace *n=space->fabric->spaces;n;n=n->next) {
-        if (n->count>(SIZE_MAX/sizeof(struct hop)-capacity)/2) return -EOVERFLOW;
-        capacity+=2*n->count;
-    }
-    struct hop *queue=calloc(capacity,sizeof(*queue));
-    if (!queue) return -ENOMEM;
-    size_t count=0;
-    enqueue(queue,&count,space,source,1);
     static const unsigned char reserved[5]={1,0x80,0xc2,0,0};
     int link_local=!memcmp(frame->h_dest,reserved,sizeof(reserved)) && frame->h_dest[5]<=15;
-    for (size_t at=0;at<count;++at) {
-        struct hop hop=queue[at];
-        struct md_network_interface *link=hop.link;
-        deliver(hop.space,link,s,frame,size,hop.outgoing);
-        if (!hop.outgoing && frame->h_proto==htons(ETH_P_IPV6))
-            md_network_icmp6_receive(hop.space,link,frame,size);
-        if (hop.outgoing && link->kind==MD_LINK_LOOPBACK) enqueue(queue,&count,hop.space,link,0);
-        else if (hop.outgoing && link->kind==MD_LINK_VETH) {
-            struct md_network_namespace *peer=md_network_interface_owner(hop.space->fabric,link->peer);
-            if (peer) enqueue(queue,&count,peer,md_network_interface_find(peer,link->peer,NULL),0);
-        } else if (link->kind==MD_LINK_BRIDGE || (!hop.outgoing && link->master)) {
-            unsigned bridge=link->kind==MD_LINK_BRIDGE ? link->info.index : link->master;
-            if (link->master) {
-                struct md_network_interface *master=md_network_interface_find(hop.space,bridge,NULL);
-                if (master && (master->info.flags&IFF_UP)) {
-                    deliver(hop.space,master,s,frame,size,0);
-                    if (frame->h_proto==htons(ETH_P_IPV6)) md_network_icmp6_receive(hop.space,master,frame,size);
-                }
-            }
-            if (!link_local || hop.outgoing) for (unsigned i=0;i<hop.space->count;++i) {
-                struct md_network_interface *port=&hop.space->links[i];
-                if (port->master==bridge && md_network_bridge_forward(link->kind==MD_LINK_BRIDGE ? NULL : link,port))
-                    enqueue(queue,&count,hop.space,port,1);
-            }
-        }
-    }
-    free(queue); return 0;
+    struct frame_delivery delivery={s,frame,size};
+    return md_network_link_walk(space,source,link_local,frame_visit,&delivery);
 }
-static long send_frame(struct md_network_ethernet *s,const void *data,size_t size,const struct md_network_address *destination) {
+static long send_frame(struct md_network_ethernet *s,const void *data,size_t size,const struct md_network_send *destination) {
+    if (destination && destination->control_size) return -EOPNOTSUPP;
     struct sockaddr_ll address={.sll_ifindex=(int)s->index,.sll_protocol=s->protocol};
     if (destination && destination->size) {
         if (destination->size<sizeof(address) || destination->size>sizeof(destination->value)) return -EINVAL;
@@ -158,7 +128,7 @@ static long send_frame(struct md_network_ethernet *s,const void *data,size_t siz
     free(allocation); return error ? error : (long)size;
 }
 long md_network_ethernet_call(struct md_network_ethernet *s,long nr,const unsigned long *a,void *data,size_t capacity,size_t size,
-        const struct md_network_address *destination) {
+        const struct md_network_send *destination) {
     if (nr==SYS_sendto || nr==SYS_sendmsg || nr==SYS_write) return send_frame(s,data,size,destination);
     if (nr==SYS_connect) return -EOPNOTSUPP;
     if (nr==SYS_getpeername) return -EOPNOTSUPP;
@@ -183,6 +153,11 @@ long md_network_ethernet_call(struct md_network_ethernet *s,long nr,const unsign
         memcpy(data,&address,sizeof(address)); return sizeof(address);
     }
     if (nr==SYS_setsockopt && a[1]==SOL_PACKET) {
+        if (a[2]==PACKET_AUXDATA) {
+            if (size!=sizeof(int)) return -EINVAL;
+            int value; memcpy(&value,data,sizeof(value));
+            s->auxiliary=!!value; return 0;
+        }
         if (a[2]==PACKET_ADD_MEMBERSHIP || a[2]==PACKET_DROP_MEMBERSHIP) return membership(s,(int)a[2],data,size);
         if (a[2]==PACKET_IGNORE_OUTGOING) {
             if (size!=sizeof(int)) return -EINVAL;
@@ -194,6 +169,10 @@ long md_network_ethernet_call(struct md_network_ethernet *s,long nr,const unsign
     if (nr==SYS_getsockopt && a[1]==SOL_PACKET && a[2]==PACKET_IGNORE_OUTGOING) {
         if (capacity<sizeof(int)) return -EINVAL;
         memcpy(data,&s->ignore_outgoing,sizeof(int)); return sizeof(int);
+    }
+    if (nr==SYS_getsockopt && a[1]==SOL_PACKET && a[2]==PACKET_AUXDATA) {
+        if (capacity<sizeof(int)) return -EINVAL;
+        memcpy(data,&s->auxiliary,sizeof(int)); return sizeof(int);
     }
     return -EOPNOTSUPP;
 }
