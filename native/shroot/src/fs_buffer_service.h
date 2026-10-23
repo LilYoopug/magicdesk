@@ -16,6 +16,7 @@ struct md_fd_object;
 struct md_fs_task_capture;
 struct md_fs_buffer_open {
     int fd; unsigned flags, task_path; struct md_fs_anchor *origin;
+    unsigned source_parent; /* Retained named-source directory FD + 1, or zero. */
     struct md_fd_object *object;
     struct md_open_completion completion;
 };

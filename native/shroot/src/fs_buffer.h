@@ -50,8 +50,10 @@ struct md_fs_buffer_frame {
     unsigned transfer;
     /* Internal O_PATH reopen flags, validated against supervisor-owned custody. */
     unsigned source_flags;
+    unsigned source_verify;
+    uint64_t source_device, source_inode;
     struct { uint64_t request; unsigned mask; int number; } export;
-    char source[96];
+    char source[64+NAME_MAX];
     struct { uint64_t token; int number; unsigned mapped; } receive;
     struct { unsigned count; enum md_received_source source; int index[253]; } rights;
     struct { int number; struct md_fd_channel_observation observation; } channel;
@@ -63,6 +65,10 @@ struct md_fs_buffer_frame {
         struct md_received_message received_message;
     };
 };
+static inline int md_fs_buffer_source_matches(const struct md_fs_buffer_frame *frame,
+        uint64_t device,uint64_t inode) {
+    return !frame->source_verify || (device==frame->source_device && inode==frame->source_inode);
+}
 /* Bootstrap-only FD setup; ordinary calls exchange registers and mapped bytes. */
 #ifndef MD_USE_LIBC
 long md_guest_buffer_result(unsigned flags,unsigned mode,struct md_fs_buffer_frame *);

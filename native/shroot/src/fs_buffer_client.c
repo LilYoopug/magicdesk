@@ -89,6 +89,12 @@ static long receive_result(struct md_fs_buffer_frame *frame, const struct md_fs_
             long fd=md_guest_open_anchor(AT_FDCWD,frame->source,
                 transfer==MD_FS_BUFFER_CALLER_OPEN ? md_open_endpoint_flags(q->flags)
                     : frame->source_flags,0,MD_FS_BUFFER_SOURCE);
+            if (fd>=0 && frame->source_verify) {
+                struct stat st;
+                long checked=RAW2(fstat,fd,&st);
+                if (!checked && !md_fs_buffer_source_matches(frame,st.st_dev,st.st_ino)) checked=-ESTALE;
+                if (checked<0) { RAW1(close,fd); fd=checked; }
+            }
             if (fd<0) out->result.error=(int)fd;
             else out->result.fd=(int)fd;
         }

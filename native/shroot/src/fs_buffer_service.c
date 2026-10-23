@@ -110,6 +110,7 @@ static int retains_context(const struct md_fs_buffer_request *r) {
 }
 void md_fs_buffer_open_release(struct md_fs_buffer_open *o) {
     if (o->fd>=0) close(o->fd);
+    if (o->source_parent) close((int)o->source_parent-1);
     if (o->completion.kind==MD_OPEN_PIPE) close(o->completion.control);
     md_fs_anchor_release(o->origin);
     md_fd_object_release(o->object);
@@ -119,7 +120,7 @@ struct md_fd_object *md_fs_buffer_open_object(const struct md_fs_buffer_open *o)
     return o->object ? o->object : md_fs_anchor_object(o->origin);
 }
 int md_fs_buffer_open_take(struct md_fs_buffer_request *r, struct md_fs_buffer_open *out) {
-    if (!r || !out || out->fd>=0 || out->origin || out->object) return -EINVAL;
+    if (!r || !out || out->fd>=0 || out->origin || out->object || out->source_parent) return -EINVAL;
     if (r->task_pending) return 0;
     if (r->opened.fd<0) return 0;
     *out=r->opened; r->opened=(struct md_fs_buffer_open){.fd=-1}; return 1;
@@ -636,8 +637,34 @@ static void run(struct md_fs_work *work, struct md_filesystem *fs, int error) {
     reply->result.open_completion=(struct md_open_completion){0};
     prepare_open(r,fs);
 }
+static int named_link_source(struct md_fs_buffer_request *r,const struct stat *expected) {
+    char proc[64],path[PATH_MAX];
+    snprintf(proc,sizeof(proc),"/proc/self/fd/%d",r->opened.fd);
+    ssize_t length=readlink(proc,path,sizeof(path)-1);
+    if (length<0) return -errno;
+    if ((size_t)length==sizeof(path)-1) return -ENAMETOOLONG;
+    path[length]=0;
+    char *name=strrchr(path,'/');
+    if (path[0]!='/' || !name || !name[1]) return -EXDEV;
+    *name++=0;
+    int parent=open(*path ? path : "/",O_PATH|O_DIRECTORY|O_CLOEXEC);
+    if (parent<0) return -errno;
+    struct stat current;
+    int error=fstatat(parent,name,&current,AT_SYMLINK_NOFOLLOW) ? -errno
+        : current.st_dev!=expected->st_dev || current.st_ino!=expected->st_ino ? -ESTALE : 0;
+    int size=error ? 0 : snprintf(r->output->source,sizeof(r->output->source),
+        "/proc/%d/fd/%d/%s",getpid(),parent,name);
+    if (!error && (size<0 || (size_t)size>=sizeof(r->output->source))) error=-ENAMETOOLONG;
+    if (error) { close(parent); return error; }
+    r->opened.source_parent=(unsigned)parent+1;
+    r->output->source_verify=1;
+    r->output->source_device=expected->st_dev;
+    r->output->source_inode=expected->st_ino;
+    return 0;
+}
 static void prepare_open(struct md_fs_buffer_request *r,struct md_filesystem *fs) {
     struct md_fs_response *reply=&r->output->reply;
+    r->output->source_verify=0;
     if (r->opened.fd>=0) {
         if (r->reopened) {
             md_fs_anchor_release(r->opened.origin); r->opened.origin=NULL;
@@ -696,6 +723,13 @@ static void prepare_open(struct md_fs_buffer_request *r,struct md_filesystem *fs
                         const char *link=S_ISLNK(st.st_mode)
                             ? md_procfs_static_link(r->opened.fd) : NULL;
                         if (link) snprintf(r->output->source,sizeof(r->output->source),"%s",link);
+                        else if (S_ISLNK(st.st_mode)) {
+                            /* SCM_RIGHTS can silently discard accessible host
+                             * links. Pin their parent; the caller checks the
+                             * opened inode before exposing a mutable name. */
+                            int named=named_link_source(r,&st);
+                            if (named) r->output->transfer=MD_FS_BUFFER_RIGHTS;
+                        }
                         else r->output->transfer=MD_FS_BUFFER_RIGHTS;
                     }
                     else { r->error=source; return; }

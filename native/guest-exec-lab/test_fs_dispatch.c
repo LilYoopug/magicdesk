@@ -1087,13 +1087,14 @@ static void buffer_native_path_delivery(struct md_fs_buffer_service *service,
         assert(!fstat(opened.fd,&expected));
         struct md_fs_result result={.fd=-1};
         struct md_fs_buffer_request *request=NULL;
-        *frame=(struct md_fs_buffer_frame){0};
+        *frame=(struct md_fs_buffer_frame){.source_verify=1};
         int callbacks=buffer_callbacks;
         assert(!md_fs_buffer_adopt(service,getpid(),fs,MD_FS_OPEN,O_PATH|O_NOFOLLOW|O_CLOEXEC,
             buffer,&result,&opened,&request) && opened.fd==-1);
         while (buffer_callbacks==callbacks) worker_event(worker);
         assert(!buffer_error && !buffer_pending && buffered_open.fd>=0);
         assert(frame->transfer==MD_FS_BUFFER_ANCHOR && frame->source_flags==(O_PATH|O_CLOEXEC));
+        assert(!frame->source_verify);
         assert(buffered_open.flags==frame->source_flags);
         int delivered=open(frame->source,frame->source_flags);
         assert(delivered>=0 && !fstat(delivered,&actual));
@@ -1103,7 +1104,37 @@ static void buffer_native_path_delivery(struct md_fs_buffer_service *service,
         md_fs_buffer_open_release(&buffered_open);
         assert(all_fds()==before);
     }
-    puts("PASS native O_PATH delivery: exact retained object, normalized flags, no SCM_RIGHTS or descriptor leak");
+    for (unsigned scenario=0;scenario<3;++scenario) {
+        char directory[]="/data/local/tmp/md-buffer-link-XXXXXX",moved[sizeof(directory)+8];
+        assert(mkdtemp(directory));
+        int parent=open(directory,O_PATH|O_DIRECTORY|O_CLOEXEC); assert(parent>=0);
+        char name[NAME_MAX+1]; memset(name,'l',NAME_MAX); name[NAME_MAX]=0;
+        assert(!symlinkat("first",parent,name));
+        struct md_fs_buffer_open opened={.fd=openat(parent,name,O_PATH|O_NOFOLLOW|O_CLOEXEC)};
+        assert(opened.fd>=0);
+        struct md_fs_result result={.fd=-1}; struct md_fs_buffer_request *request=NULL;
+        *frame=(struct md_fs_buffer_frame){0};
+        int callbacks=buffer_callbacks;
+        assert(!md_fs_buffer_adopt(service,getpid(),fs,MD_FS_OPEN,O_PATH|O_NOFOLLOW|O_CLOEXEC,
+            buffer,&result,&opened,&request) && opened.fd==-1);
+        while (buffer_callbacks==callbacks) worker_event(worker);
+        assert(!buffer_error && !buffer_pending && buffered_open.fd>=0);
+        assert(frame->transfer==MD_FS_BUFFER_ANCHOR && frame->source_verify && buffered_open.source_parent);
+        if (scenario==1) {
+            snprintf(moved,sizeof(moved),"%s-moved",directory);
+            assert(!rename(directory,moved));
+        } else if (scenario==2) {
+            assert(!unlinkat(parent,name,0) && !symlinkat("second",parent,name));
+        }
+        int delivered=open(frame->source,frame->source_flags); struct stat actual;
+        assert(delivered>=0 && !fstat(delivered,&actual) && S_ISLNK(actual.st_mode));
+        assert(md_fs_buffer_source_matches(frame,actual.st_dev,actual.st_ino)==(scenario!=2));
+        assert(!close(delivered));
+        md_fs_buffer_open_release(&buffered_open);
+        assert(!unlinkat(parent,name,0) && !close(parent) && !rmdir(scenario==1 ? moved : directory));
+        assert(all_fds()==before);
+    }
+    puts("PASS native O_PATH delivery: normalized flags, pinned link parent, replacement detection, no SCM_RIGHTS or descriptor leak");
 }
 static void buffer_cwd_delivery(struct md_fs_buffer_service *service, struct md_fs_worker *worker,
         const struct md_task_resources *resources, const struct md_interception_buffer *buffer,
