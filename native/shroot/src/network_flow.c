@@ -201,10 +201,7 @@ static int check_path(struct md_network_fabric *f,struct md_network_flow_path *p
         /* Existing connections retain even an untranslated NAT binding. The
          * evaluator skips NAT chains for them, including counters and jumps;
          * only live filter chains can revoke their native data path. */
-        if (override==n && filter)
-            for (size_t j=0;j<filter->chain_count;++j)
-                if (!filter->chains[j].nat && filter->chains[j].hook==(int)hook
-                        && requires_mediation(filter,&filter->chains[j],0)) return -EBUSY;
+        p.unmediated=override==n;
         int error=md_filter_evaluate_transition(n==override ? filter : n->filter,hook,&p,
             retained ? &rewrite : NULL,NULL);
         if (error) return error;
@@ -226,7 +223,10 @@ int md_network_flow_admits(struct md_network_namespace *n,struct md_network_filt
     for (unsigned i=0;i<path->count;++i) affected|=path->steps[i].space==n->inode;
     if (!affected) return 0;
     struct md_network_flow_path copy=*path;
-    int error=check_path(n->fabric,&copy,0,n,filter,0,NULL);
+    /* Both first payload and established traffic can outlive publication.
+     * Probe only the retained tuple, without counting or mutating its marks. */
+    int error=check_path(n->fabric,&copy,0,n,filter,1,NULL);
+    if (!error) error=check_path(n->fabric,&copy,0,n,filter,0,NULL);
     if (!error) error=check_path(n->fabric,&copy,1,n,filter,0,NULL);
-    return error;
+    return error==-EACCES ? -EBUSY : error;
 }

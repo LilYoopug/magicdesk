@@ -86,6 +86,9 @@ at enqueue, so delivery after sender exit cannot adopt a reused PID. Receivers
 translate that snapshot in their own PID/user namespaces. Interface name/index,
 flags and MTU ioctls use the socket's creation namespace, including the AF_UNIX
 control sockets used by libc's `if_nametoindex`.
+Flag and MTU setters enter the netlink mutation owner, preserving capability
+checks, topology publication and observer notifications. Unsupported flag
+changes fail explicitly; read-only flags are not overwritten by legacy ioctls.
 Control descriptor selection joins the close/dup table turn, including capture
 of a namespace FD, and ends before guest output copying.
 
@@ -243,8 +246,11 @@ and NAT-before-bind use this common frontend lifetime; no per-application path
 or extra per-payload syscall is involved.
 
 Direct unfiltered TCP and outgoing native UDP keep native connected IO only when
-neither direction has potentially denying hooks. Installing a policy that
-revokes one returns atomic `EBUSY`; it cannot retroactively move
+neither direction has potentially denying hooks. Policy updates evaluate each
+retained tuple in both directions, including first-payload and established
+states. Unrelated rules do not revoke these streams. Reached counters or mark
+mutations require mediation; denying policy or these effects return atomic
+`EBUSY`. An update cannot retroactively move
 a kernel stream into a relay. Direct path records are bounded per endpoint and
 retained until socket close, including accepted stream owners. Relayed flows
 retain their original NAT binding, as do direct flows. Adding NAT chains and

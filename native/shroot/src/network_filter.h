@@ -84,6 +84,7 @@ struct md_filter_packet {
     unsigned snat, dnat, masquerade;
     uint32_t masquerade_address;
     struct md_filter_accounting *accounting;
+    unsigned unmediated; /* Admission probe: reject reached per-packet effects. */
 };
 struct md_filter_rewrite {
     uint32_t source, destination, fib_type, source_fib_type;

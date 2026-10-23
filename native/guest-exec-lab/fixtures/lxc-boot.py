@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import uuid
 from systemd_ready import wait_systemd
@@ -106,7 +107,9 @@ def main():
             lxc('lxc-wait', '-s', 'STOPPED', '-t', '30')
             started = False
             assert not Path('/proc/' + str(leader)).exists()
-            assert not any(link['ifindex'] == peer for link in json.loads(run('ip', '-j', 'link').stdout))
+            interfaces = socket.if_nameindex()
+            record['remainingInterfaces'] = interfaces
+            assert not any(index == peer for index, _ in interfaces), interfaces
             assert not Path('/sys/fs/cgroup/lxc.payload.' + name).exists()
             assert not Path('/sys/fs/cgroup/lxc.monitor.' + name).exists()
             record['passed'] = True

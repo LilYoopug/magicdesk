@@ -182,6 +182,43 @@ static void native_nat_update(void) {
     md_network_namespace_release(n);
     puts("PASS native flow updates: retained NAT in both directions, counters, shared jump chains and filter revocation");
 }
+static void native_disjoint_update(void) {
+    struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
+    assert(n);
+    for (unsigned transport=0;transport<2;++transport) {
+        struct md_filter_packet packet={.destination=htonl(0xc0000201),.destination_port=htons(443),
+            .source_port=htons(32800),.protocol=transport ? IPPROTO_UDP : IPPROTO_TCP,.state=8};
+        struct md_network_flow_path path;
+        assert(!md_network_flow_route(n,&packet,0,&path) && !path.mediated);
+        struct md_filter_chain chain={.handle=1,.hook=NF_INET_LOCAL_OUT,.policy=NF_ACCEPT};
+        struct md_filter_rule rule={.chain=1,.count=2,.expressions={
+            {.code=MD_FILTER_TRANSPORT,.transport={.protocol=packet.protocol,
+                .source={0,65535},.destination={53,53}}},
+            {.code=MD_FILTER_COUNTER}}};
+        struct md_network_filter filter={.chains=&chain,.chain_count=1,.rules=&rule,.rule_count=1};
+        for (unsigned reverse=0;reverse<2;++reverse) {
+            chain.hook=reverse ? NF_INET_LOCAL_IN : NF_INET_LOCAL_OUT;
+            const enum md_filter_opcode effects[]={MD_FILTER_COUNTER,MD_FILTER_META_SET,MD_FILTER_CT_SET,MD_FILTER_VERDICT};
+            for (unsigned i=0;i<sizeof(effects)/sizeof(*effects);++i) {
+                rule.expressions[1]=(struct md_filter_expression){.code=effects[i],.operation=NF_DROP};
+                rule.expressions[0].transport.destination[0]=rule.expressions[0].transport.destination[1]=53;
+                assert(!md_network_flow_admits(n,&filter,&path));
+                rule.expressions[0].transport.destination[0]=rule.expressions[0].transport.destination[1]=reverse ? 32800 : 443;
+                assert(md_network_flow_admits(n,&filter,&path)==-EBUSY);
+            }
+        }
+        chain.hook=NF_INET_LOCAL_OUT;
+        rule.expressions[0]=(struct md_filter_expression){.code=MD_FILTER_STATE_MATCH,.key=8};
+        assert(md_network_flow_admits(n,&filter,&path)==-EBUSY);
+        rule.expressions[0].key=2;
+        assert(md_network_flow_admits(n,&filter,&path)==-EBUSY);
+        rule.expressions[0].key=4;
+        assert(!md_network_flow_admits(n,&filter,&path));
+        assert(!chain.counter.packets && !chain.counter.bytes);
+    }
+    md_network_namespace_release(n);
+    puts("PASS native flow updates: disjoint rules, exact TCP/UDP tuples, both directions, first payload and reached effects");
+}
 static void program(void) {
     struct md_network_filter_table table={.handle=1,.family=NFPROTO_IPV4};
     struct md_filter_chain chains[2]={
@@ -676,6 +713,7 @@ void test_network_nft(void) {
     reverse_policy();
     nat_hook_order();
     native_nat_update();
+    native_disjoint_update();
     struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED);
     struct md_network_namespace *child=md_network_namespace_copy(n,NULL);
     struct md_identity root=md_identity_new(0,0),user=md_identity_new(1000,1000);

@@ -13,6 +13,8 @@ struct md_network_target {
 int md_network_route_query(unsigned);
 /* Legacy ioctl admission uses the same transaction, policy and notifications. */
 int md_network_route_set_address(struct md_network_namespace *,const struct md_identity *,const char *,const unsigned char [6]);
+int md_network_route_set_flags(struct md_network_namespace *,const struct md_identity *,const char *,unsigned);
+int md_network_route_set_mtu(struct md_network_namespace *,const struct md_identity *,const char *,unsigned);
 int md_network_route_attach_bridge(struct md_network_namespace *,const struct md_identity *,const char *,unsigned);
 enum { MD_NETWORK_ROUTE_CAPPED_ACK=1, MD_NETWORK_ROUTE_STRICT=2 };
 long md_network_route(struct md_network_namespace *,const struct md_identity *,

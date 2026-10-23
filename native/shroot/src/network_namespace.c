@@ -178,7 +178,8 @@ struct md_network_namespace *md_network_socket_namespace(const struct md_fd_obje
 }
 int md_network_interface_ioctl(unsigned long command) {
     return command==SIOCGIFNAME || command==SIOCGIFINDEX || command==SIOCGIFFLAGS || command==SIOCGIFMTU
-        || command==SIOCGIFHWADDR || command==SIOCSIFHWADDR || command==SIOCBRADDIF;
+        || command==SIOCGIFHWADDR || command==SIOCSIFHWADDR || command==SIOCBRADDIF
+        || command==SIOCSIFFLAGS || command==SIOCSIFMTU;
 }
 int md_network_netlink_destination(const struct md_network_address *destination,uint32_t *groups) {
     *groups=0;
@@ -324,6 +325,8 @@ long md_network_socket_call(struct md_fd_object *object, const struct md_identit
         struct ifreq *r=data;
         if (a[1]!=SIOCGIFNAME && !memchr(r->ifr_name,0,IFNAMSIZ)) return -ENODEV;
         if (a[1]==SIOCBRADDIF) return md_network_route_attach_bridge(space,identity,r->ifr_name,(unsigned)r->ifr_ifindex);
+        if (a[1]==SIOCSIFFLAGS) return md_network_route_set_flags(space,identity,r->ifr_name,(unsigned short)r->ifr_flags);
+        if (a[1]==SIOCSIFMTU) return md_network_route_set_mtu(space,identity,r->ifr_name,(unsigned)r->ifr_mtu);
         if (a[1]==SIOCSIFHWADDR) {
             if (r->ifr_hwaddr.sa_family!=ARPHRD_ETHER) return -EINVAL;
             return md_network_route_set_address(space,identity,r->ifr_name,(const unsigned char *)r->ifr_hwaddr.sa_data);

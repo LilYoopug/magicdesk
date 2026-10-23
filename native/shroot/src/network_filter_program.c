@@ -86,6 +86,7 @@ int md_filter_validate(const struct md_network_filter *f) {
     return 0;
 }
 static int account_counter(struct md_filter_packet *p,struct md_filter_counter *counter) {
+    if (p->unmediated) return -EBUSY;
     struct md_filter_accounting *a=p->accounting;
     if (!a) return 0;
     int error=md_filter_reserve((void **)&a->cells,&a->capacity,a->count+1,sizeof(*a->cells),1024);
@@ -155,6 +156,7 @@ static int evaluate_chain(struct md_network_filter *f,const struct md_filter_cha
                 if (e->size<=4) memcpy(dst,&value,4);
                 break;
             case MD_FILTER_META_SET:
+                if (p->unmediated) return -EBUSY;
                 if (e->constant) {
                     uint32_t mask;
                     memcpy(&value,e->value,4); memcpy(&mask,e->mask,4);
@@ -164,7 +166,9 @@ static int evaluate_chain(struct md_network_filter *f,const struct md_filter_cha
             case MD_FILTER_CT:
                 value=e->key==NFT_CT_STATE ? p->state : e->key==NFT_CT_MARK ? p->ctmark : p->status;
                 memcpy(dst,&value,4); break;
-            case MD_FILTER_CT_SET: memcpy(&p->ctmark,src,4); break;
+            case MD_FILTER_CT_SET:
+                if (p->unmediated) return -EBUSY;
+                memcpy(&p->ctmark,src,4); break;
             case MD_FILTER_STATE_MATCH: match=!!(p->state&e->key)!=!!e->operation; break;
             case MD_FILTER_MARK_MATCH: match=((p->mark&e->aux)==e->key)!=!!e->operation; break;
             case MD_FILTER_ADDRESS_TYPE:
