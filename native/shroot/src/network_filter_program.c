@@ -12,6 +12,25 @@ static int chain_index(const struct md_network_filter *f,uint64_t handle) {
     for (size_t i=0;i<f->chain_count;++i) if (f->chains[i].handle==handle) return (int)i;
     return -1;
 }
+static int tcp_predicate(const struct md_network_filter *f,const struct md_filter_rule *r,unsigned end) {
+    unsigned family=0;
+    int chain=chain_index(f,r->chain);
+    for (size_t i=0;i<f->count;++i)
+        if (f->tables[i].handle==f->chains[chain].table) family=f->tables[i].family;
+    for (unsigned i=0;i<end;++i) {
+        const struct md_filter_expression *e=&r->expressions[i];
+        if (e->code==MD_FILTER_TRANSPORT && e->transport.protocol==IPPROTO_TCP) return 1;
+        if (i && e->code==MD_FILTER_COMPARE && e->operation==NFT_CMP_EQ
+                && e->size==1 && e->value[0]==IPPROTO_TCP) {
+            const struct md_filter_expression *load=&r->expressions[i-1];
+            if (load->dst!=e->src) continue;
+            if (load->code==MD_FILTER_META && load->key==NFT_META_L4PROTO) return 1;
+            if (load->code==MD_FILTER_PAYLOAD && load->key==NFT_PAYLOAD_NETWORK_HEADER && load->size==1
+                    && ((family==NFPROTO_IPV4 && load->aux==9) || (family==NFPROTO_IPV6 && load->aux==6))) return 1;
+        }
+    }
+    return 0;
+}
 static int validate_chain(const struct md_network_filter *f,size_t chain,unsigned char *state,
         unsigned char *height,unsigned depth) {
     if (state[chain]==1 || depth>16) return -ELOOP;
@@ -98,6 +117,10 @@ int md_filter_validate(const struct md_network_filter *f) {
                 else continue;
                 allowed|=allowed<<NF_INET_NUMHOOKS;
             }
+            else if (e->code==MD_FILTER_REJECT) {
+                if (!tcp_predicate(f,r,j)) return -EOPNOTSUPP;
+                allowed=((1U<<NF_INET_LOCAL_IN)|(1U<<NF_INET_FORWARD)|(1U<<NF_INET_LOCAL_OUT))<<NF_INET_NUMHOOKS;
+            }
             else continue;
             if (context&~allowed) return -EOPNOTSUPP;
         }
@@ -138,6 +161,8 @@ static int evaluate_chain(struct md_network_filter *f,const struct md_filter_cha
             unsigned char *src=registers+e->src,*dst=registers+e->dst;
             uint32_t value=0;
             switch (e->code) {
+            case MD_FILTER_REJECT:
+                return p->protocol==IPPROTO_TCP ? -ECONNREFUSED : -EOPNOTSUPP;
             case MD_FILTER_ICMP_MATCH: {
                 int matches=(e->key==IPPROTO_ICMP && e->value[0]==255)
                     || (p->transport[0]==e->value[0] && p->transport[1]>=e->value[1]

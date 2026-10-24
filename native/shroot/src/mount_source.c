@@ -83,7 +83,7 @@ int md_mount_source_create(struct md_filesystem *fs,const struct md_fs_request *
         if (error) md_mount_source_close(&s); else *out=s;
         return error;
     }
-    if (q->mode==MD_FS_MOUNT_TMPFS) return md_fs_mount_temporary(fs,q,out);
+    if (q->mode==MD_FS_MOUNT_TMPFS || q->mode==MD_FS_MOUNT_RAMFS) return md_fs_mount_temporary(fs,q,out);
     if (q->mode==MD_FS_MOUNT_OVERLAY) return md_fs_mount_overlay(fs,q,out);
     if (q->mode==MD_FS_MOUNT_SYSFS) return sysfs_source(fs,q,out);
     if (q->mode==MD_FS_MOUNT_MQUEUE) return mqueue_source(fs,q,out);

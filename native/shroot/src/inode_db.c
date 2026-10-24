@@ -143,7 +143,7 @@ static int begin(struct md_inode_store *s,int write,int runtime) {
     /* A retained gate already validated this catalogue. Start a fresh operation
      * without repeating admission; promotion still owns its transaction. */
     if (s->operation_window && !write && s->cache_checked==1
-            && (!s->lifetime->temporary || (s->super_checked && s->super_version==s->locked_version))
+            && s->super_checked && s->super_version==s->locked_version
             && !mdi_publication_pending(s)) {
         begin_read(s); return 0;
     }
@@ -331,6 +331,10 @@ int mdi_query_acquire(struct md_inode_store *s, enum mdi_query slot, sqlite3_stm
             "AND NOT EXISTS(SELECT 1 FROM overlay_lower_names WHERE parent=?1 AND name=?3) "
             "AND NOT EXISTS(SELECT 1 FROM names WHERE parent=u.object AND name=?3)",
         [MDI_DATA_VERSION] = "PRAGMA main.data_version",
+        [MDI_SUPER_READONLY] = "SELECT coalesce((SELECT value FROM properties WHERE key='runtime_readonly/'||?1),0)",
+        [MDI_OVERLAY_READONLY] = "SELECT coalesce(max(value),0) FROM properties WHERE key IN "
+            "('runtime_readonly/'||?1,(SELECT 'runtime_readonly/'||o.scope FROM inode_views v "
+            "JOIN objects o ON o.object=v.upper WHERE v.scope=?1))",
         [MDI_ADD_NAME] = "INSERT INTO names(parent,name,object) VALUES(?1,?2,?3)",
         [MDI_DELETE_NAME] = "DELETE FROM names WHERE parent=?1 AND name=?2",
         [MDI_REPARENT] = "UPDATE objects SET parent=?1 WHERE object=?2",
@@ -648,14 +652,13 @@ static int store_open(const char *directory, int create, int exclusive, int prep
     int root = retained ? fcntl(retained->root,F_DUPFD_CLOEXEC,3)
         : open(directory, O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (root < 0) return -errno;
-    /* Lifetime admission is independent of the short objects-directory transaction lock. */
-    if (!retained && flock(root, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB)) {
-        int error = errno == EWOULDBLOCK ? -EBUSY : -errno;
+    /* Maintenance must fail before waiting for a live owner's operation gate. */
+    if (exclusive && !retained && flock(root,LOCK_EX|LOCK_NB)) {
+        int error=errno==EWOULDBLOCK ? -EBUSY : -errno;
         close(root); return error;
     }
     struct stat named, opened;
-    if (fstat(root, &opened) || (!retained && (lstat(directory, &named)
-            || !opened.st_nlink || named.st_dev != opened.st_dev || named.st_ino != opened.st_ino))) {
+    if (fstat(root, &opened)) {
         close(root); return -ESTALE;
     }
     int r = create && mkdirat(root, "objects", 0700) ? -errno : 0;
@@ -668,10 +671,21 @@ static int store_open(const char *directory, int create, int exclusive, int prep
     s->objects = s->watch_presence = -1;
     if (!r && (s->objects = openat(root, "objects", O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)) < 0) r = -errno;
     if (!r) r = store_lock(s);
+    /* Serialize first-owner admission under the existing store gate. Other
+     * openers wait here instead of mistaking cold admission for maintenance.
+     * The root lease keeps runtime policy alive across peers and exec. */
+    int first=0;
+    if (!r && !retained) {
+        first=exclusive || !flock(root,LOCK_EX|LOCK_NB);
+        if (!first && flock(root,LOCK_SH|LOCK_NB))
+            r=errno==EWOULDBLOCK ? -EBUSY : -errno;
+        if (!r && (lstat(directory,&named) || !opened.st_nlink
+                || named.st_dev!=opened.st_dev || named.st_ino!=opened.st_ino)) r=-ESTALE;
+    }
     if (!r) r = md_database_open(root,"namespace.db",create,&s->db);
     if (!r) r = mdi_sql_error(sqlite3_extended_result_codes(s->db, 1));
     if (!r) r = mdi_sql(s, "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF");
-    if (!r && !create) r=mdi_schema_admit(s,prepare && !retained,exclusive,&mdi_schema_current);
+    if (!r && !create) r=mdi_schema_admit(s,prepare && !retained,exclusive || first,&mdi_schema_current);
     if (!r) r=mdi_schema_configure(s,create);
     if (!r && create) {
         r = mdi_schema_begin_create(s);
@@ -693,6 +707,7 @@ static int store_open(const char *directory, int create, int exclusive, int prep
         else s->readonly = sqlite3_column_int(q, 0) != 0;
     }
     sqlite3_finalize(q);
+    if (!r && first) r=mdi_sql(s,"DELETE FROM properties WHERE key GLOB 'runtime_readonly/*'");
     if (!r && (s->watch_presence = openat(root, "watch.lock",
             O_RDWR | O_CLOEXEC | O_NOFOLLOW | (create ? O_CREAT | O_EXCL : 0), 0600)) < 0) r = -errno;
     if (!r && create) r = mdi_sync(s,root);
@@ -700,6 +715,7 @@ static int store_open(const char *directory, int create, int exclusive, int prep
     if (!r) r = md_inode_view_validate(s);
     if (!r) r = mdi_overlay_writer_open(s);
     if (!r && (prepare || retained)) mdi_leaf_admit(s);
+    if (!r && first && !exclusive && flock(root,LOCK_SH|LOCK_NB)) r=-errno;
     r = store_unlock(s, r);
     if (!r && exclusive) r=mdi_views_maintain(s);
     if (r) md_inode_store_close(s); else *out = s;

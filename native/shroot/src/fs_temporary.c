@@ -45,8 +45,8 @@ static int number(const char *text, size_t length, unsigned base, uint32_t *valu
     }
     *value=out; return 0;
 }
-static int parse(const char *text, const struct md_identity *id, struct options *out) {
-    *out=(struct options){01777,id->uid.fs,id->gid.fs};
+static int parse(const char *text, const struct md_identity *id, mode_t mode, struct options *out) {
+    *out=(struct options){mode,id->uid.fs,id->gid.fs};
     for (const char *at=text;at && *at;) {
         const char *end=strchr(at,',');
         if (!end) end=at+strlen(at);
@@ -86,7 +86,7 @@ int md_fs_temporary_reconfigure(const char *options,const struct md_identity *id
     /* Linux accepts mode/uid/gid on remount without changing the root inode.
      * Capacity requests retain the same permissive policy as initial mount. */
     struct options parsed;
-    return parse(options,id,&parsed);
+    return parse(options,id,01777,&parsed);
 }
 int md_fs_private_mounts_parent(struct md_inode_store *s) {
     if (mkdirat(s->lifetime->root,"mounts",0700) && errno!=EEXIST) return -errno;
@@ -103,7 +103,7 @@ int md_fs_mount_temporary(struct md_filesystem *fs, const struct md_fs_request *
     const struct md_identity *id=fs->store->identity;
     if (!id) return -EPERM;
     struct options options;
-    int r=parse(q->value_size ? q->value : NULL,id,&options);
+    int r=parse(q->value_size ? q->value : NULL,id,q->mode==MD_FS_MOUNT_RAMFS ? 0755 : 01777,&options);
     if (r) return r;
     int parent=md_fs_private_mounts_parent(fs->store);
     if (parent<0) return parent;
@@ -112,7 +112,7 @@ int md_fs_mount_temporary(struct md_filesystem *fs, const struct md_fs_request *
     close(parent);
     int root=-1;
     if (!r) {
-        store->lifetime->filesystem_kind=MD_FILESYSTEM_TMPFS;
+        store->lifetime->filesystem_kind=q->mode==MD_FS_MOUNT_RAMFS ? MD_FILESYSTEM_RAMFS : MD_FILESYSTEM_TMPFS;
         root=md_inode_open(store,-1,"/",O_PATH|O_DIRECTORY|O_CLOEXEC,0);
         if (root<0) r=root;
     }

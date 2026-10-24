@@ -133,6 +133,9 @@ static int may_translate(struct md_network_filter *f,const struct md_filter_chai
                 if (e->operation==NFT_NAT_DNAT) return 1;
                 possible=0; break;
             case MD_FILTER_MASQUERADE: possible=0; break;
+            case MD_FILTER_REJECT:
+                if (!uncertain) return 0;
+                possible=0; break;
             case MD_FILTER_VERDICT_MAP: {
                 struct md_filter_set *s=md_filter_set_find(f,chain->table,NULL,e->target,0);
                 if (!s) return -ENOENT;

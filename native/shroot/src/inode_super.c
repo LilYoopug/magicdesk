@@ -11,9 +11,11 @@
 #include <unistd.h>
 
 int mdi_super_refresh(struct md_inode_store *s,sqlite3_int64 version) {
-    if (!s->lifetime->temporary || (s->super_checked && s->super_version==version)) return 0;
+    if (s->super_checked && s->super_version==version) return 0;
     sqlite3_stmt *q=NULL;
-    int r=mdi_prepare(s,"SELECT coalesce((SELECT value FROM properties WHERE key='runtime_readonly'),0)",&q);
+    int r=mdi_query_acquire(s,s->lifetime->filesystem_kind==MD_FILESYSTEM_OVERLAY
+        ? MDI_OVERLAY_READONLY : MDI_SUPER_READONLY,&q);
+    if (!r) r=mdi_bind_id(q,1,s->lifetime->scope);
     if (!r) {
         int rc=mdi_step(s,q);
         if (rc!=SQLITE_ROW) r=mdi_sql_failure(rc);
@@ -22,10 +24,9 @@ int mdi_super_refresh(struct md_inode_store *s,sqlite3_int64 version) {
             s->super_version=version; s->super_checked=1;
         }
     }
-    sqlite3_finalize(q); return r;
+    return mdi_query_release(q,r);
 }
 int md_inode_store_readonly(struct md_inode_store *s) {
-    if (!s->lifetime->temporary) return s->readonly;
     int r=mdi_begin(s,0);
     if (r) return r;
     int value=mdi_readonly(s);
@@ -90,32 +91,31 @@ static int writers_check(struct md_inode_store *s,const char *backing) {
     return r ? r : -error;
 }
 int mdi_super_preserve_writer(struct md_inode_store *s,struct mdi_node *node) {
-    if (!node->native || !s->lifetime->temporary || s->lifetime->filesystem_kind!=MD_FILESYSTEM_TMPFS) return 0;
-    /* Only tmpfs superblocks can be reconfigured. Keep a writer's final
+    if (!node->native || !s->lifetime->temporary || !md_filesystem_temporary(s->lifetime->filesystem_kind)) return 0;
+    /* Temporary superblocks exclude existing writers. Keep a writer's final
      * backing reachable by that rare scan, including after rename-overwrite.
      * Persistent files and unreferenced tmpfs leaves keep native deletion. */
     int r=writers_check(s,node->backing);
     return r==-EBUSY ? mdi_leaf_promote(s,node) : r;
 }
 int md_inode_store_reconfigure(struct md_inode_store *s,int readonly) {
-    if (!s->lifetime->temporary || s->lifetime->filesystem_kind!=MD_FILESYSTEM_TMPFS
-            || strcmp(s->lifetime->scope,MDI_ROOT)) {
-        /* Picking an existing filesystem is also used to confirm its current
-         * mode. A sealed source cannot become writable; a writable persistent
-         * store still cannot acquire tmpfs's superblock-wide writer tracking. */
-        if (s->readonly) return readonly ? 0 : -EROFS;
-        return readonly ? -EOPNOTSUPP : 0;
-    }
-    if (s->readonly) return -EROFS;
+    if (s->readonly) return readonly ? 0 : -EROFS;
     int r=mdi_begin(s,0);
     if (r) return r;
-    if (readonly && !s->super_readonly) r=writers_check(s,NULL);
+    if (readonly && !s->super_readonly && s->lifetime->temporary
+            && md_filesystem_temporary(s->lifetime->filesystem_kind)) r=writers_check(s,NULL);
     /* Policy is metadata, not a guest write: changing it back to writable must
      * be possible under the same gate even while ordinary mutations are denied.
      * Retained and unlinked bodies remain until exclusive store maintenance. */
-    if (!r) r=mdi_sql(s,readonly
-        ? "INSERT INTO properties VALUES('runtime_readonly',1) ON CONFLICT(key) DO UPDATE SET value=1"
-        : "INSERT INTO properties VALUES('runtime_readonly',0) ON CONFLICT(key) DO UPDATE SET value=0");
+    /* Persistent stores restrict future operations, not previously acquired
+     * writable OFDs or mappings. No writer tracking enters native unlink/IO. */
+    sqlite3_stmt *q=NULL;
+    if (!r) r=mdi_prepare(s,"INSERT INTO properties VALUES('runtime_readonly/'||?1,?2) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",&q);
+    if (!r) r=mdi_bind_id(q,1,s->lifetime->scope);
+    if (!r) r=mdi_sql_error(sqlite3_bind_int(q,2,!!readonly));
+    if (!r) r=mdi_sql_error(mdi_step(s,q));
+    sqlite3_finalize(q);
     r=mdi_finish(s,r);
     s->super_checked=0;
     return r;

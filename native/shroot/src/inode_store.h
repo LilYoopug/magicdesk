@@ -74,8 +74,9 @@ enum md_inode_sync_mode { MD_INODE_SYNC_FILE, MD_INODE_SYNC_DATA, MD_INODE_SYNC_
  * FILE/DATA require a real descriptor. FILESYSTEM also accepts the root sentinel. */
 int md_inode_sync(struct md_inode_store *, int fd, enum md_inode_sync_mode);
 int md_inode_store_seal(struct md_inode_store *);
-/* Mutable superblock policy for transient tmpfs; independent of per-mount
- * restrictions and immutable image sealing. Negative errno on unavailable IO. */
+/* Mutable, lifetime-scoped superblock policy, independent of per-mount flags
+ * and immutable image sealing. Persistent stores deny new write authority but
+ * do not revoke writable native OFDs/mappings. Negative errno on unavailable IO. */
 int md_inode_store_readonly(struct md_inode_store *);
 int md_inode_store_reconfigure(struct md_inode_store *, int readonly);
 /* Prepare store-owned runtime resources before accepting guest operations.

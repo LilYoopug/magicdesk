@@ -132,7 +132,7 @@ static int socket_bound(int type,struct md_inet_address *address,int v6only) {
 static int check(struct md_network_forward *f,struct flow *c,unsigned direction) {
     if (c->checked[direction]!=f->fabric->policy_generation) {
         unsigned mark=c->path.translated.ctmark;
-        c->denied[direction]=md_network_flow_accounting(f->fabric,&c->path,direction,!c->started,&c->accounting[direction])!=0;
+        c->denied[direction]=md_network_flow_accounting(f->fabric,&c->path,direction,!c->started,&c->accounting[direction]);
         if (mark!=c->path.translated.ctmark) c->checked[1-direction]=0;
         c->checked[direction]=f->fabric->policy_generation;
     }
@@ -142,7 +142,15 @@ static void account(struct flow *c,unsigned direction,size_t bytes) {
     md_filter_account(&c->accounting[direction],bytes);
     if (!direction && !c->started) { c->started=1; c->checked[0]=0; }
 }
+static void reset_stream(int fd) {
+    struct linger reset={.l_onoff=1,.l_linger=0};
+    setsockopt(fd,SOL_SOCKET,SO_LINGER,&reset,sizeof(reset));
+}
 static int interests(struct md_network_forward *f,struct flow *c) {
+    if (c->type==SOCK_STREAM && (check(f,c,0)==-ECONNREFUSED || check(f,c,1)==-ECONNREFUSED)) {
+        for (unsigned leg=0;leg<2;++leg) if (c->fd[leg]>=0) reset_stream(c->fd[leg]);
+        return -ECONNREFUSED;
+    }
     for (unsigned leg=0;leg<2;++leg) {
         if ((!leg && c->borrowed) || c->fd[leg]<0) continue;
         uint32_t events=0;
@@ -235,7 +243,12 @@ static void tcp_accept(struct md_network_forward *f,struct listener *l) {
         struct md_inet_address local;
         struct md_network_flow_path path;
         struct md_inet_address target;
-        if (md_inet_name(fd,0,&local) || incoming_path(f,l,&client,&local,&path,&target)) { close(fd); continue; }
+        int error=md_inet_name(fd,0,&local);
+        if (!error) error=incoming_path(f,l,&client,&local,&path,&target);
+        if (error) {
+            if (error==-ECONNREFUSED) reset_stream(fd);
+            close(fd); continue;
+        }
         struct flow *c=new_flow(f,l,fd,&client,&path,&target,NULL);
         if (!c) close(fd);
         if (!l->external) { drop_listener(f,l); return; }

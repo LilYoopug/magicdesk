@@ -37,6 +37,32 @@ def guest_root():
     print(trace.stderr, end='', flush=True)
     assert trace.returncode == 0, trace
     assert 'fspick(' in trace.stderr and 'FSCONFIG_CMD_RECONFIGURE' in trace.stderr, trace.stderr
+    import mmap
+    with tempfile.TemporaryDirectory(prefix='/md-readonly-') as directory:
+        path = Path(directory) / 'data'
+        writable = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.ftruncate(writable, mmap.PAGESIZE)
+        mapping = mmap.mmap(writable, mmap.PAGESIZE, flags=mmap.MAP_SHARED)
+        try:
+            call(431, context, 0, 'ro', 0, 0)
+            call(431, context, 7, 0, 0, 0)
+            assert os.statvfs('/').f_flag & os.ST_RDONLY
+            for action in (lambda: os.open(path, os.O_WRONLY),
+                           lambda: path.unlink(), lambda: (path.parent / 'blocked').mkdir()):
+                try:
+                    action()
+                    raise AssertionError('readonly superblock granted new write authority')
+                except OSError as error:
+                    assert error.errno == errno.EROFS, error
+            assert os.pwrite(writable, b'fd', 0) == 2
+            mapping[2:6] = b'mmap'
+            assert path.read_bytes()[:6] == b'fdmmap'
+        finally:
+            call(431, context, 0, 'rw', 0, 0)
+            call(431, context, 7, 0, 0, 0)
+            mapping.close()
+            os.close(writable)
+        path.write_bytes(b'write-restored')
     # Superblock confirmation must not clear a readonly mount placement.
     call(40, 0, '/', 0, 4096 | 32 | 1, 0)
     call(431, context, 0, 'rw', 0, 0)
@@ -941,7 +967,7 @@ if sys.argv[-1] == '0':
         print('PASS shared structure reader: openat2 zero extension and invalid buffers', flush=True)
 
         mount_trace = ['strace', '-e', 'trace=fsopen,fspick,fsconfig,fsmount,move_mount,mount_setattr,open_tree,mount']
-        for kind, options in [('tmpfs', 'mode=0755,size=65536k,strictatime'), ('cgroup2', None), ('cgroup', 'devices'),
+        for kind, options in [('tmpfs', 'mode=0755,size=65536k,strictatime'), ('ramfs', 'mode=0700'), ('cgroup2', None), ('cgroup', 'devices'),
                               ('proc', None), ('sysfs', None), ('devpts', 'newinstance,ptmxmode=0666,mode=0620,max=1028')]:
             if kind == 'sysfs':
                 # The inherited network namespace belongs to the parent user
@@ -969,7 +995,7 @@ if sys.argv[-1] == '0':
                 entries = Path('/proc/self/mountinfo').read_text().splitlines()
                 entry = next(line for line in entries if line.split()[4] == str(root))
                 assert 'devices' in entry.split(' - ')[1].split()[2].split(','), entry
-            if kind in ('tmpfs', 'proc', 'sysfs'):
+            if kind in ('tmpfs', 'ramfs', 'proc', 'sysfs'):
                 for mode in ('ro', 'rw'):
                     result = subprocess.run(mount_trace + ['mount', '-o', 'remount,' + mode, str(root)],
                                             capture_output=True, text=True)

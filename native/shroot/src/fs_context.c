@@ -60,7 +60,7 @@ static const struct md_control_file_ops context_ops={.retain=retain,.release=rel
     .filesystem=ANON_INODE_FS_MAGIC,.nonseekable=1};
 static unsigned filesystem_type(const char *name) {
     static const struct { const char *name; unsigned type; } types[]={
-        {"tmpfs",MD_FS_MOUNT_TMPFS},{"overlay",MD_FS_MOUNT_OVERLAY},{"proc",MD_FS_MOUNT_PROC},
+        {"tmpfs",MD_FS_MOUNT_TMPFS},{"ramfs",MD_FS_MOUNT_RAMFS},{"overlay",MD_FS_MOUNT_OVERLAY},{"proc",MD_FS_MOUNT_PROC},
         {"devpts",MD_FS_MOUNT_DEVPTS},{"sysfs",MD_FS_MOUNT_SYSFS},
         {"mqueue",MD_FS_MOUNT_MQUEUE},
         {"binfmt_misc",MD_FS_MOUNT_BINFMT},
@@ -110,8 +110,10 @@ static int open_context(struct md_filesystem *fs,const struct md_fs_request *q,
 }
 static unsigned mounted_type(const struct md_view_mount *mount) {
     if (mount && mount->devpts) return MD_FS_MOUNT_DEVPTS;
-    if (md_view_inode(mount)) return mount && mount->storage
-        && mount->storage->filesystem_kind==MD_FILESYSTEM_TMPFS ? MD_FS_MOUNT_TMPFS : MOUNTED_INODE;
+    if (md_view_inode(mount)) {
+        enum md_filesystem_kind kind=mount && mount->storage ? mount->storage->filesystem_kind : MD_FILESYSTEM_INODE;
+        return kind==MD_FILESYSTEM_TMPFS ? MD_FS_MOUNT_TMPFS : kind==MD_FILESYSTEM_RAMFS ? MD_FS_MOUNT_RAMFS : MOUNTED_INODE;
+    }
     unsigned long magic=mount && mount->provider ? md_provider_tree_filesystem(mount->provider) : 0;
     return magic==SYSFS_MAGIC ? MD_FS_MOUNT_SYSFS : magic==PROC_SUPER_MAGIC ? MD_FS_MOUNT_PROC
         : magic==BINFMTFS_MAGIC ? MD_FS_MOUNT_BINFMT : 0;
@@ -149,7 +151,7 @@ int md_fs_super_reconfigure(struct md_filesystem *fs,const struct md_view_mount 
             ? mount->storage : md_inode_store_lifetime(fs->store);
         if (!md_identity_capable_in(fs->store->identity,storage->owner,CAP_SYS_ADMIN)) return -EPERM;
         if (options && *options) {
-            if (storage->filesystem_kind!=MD_FILESYSTEM_TMPFS) return -EOPNOTSUPP;
+            if (!md_filesystem_temporary(storage->filesystem_kind)) return -EOPNOTSUPP;
             int r=md_fs_temporary_reconfigure(options,fs->store->identity);
             if (r) return r;
         }
@@ -189,7 +191,7 @@ static int parameter(struct filesystem_context *c,const struct md_fs_request *q)
     switch (c->type) {
     case MD_FS_MOUNT_PROC:
         known=!strcmp(key,"hidepid") || !strcmp(key,"gid") || !strcmp(key,"subset"); break;
-    case MD_FS_MOUNT_TMPFS:
+    case MD_FS_MOUNT_TMPFS: case MD_FS_MOUNT_RAMFS:
         known=!strcmp(key,"mode") || !strcmp(key,"uid") || !strcmp(key,"gid")
             || !strcmp(key,"size") || !strcmp(key,"nr_blocks") || !strcmp(key,"nr_inodes"); break;
     case MD_FS_MOUNT_OVERLAY:
@@ -253,7 +255,7 @@ static int configure(struct md_filesystem *fs,struct filesystem_context *c,const
     struct md_fs_request create={.mode=c->type,.flags=c->flags,
         .value=c->options,.value_size=(unsigned)c->size+1};
     r=md_mount_source_create(fs,&create,&c->source);
-    if (!r && (c->type==MD_FS_MOUNT_TMPFS || c->source.provider)) c->source.policy&=~MD_MOUNT_READONLY;
+    if (!r && (c->type==MD_FS_MOUNT_TMPFS || c->type==MD_FS_MOUNT_RAMFS || c->source.provider)) c->source.policy&=~MD_MOUNT_READONLY;
     fs->store->identity=identity; fs->actor=actor;
     c->phase=r ? FAILED : CREATED;
     return r;

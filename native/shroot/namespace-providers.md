@@ -406,8 +406,10 @@ revision before queuing restricted Android descriptors; removing them restores
 portable publication. This prevents a locally usable but nontransferable host
 directory from corrupting the graph stream.
 
-Logical tmpfs uses a private transient inode store, not Android's kernel tmpfs.
-It supports mode/uid/gid, ordinary file operations, shared native mappings,
+Logical tmpfs and ramfs share a private transient inode store, not Android's
+kernel memory filesystems. They retain distinct filesystem names/statfs magic
+and default root modes (01777 for tmpfs, 0755 for ramfs).
+They support mode/uid/gid, ordinary file operations, shared native mappings,
 namespace copies, bind policy and retained detached descriptors. Backing files
 consume the store's disk space. `size`, `nr_blocks` and `nr_inodes` accept validated
 numeric requests, including binary suffixes and percentages for size, under a
@@ -416,8 +418,9 @@ Legacy remount and `FSCONFIG_CMD_RECONFIGURE` use the same parameter validation.
 As on Linux, remount accepts `mode`, `uid` and `gid` without changing the existing
 root inode; capacity parameters retain the allocation policy above. Invalid
 parameters fail before readonly policy changes, and successful contexts clear
-their parameter list before reuse. This disk-backed implementation does not
-provide `ramfs` or a no-swap secret-storage guarantee.
+their parameter list before reuse. This is compatibility for the filesystem
+operations, not memory-only storage: neither name guarantees no disk writes or
+no swap. In particular, ramfs at `/run/keys` is not a secret-storage guarantee.
 Writes, truncation and shared mappings retain native IO and backing-space errors.
 Atime flags in legacy and descriptor mount APIs are compatibility hints: timestamps
 follow the backing filesystem, not a new per-mount IO observer. Memory accounting
@@ -426,10 +429,10 @@ by aliases and frozen by less-privileged namespace copies.
 Existing-name creation errors precede readonly rejection: mkdir on an existing
 directory returns EEXIST, and a read-only O_CREAT open can select an existing
 file without gaining write authority.
-Read-only tmpfs superblock reconfiguration checks writers in both promoted
+Read-only temporary superblock reconfiguration checks writers in both promoted
 objects and native-leaf directories. Removing or overwriting a native leaf with
 an open writer promotes its retained backing before unlink, so a later remount
-cannot overlook it. This lease-based check is confined to temporary tmpfs stores;
+cannot overlook it. This lease-based check is confined to tmpfs/ramfs stores;
 persistent-file deletion keeps its native fast path.
 
 `fspick` retains a mounted inode/proc/sysfs superblock independently of its
@@ -440,12 +443,23 @@ bind aliases and namespace copies observe it, including already-open typed
 controls. Portable host projections carry the same live sealed policy to peers;
 an imported observer cannot change it. Ordinary inode-backed paths do not acquire
 a provider-policy mapping or an additional syscall. Unsupported filesystem
-options and other reconfiguration providers still fail explicitly. Persistent
-inode stores accept confirmation of their existing superblock mode, including
-stock util-linux's `remount,rw` during boot. This does not clear per-mount readonly
-policy or authorize a child user namespace. Changing a writable persistent
-superblock to readonly remains unsupported: it needs writer tracking beyond the
-tmpfs owner, not an unconditional successful acknowledgement.
+options and other reconfiguration providers still fail explicitly.
+
+Persistent inode superblocks accept `remount,ro` with a deliberately narrower
+contract than Linux: subsequent writable opens and metadata/namespace mutations
+fail with EROFS, but already acquired writable native descriptions and shared
+mappings retain write access. Remount does not scan writers or add interception
+to read/write or ordinary unlink. It is not a revocation/security barrier.
+The policy is shared by aliases and independent owners of that store scope;
+the existing catalogue generation invalidates its cache. `remount,rw` clears
+only this runtime policy, not immutable-source or per-mount restrictions, and
+does not authorize a child user namespace. The last root lease ends its lifetime:
+the next cold opener clears the flags under the existing store gate, including
+after a crash. Image copies do not inherit them. No storage format change or
+per-syscall schema upgrade is required.
+Writable overlay views also consult their upper store's policy through that
+generation cache. Making an overlay writable cannot clear its upper's readonly
+policy; making the overlay readonly does not change unrelated upper aliases.
 
 Bind operands can be exact retained files or directories, including proc-FD
 aliases. Their mount provenance survives detach/rebind; selecting a regular

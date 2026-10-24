@@ -11,6 +11,7 @@
 #include <linux/mount.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 static unsigned descriptors(void) {
@@ -31,7 +32,7 @@ static struct md_fs_result call(struct md_filesystem *fs,struct md_fs_request q,
     md_fs_execute(fs,&q,&result,out); return result;
 }
 static void temporary_remount(struct md_filesystem *fs,int context,struct md_control_file control,
-        int mounted,struct md_fs_anchor *anchor) {
+        int mounted,struct md_fs_anchor *anchor,unsigned mode) {
     const char *keys[]={"mode","uid","gid","size","nr_inodes"};
     const char *values[]={"0700","123","456","25%","1024"};
     struct md_fs_request q={.operation=MD_FS_FSCONFIG,.directory={context,-1},
@@ -52,13 +53,42 @@ static void temporary_remount(struct md_filesystem *fs,int context,struct md_con
     assert(call(fs,legacy,NULL).error==-EINVAL);
     struct md_fs_result root=call(fs,(struct md_fs_request){.operation=MD_FS_FSTAT,
         .directory={mounted,-1},.origin={anchor,NULL}},NULL);
-    assert(!root.error && (root.info.mode&07777)==01777
+    assert(!root.error && (root.info.mode&07777)==mode
         && root.info.uid==0 && root.info.gid==0);
     q.mode=FSCONFIG_SET_STRING; q.path[0]="size"; q.value="nonsense"; q.value_size=9;
     assert(!call(fs,q,NULL).error);
     q.mode=FSCONFIG_CMD_RECONFIGURE; q.path[0]=NULL; q.value=NULL; q.value_size=0;
     assert(call(fs,q,NULL).error==-EINVAL);
-    puts("PASS tmpfs reconfigure: shared validation, unchanged root metadata, cleared parameters and invalid capacity");
+    puts("PASS temporary reconfigure: shared validation, unchanged root metadata, cleared parameters and invalid capacity");
+}
+static void persistent_readonly(const char *path,struct md_inode_store *store) {
+    struct md_inode_store *peer=NULL;
+    assert(!md_inode_store_open(path,0,&peer));
+    peer->identity=store->identity;
+    assert(!md_inode_store_readonly(peer));
+    struct md_inode_store *maintenance=NULL;
+    assert(!md_inode_operation_window_begin(store));
+    assert(md_inode_store_open_exclusive(path,&maintenance)==-EBUSY && !maintenance);
+    assert(!md_inode_operation_window_end(store));
+    int fd=md_inode_open(store,-1,"/writable",O_CREAT|O_RDWR|O_CLOEXEC,0600); assert(fd>=0);
+    assert(!ftruncate(fd,4096));
+    char *mapping=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0); assert(mapping!=MAP_FAILED);
+    int deleted=md_inode_open(store,-1,"/unlinked",O_CREAT|O_RDWR|O_CLOEXEC,0600); assert(deleted>=0);
+    assert(!md_inode_unlink(store,-1,"/unlinked",0));
+    assert(!md_inode_store_reconfigure(store,1));
+    assert(md_inode_store_readonly(peer)==1);
+    assert(md_inode_open(peer,-1,"/writable",O_WRONLY|O_CLOEXEC,0)==-EROFS);
+    assert(md_inode_create(peer,-1,"/blocked",0600)==-EROFS);
+    assert(md_inode_unlink(peer,-1,"/writable",0)==-EROFS);
+    assert(md_inode_rename(peer,-1,"/writable",-1,"/renamed",0)==-EROFS);
+    int read=md_inode_open(peer,-1,"/writable",O_RDONLY|O_CLOEXEC,0); assert(read>=0); close(read);
+    assert(pwrite(fd,"fd",2,0)==2 && write(deleted,"kept",4)==4);
+    mapping[2]='m'; assert(!msync(mapping,4096,MS_SYNC));
+    assert(!md_inode_store_reconfigure(peer,0) && !md_inode_store_readonly(store));
+    int allowed=md_inode_create(store,-1,"/allowed",0600); assert(allowed>=0); close(allowed);
+    assert(!munmap(mapping,4096)); close(fd); close(deleted);
+    md_inode_store_close(peer);
+    puts("PASS persistent readonly: shared policy blocks new writes, retains native OFDs/mappings and restores rw");
 }
 static void pressure_probe(const char *base) {
     int root=open(base,O_PATH|O_DIRECTORY|O_CLOEXEC); assert(root>=0);
@@ -90,6 +120,7 @@ void test_fs_context(const char *base) {
     char path[PATH_MAX]; snprintf(path,sizeof(path),"%s/fs-context",base);
     struct md_inode_store *store=NULL; assert(!md_inode_store_open(path,1,&store));
     struct md_identity root=md_identity_new(0,0); store->identity=&root;
+    persistent_readonly(path,store);
     struct md_fs_storage_cache cache={0};
     struct md_filesystem fs={.store=store,.storage=&cache};
     assert(!md_fs_mounts_open(&fs,NULL,0));
@@ -98,7 +129,7 @@ void test_fs_context(const char *base) {
             struct md_control_file control={0};
             struct md_fs_output out={.control=capture,.control_context=&control};
             struct md_fs_request q={.operation=MD_FS_FSOPEN,.directory={-1,-1},
-                .path={"tmpfs",NULL},.flags=O_RDWR|O_CLOEXEC};
+                .path={cycle&1 ? "ramfs" : "tmpfs",NULL},.flags=O_RDWR|O_CLOEXEC};
             struct md_fs_result opened=call(&fs,q,&out); assert(!opened.error && opened.fd>=0 && control.ops);
             struct md_fs_anchor *anchor=NULL;
             int mounted=-1;
@@ -112,7 +143,7 @@ void test_fs_context(const char *base) {
                 struct md_fs_result mount=call(&fs,q,&(struct md_fs_output){.origin=&anchor});
                 assert(!mount.error && mount.fd>=0 && anchor);
                 mounted=mount.fd;
-                if (!cycle) temporary_remount(&fs,opened.fd,control,mounted,anchor);
+                if (cycle<2) temporary_remount(&fs,opened.fd,control,mounted,anchor,cycle ? 0755 : 01777);
                 struct md_mount_namespace *copy=NULL;
                 struct md_fs_location copied_root;
                 assert(!md_fs_mounts_copy(&fs,&(struct md_fs_location){0},&copy,&copied_root));
@@ -139,7 +170,11 @@ void test_fs_context(const char *base) {
         .directory={-1,-1},.path={"tmpfs",NULL},.flags=O_RDWR},&(struct md_fs_output){.control=capture});
     assert(rejected.error==-ENOMEM && rejected.fd<0 && descriptors()==before);
     md_fs_storage_close(&cache); md_fs_mounts_close(&fs);
+    assert(!md_inode_store_reconfigure(store,1));
     store->identity=NULL; md_identity_release(&root); md_inode_store_close(store);
+    assert(!md_inode_store_open(path,0,&store));
+    assert(!md_inode_store_readonly(store));
+    md_inode_store_close(store);
     assert(descriptors()==baseline);
     puts("PASS fscontext ownership: cancellation, namespace copy, detached graph transfer and exact FD cleanup");
 }

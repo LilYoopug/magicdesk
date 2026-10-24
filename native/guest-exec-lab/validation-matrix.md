@@ -62,7 +62,7 @@ not just a completed Mesa build or successful device enumeration.
 | deepin | P/N | N/N | P/N | P/N | N/N |
 | manjaro | P/N | N/N | P/N | P/N | N/N |
 | void | P/N | N/N | P/N | P/N | I/N |
-| armtix | P/N | P/N | F/N | P/N | N/N |
+| armtix | P/N | P/N | P/N | P/N | N/N |
 | steamos | P/N | I/N | F/N | I/N | I/N |
 
 Package lifecycle means install, update/reinstall, verification and removal,
@@ -95,16 +95,16 @@ All runs use default lazy entry; Base remains untested in this batch.
 | deepin | P / P / P | `40f5b5045a224a71b27437364a80cc91` | `d4f59c0e2d1d43bcbd4d22b924001072` |
 | manjaro | P / P / P | `f7be656fa9da4364915e575d3af7b30f` | `28c08a0520b148459d0052b90d569b69` |
 | void | P / N / NA (runit) | `c9d13ce4051c47eb8157aecc1a0f29b2` | `d7281d10f2024a239cd902720e544e31` |
-| armtix | F / N / NA (runit) | `7d7b16ec3ea64ccdb9983f4b9afd8447` | `2473bd1c2149472daa21744e1cbdca78` |
+| armtix | P / N / NA (runit) | `30d38d4aec124fc1835aa5e5995d0365` (*) | `2473bd1c2149472daa21744e1cbdca78` |
 | steamos | F / N / N | `fa6234c4dadc46878677e15ed535fb97` | `0aebd5e239ad43f6b1f1a62cbf5e8249` |
 
 Fedora and openSUSE required their separately packaged networkd, installed in
 the lab from their own repositories before the passing rerun. This does not
 replace openSUSE's Wicked or add a test-only dependency to the user recipe.
-SteamOS firewalld still submits unsupported REJECT rules. Armtix reaches runit
-but its stock root filesystem stage
-fails at read-only superblock reconfiguration (`FSCONFIG_CMD_RECONFIGURE`,
-`EOPNOTSUPP`); service lifecycle alone is not boot acceptance.
+SteamOS firewalld still submits unsupported UDP/ICMP REJECT rules.
+(*) Armtix's 2026-10-24 boot receipt is under `build/compat-contract-tests/`:
+stock runit stages, service start/restart/stop and launch cleanup pass without
+startup failures. Its root remount uses the documented persistent-store contract.
 Current focused service receipts under `build/boot-service-repair/`:
 `a90f1ba5666a4fe987381e65d4bb3f37` verifies SteamOS Avahi mDNS over IPv4/IPv6
 and three restart cycles. `0553d599fba34bf2ba48e0262789fb0d` verifies Ubuntu
@@ -124,9 +124,9 @@ userspace, altered activation script or disabled service substitutes for NixOS.
 
 | Scenario | Shroot / Base | Evidence under `build/ipv6-binfmt-boot/` |
 | --- | --- | --- |
-| Store registration and forced sandboxed derivation rebuild | P/N | `oci-services-147018b884ff4e4cbd42c69d7a488187.json`; stock `nix-build --check --option sandbox true`, local inputs, substituters disabled, output readback |
-| Stock activation | F/N | Same receipt; `mount -t ramfs` for `/run/keys` is unsupported |
-| Stock `/sbin/init`, default target and shutdown | F/N | `oci-services-1d85987e21154c23b3e26eb032e13902.json`; systemd 260.5 reaches multi-user, but reports degraded; clean guest shutdown |
+| Store registration and forced sandboxed derivation rebuild | P/N | `oci-services-08f9b5cbe6b3425ebeee4acec42b8dc7.json`; stock `nix-build --check --option sandbox true`, local inputs, substituters disabled, output readback |
+| Stock activation in prepared init namespace | P/N | Same 2026-10-24 receipt; activation returns 0, private dev/proc/run from the common init fixture, disk-backed ramfs for `/run/keys` |
+| Stock `/sbin/init`, default target and shutdown | P/N | Same receipt; systemd 260.5 reports running and zero failed units, D-Bus/journal/logind IO and restart pass, clean guest shutdown |
 
 The boot uses routed networking with guest-owned DNS; resolvconf and
 network-local-commands complete. A launch-owned read-only DNS mount is not
@@ -140,10 +140,11 @@ IPv6 receipt `build/shroot-image-tests/oci-services-37e026b65ce3490c87c1707d85cf
 The DHCP fixture uses separate guest namespaces and does not certify an Android
 uplink or stock boot after activation. Its hook verifies the received DNS
 options; stock resolvconf is covered separately, not by that fixture hook.
-Complete activation/default-target,
-desktop, graphics, containers and package lifecycle remain unverified.
-Disk-backed logical tmpfs is not a replacement for ramfs's
-memory-only, non-swappable contents, especially for `/run/keys`.
+Default boot still logs DHCP timeout/permission warnings on its chosen uplink;
+zero failed units do not certify external DHCP connectivity. Desktop, graphics,
+containers, recipe integration and package lifecycle remain unverified.
+Logical ramfs is disk-backed compatibility, not memory-only/non-swappable
+storage; `/run/keys` therefore has no such secret-storage guarantee.
 
 ## Containers And Virtual Machines
 
@@ -407,7 +408,7 @@ tests. Local report paths identify evidence, not durable public downloads.
 | Void portal | `build/installed-void-turnip/void-portal-lifecycle.json`; ordinary-user document export, live sandbox read/write, revocation denial and export cleanup pass. Two SIGTERM/D-Bus-reactivation rounds remove the document FUSE mount; GUI chooser/readback is covered by both browser reports |
 | Void VS Code | `build/installed-void-turnip/void-vscode-sandbox-fixed/gui-report.json`; VS Code 1.140.0, cpptools 1.34.4 and distribution GDB 18.1: editor/save, external file events, integrated terminal, reload, breakpoint, step, normal close and hardware composition pass. The live renderer has UID 1000, NoNewPrivs=1 and Seccomp=2. The exact fixture then stops its launch, graphics and display without changing HOME; full recipe desktop discovery remains separate |
 | Armtix package lifecycle | `build/installed-armtix-turnip/d36117e964b34fc49e9a1611bacd35a8.log` records successful mkinitcpio reinstall and all four stock initramfs hooks; its subsequent unavailable `hello` query is not acceptance. `0552cfd0fb3c493fabb64c8892bfd5bf.log` covers the available repository package `tree`: install, execution, reinstall, package-file verification and removal. No workload source build is added to the recipe |
-| Armtix default boot | `build/armtix-boot-final/oci-services-de2bda2b57944655b082fcf9f843e420.json`; stock runit reaches stage 2 and service start/restart/stop pass, but startup still reports unsupported persistent-root read-only reconfiguration and missing binfmt_misc. Overall boot remains F; reaching the desktop does not certify a healthy default boot |
+| Armtix default boot | `build/compat-contract-tests/oci-services-30d38d4aec124fc1835aa5e5995d0365.json`; stock runit stages and default services, service start/restart/stop and owned-process cleanup pass without startup failures |
 | Armtix Docker | `build/installed-armtix-turnip/oci-services-421f9571fce94263acf95d0231e6d441.json`; stock runit Docker 29.9.1, containerd 2.4.2 and runc 1.5.2, named legacy cgroup membership, default overlayfs snapshotter and package-selected nft frontend. Bridge TCP/UDP publication, peer DNS/IP, binds/exec, external DNS/internet, conflicts and port cleanup pass |
 | Armtix Podman | `build/installed-armtix-turnip/oci-services-e379d8ce233d490db3006d4754301aaa.json`; stock sandbox/cgroups, bridge, TCP/UDP publication, peer DNS/IP, external internet and cleanup pass |
 | Armtix Libvirt/QEMU | `build/installed-armtix-turnip/oci-services-bffac31b93ae4d60baf272173671f6ec.json`; packaged runit libvirtd/virtlogd/virtlockd, managed TCG kernel/initrd boot, serial output, pause/resume, poweroff and undefine pass. `build/armtix-qemu-current.log` records direct TCG boot. VM networking and KVM remain untested |

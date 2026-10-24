@@ -21,6 +21,8 @@
 #include <linux/netfilter/xt_addrtype.h>
 #include <linux/netfilter/xt_pkttype.h>
 #include <linux/netfilter/xt_rpfilter.h>
+#include <linux/netfilter_ipv4/ipt_REJECT.h>
+#include <linux/netfilter_ipv6/ip6t_REJECT.h>
 #include <linux/if_packet.h>
 #include <linux/rtnetlink.h>
 #include <netinet/in.h>
@@ -956,7 +958,72 @@ static void compat_icmp(void) {
     }
     puts("PASS xt ICMP: family/revision admission, type/code ranges, IPv4 wildcard, inversion and short payloads");
 }
+static void reject_tcp(void) {
+    for (unsigned ipv6=0;ipv6<2;++ipv6) for (unsigned compat=0;compat<2;++compat) {
+        struct md_network_filter_table table={.handle=1,.family=ipv6 ? NFPROTO_IPV6 : NFPROTO_IPV4};
+        struct md_filter_chain chain={.table=1,.handle=2,.hook=NF_INET_LOCAL_IN,.policy=NF_ACCEPT};
+        struct md_filter_rule rule={.chain=2,.count=1,.expressions={{.code=MD_FILTER_TRANSPORT,
+            .transport={.protocol=IPPROTO_TCP,.source={0,65535},.destination={0,65535}}}}};
+        struct md_network_filter f={.tables=&table,.count=1,.chains=&chain,.chain_count=1,.rules=&rule,.rule_count=1};
+        struct packet p;
+        struct md_network_message out={.data=p.data,.capacity=sizeof(p.data)};
+        add(&out,(NFNL_SUBSYS_NFTABLES<<8)|NFT_MSG_NEWRULE,0,table.family);
+        size_t start=out.size;
+        size_t entry,data;
+        assert(!md_network_message_nest(&out,NFTA_LIST_ELEM,&entry));
+        const char *name=compat ? "target" : "reject";
+        assert(!md_network_message_attribute(&out,NFTA_EXPR_NAME,name,strlen(name)+1));
+        assert(!md_network_message_nest(&out,NFTA_EXPR_DATA,&data));
+        uint32_t mode=htonl(NFT_REJECT_TCP_RST);
+        size_t type_offset=out.size+sizeof(struct nlattr);
+        if (compat) {
+            uint32_t zero=0,info[2]={ipv6 ? IP6T_TCP_RESET : IPT_TCP_RESET,0};
+            assert(!md_network_message_attribute(&out,NFTA_TARGET_NAME,"REJECT",7));
+            assert(!md_network_message_attribute(&out,NFTA_TARGET_REV,&zero,4));
+            assert(!md_network_message_attribute(&out,NFTA_TARGET_INFO,info,sizeof(info)));
+        } else {
+            unsigned char unused=0;
+            assert(!md_network_message_attribute(&out,NFTA_REJECT_TYPE,&mode,4));
+            assert(!md_network_message_attribute(&out,NFTA_REJECT_ICMP_CODE,&unused,1));
+        }
+        assert(!md_network_message_end_nest(&out,data));
+        assert(!md_network_message_end_nest(&out,entry));
+        assert(!md_nft_expressions(&f,1,&rule,out.data+start,out.size-start));
+        assert(rule.count==2 && rule.expressions[1].code==MD_FILTER_REJECT && !md_filter_validate(&f));
+        struct md_filter_packet packet={.destination=md_ip_any(ipv6 ? AF_INET6 : AF_INET),.protocol=IPPROTO_TCP};
+        assert(md_filter_evaluate(&f,NF_INET_LOCAL_IN,&packet)==-ECONNREFUSED);
+        packet.protocol=IPPROTO_UDP;
+        assert(!md_filter_evaluate(&f,NF_INET_LOCAL_IN,&packet));
+        chain.hook=NF_INET_PRE_ROUTING;
+        assert(md_filter_validate(&f)==-EOPNOTSUPP);
+        chain.hook=NF_INET_LOCAL_IN;
+        rule.expressions[0].transport.protocol=IPPROTO_UDP;
+        assert(md_filter_validate(&f)==-EOPNOTSUPP);
+        rule.count=3;
+        rule.expressions[2]=rule.expressions[1];
+        rule.expressions[1]=(struct md_filter_expression){.code=MD_FILTER_COMPARE,
+            .operation=NFT_CMP_EQ,.size=1,.value={IPPROTO_TCP}};
+        rule.expressions[0]=(struct md_filter_expression){.code=MD_FILTER_META,.key=NFT_META_L4PROTO,.size=1};
+        assert(!md_filter_validate(&f));
+        rule.expressions[0]=(struct md_filter_expression){.code=MD_FILTER_PAYLOAD,
+            .key=NFT_PAYLOAD_NETWORK_HEADER,.aux=ipv6 ? 6 : 9,.size=1};
+        assert(!md_filter_validate(&f));
+        table.family=NFPROTO_INET;
+        assert(md_filter_validate(&f)==-EOPNOTSUPP);
+        table.family=ipv6 ? NFPROTO_IPV6 : NFPROTO_IPV4;
+        free(rule.wire);
+        struct md_filter_rule unsupported={0};
+        if (!compat) {
+            /* Changing the wire type must fail, never admit ICMP as DROP. */
+            uint32_t unsupported_mode=htonl(NFT_REJECT_ICMPX_UNREACH);
+            memcpy(out.data+type_offset,&unsupported_mode,4);
+            assert(md_nft_expressions(&f,1,&unsupported,out.data+start,out.size-start)==-EOPNOTSUPP);
+        }
+    }
+    puts("PASS nft/xt TCP REJECT: IPv4/IPv6, immediate error, UDP exclusion, hook validation and unsupported ICMP rejection");
+}
 void test_network_nft(void) {
+    reject_tcp();
     compat_icmp();
     packet_route_matches();
     compat_revisions();

@@ -1305,8 +1305,12 @@ including nspawn, BuildKit, LXC and the selected LTP checks.
 
 ### ABI and isolation limits
 
-Cgroups are permissive, not resource enforcement. Logical tmpfs is disk-backed
-and its capacity options do not impose quotas. Proc/sysfs are bounded providers,
+Cgroups are permissive, not resource enforcement. Logical tmpfs and ramfs are
+disk-backed; capacity options do not impose quotas. Neither provides memory-only
+or no-swap secret storage. Persistent `remount,ro` denies new writable opens and
+metadata changes, but does not revoke existing writable FDs or shared mappings.
+See the [filesystem contracts](../native/shroot/namespace-providers.md).
+Proc/sysfs are bounded providers,
 not complete virtual kernel filesystems. ID-mapped mounts, general native-device
 creation, POSIX `mq_*` IO and arbitrary BPF facilities are unsupported. Mount
 propagation and cross-supervisor descriptor transfer have documented limits;

@@ -34,7 +34,7 @@ static int requires_mediation(const struct md_network_filter *f,const struct md_
     for (size_t i=0;i<f->rule_count;++i) if (f->rules[i].chain==c->handle)
         for (unsigned j=0;j<f->rules[i].count;++j) {
             const struct md_filter_expression *e=&f->rules[i].expressions[j];
-            if (e->code==MD_FILTER_COUNTER) return 1;
+            if (e->code==MD_FILTER_COUNTER || e->code==MD_FILTER_REJECT) return 1;
             for (size_t at=0;at<md_filter_verdict_count(f,e);++at) {
                 struct md_filter_verdict v=md_filter_verdict_at(f,e,at);
                 if (v.operation==NF_DROP) return 1;
@@ -318,5 +318,5 @@ int md_network_flow_admits(struct md_network_namespace *n,struct md_network_filt
     int error=check_path(n->fabric,&copy,0,n,filter,1,NULL);
     if (!error) error=check_path(n->fabric,&copy,0,n,filter,0,NULL);
     if (!error) error=check_path(n->fabric,&copy,1,n,filter,0,NULL);
-    return error==-EACCES ? -EBUSY : error;
+    return error==-EACCES || error==-ECONNREFUSED ? -EBUSY : error;
 }

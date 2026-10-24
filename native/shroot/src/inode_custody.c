@@ -141,7 +141,7 @@ static int import(struct md_inode_custody_parcel *p, int expected, struct md_ino
     unsigned scoped=!!(data.flags&SCOPED), start=2+scoped;
     unsigned credentials=!!(data.flags&CREDENTIALS);
     if (bytes<manifest_size(0) || data.magic!=MAGIC || data.version!=VERSION || (data.flags&~(TEMPORARY|SCOPED|CREDENTIALS|KIND_MASK|OWNER_MASK))
-            || kind>MD_FILESYSTEM_OVERLAY || (kind && !(data.flags&TEMPORARY) && !scoped)
+            || kind>MD_FILESYSTEM_RAMFS || (kind && !(data.flags&TEMPORARY) && !scoped)
             || (scoped && kind!=MD_FILESYSTEM_OVERLAY)
             || (credentials && kind!=MD_FILESYSTEM_OVERLAY)
             || depth>MD_USER_NAMESPACE_DEPTH

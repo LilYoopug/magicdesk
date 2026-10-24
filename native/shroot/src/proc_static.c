@@ -21,7 +21,7 @@ static const char devices[]=
     "226 drm\n"
     "\nBlock devices:\n";
 static const char filesystems[]=
-    "nodev\ttmpfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevpts\n"
+    "nodev\ttmpfs\nnodev\tramfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevpts\n"
     "nodev\tcgroup\nnodev\tcgroup2\nnodev\tmqueue\nnodev\tbinfmt_misc\n"
     "nodev\toverlay\nnodev\tfuse\n";
 static const struct static_entry {

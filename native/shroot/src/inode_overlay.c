@@ -398,7 +398,12 @@ int md_inode_overlay_prepare_upper(struct md_inode_store *index, struct md_inode
     struct md_inode_store borrowed;
     borrow_scope(&borrowed,index,source);
     struct mdi_node upper,work;
-    r=mdi_fd(&borrowed,upper_fd,&upper);
+    /* Versions belong to connections: refresh the borrowed superblock policy
+     * under this transaction's gate before acquiring upper write authority. */
+    borrowed.super_checked=0;
+    r=mdi_super_refresh(&borrowed,index->locked_version);
+    if (!r && mdi_readonly(&borrowed)) r=-EROFS;
+    if (!r) r=mdi_fd(&borrowed,upper_fd,&upper);
     if (!r) r=mdi_fd(&borrowed,work_fd,&work);
     if (!r && (upper.kind!=S_IFDIR || work.kind!=S_IFDIR)) r=-ENOTDIR;
     if (!r) r=mdi_parent_writable(&borrowed,&upper);
@@ -432,5 +437,6 @@ int md_inode_overlay_prepare_upper(struct md_inode_store *index, struct md_inode
     sqlite3_finalize(q);
     release_scope(&borrowed,index);
     r=mdi_commit(index,r);
+    index->super_checked=0;
     return r ? r : layer(index,source,upper_fd,user_xattr,1);
 }

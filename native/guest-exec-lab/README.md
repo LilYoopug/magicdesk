@@ -166,6 +166,14 @@ such as NixOS; it does not substitute the client or change Android networking.
 `test_routed_network.py` adds libc interface lookup, IPv4 packet information
 with absent/truncated receive buffers, a datagram queued before sender close,
 and receiver-close/rebind without reusing stale reply mappings.
+`probe_nft_runtime.py BUILD STORE --network bridge --machine-entry` (or `--base`)
+checks stock nft/iptables catalogue operations, atomic rollback, verdict maps,
+UDP DNAT and immediate TCP REJECT in both address families. Unsupported ICMP
+REJECT must fail without committing its table. The default `routed` mode also
+publishes the fixture's port 53 on Android and can fail with EACCES under host
+bind policy; use the explicit private bridge for guest-only coverage, not as a
+substitute for external publication tests. The native network-launch fixture
+separately requires new and established native TCP peers to receive reset.
 `benchmark_network.py BUILD STORE --sysroot GLIBC_SYSROOT` compares one static
 binary under shell/native, host, routed, filtered and NAT modes with rotated
 rounds. It reports application CPU separately from whole-invocation CPU;

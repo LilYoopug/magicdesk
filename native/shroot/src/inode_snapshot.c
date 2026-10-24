@@ -78,9 +78,10 @@ int md_inode_snapshot(struct md_inode_store *source, struct md_inode_store *targ
         if (!r) r = mdi_sql_error(done);
     }
     if (!r) {
-        r = mdi_begin(target, 1);
+        r = mdi_runtime_begin(target);
         if (!r) {
             r = mdi_sql(target, "DELETE FROM allocation_reserve; DELETE FROM backings; DELETE FROM events; DELETE FROM sockets; DELETE FROM fifo_pins; "
+                "DELETE FROM properties WHERE key GLOB 'runtime_readonly/*'; "
                 "UPDATE inode_channels SET channel=lower(hex(randomblob(16))),source=0; "
                 "UPDATE properties SET value=0 WHERE key='sealed'");
             int origin = 0;
@@ -113,6 +114,7 @@ int md_inode_snapshot(struct md_inode_store *source, struct md_inode_store *targ
         }
     }
     r = mdi_finish(source, r);
+    target->super_checked=0;
     if (!r) r = mdi_sources_open(target);
     return r;
 }

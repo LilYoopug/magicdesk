@@ -13,13 +13,15 @@
 #include <linux/netfilter/xt_pkttype.h>
 #include <linux/netfilter/xt_rpfilter.h>
 #include <linux/netfilter_ipv4/ip_tables.h>
+#include <linux/netfilter_ipv4/ipt_REJECT.h>
 #include <linux/netfilter_ipv6/ip6_tables.h>
+#include <linux/netfilter_ipv6/ip6t_REJECT.h>
 #include <stdlib.h>
 
 int md_nft_compat_revision(unsigned family,const char *name,unsigned revision,unsigned target) {
     static const struct { const char *name; unsigned target,revisions; } extensions[]={
         {"MARK",1,1U<<2},{"mark",0,1U<<1},{"addrtype",0,1U<<1},{"conntrack",0,1U<<3},
-        {"DNAT",1,7},{"SNAT",1,7},{"MASQUERADE",1,1},
+        {"DNAT",1,7},{"SNAT",1,7},{"MASQUERADE",1,1},{"REJECT",1,1},
         {"tcp",0,1},{"udp",0,1},{"comment",0,1},{"pkttype",0,1},{"rpfilter",0,1},
         {"icmp",0,1},{"icmp6",0,1}};
     if ((family!=NFPROTO_IPV4 && family!=NFPROTO_IPV6) || !name) return -ENOENT;
@@ -71,6 +73,15 @@ static int target(struct md_network_filter *f,uint64_t table,const struct attrib
     if (error) return error;
     if (!md_nft_compat_supported(table_family(f,table),name,revision,1)) return -EOPNOTSUPP;
     const struct attribute *wire=&a[NFTA_TARGET_INFO];
+    if (!strcmp(name,"REJECT")) {
+        unsigned mode;
+        if (!wire->data || wire->flags || wire->size!=8) return -EINVAL;
+        memcpy(&mode,wire->data,sizeof(mode));
+        unsigned reset=table_family(f,table)==NFPROTO_IPV6 ? IP6T_TCP_RESET : IPT_TCP_RESET;
+        if (mode!=reset) return -EOPNOTSUPP;
+        e->code=MD_FILTER_REJECT;
+        return 0;
+    }
     if (!strcmp(name,"MARK")) {
         struct xt_mark_tginfo2 info;
         if (!wire->data || wire->flags || wire->size!=sizeof(info)) return -EINVAL;
@@ -259,7 +270,15 @@ static int expression(struct md_network_filter *f,uint64_t table,
 #define FIELDS(mask) do { error=nested(data,(mask),a,32); if (error) return error; } while (0)
 #define NUM(key,dst) do { error=required_number(&a[key],&(dst)); if (error) return error; } while (0)
 #define REG(key,size,dst,write) do { error=reg(&a[key],size,&(dst),initialized,write); if (error) return error; } while (0)
-    if (!strcmp(name,"immediate")) {
+    if (!strcmp(name,"reject")) {
+        FIELDS(BIT(NFTA_REJECT_TYPE)|BIT(NFTA_REJECT_ICMP_CODE));
+        NUM(NFTA_REJECT_TYPE,value);
+        if (value!=NFT_REJECT_TCP_RST) return -EOPNOTSUPP;
+        /* nft also serializes an unused one-byte ICMP code for TCP reset. */
+        if (a[NFTA_REJECT_ICMP_CODE].data
+                && (a[NFTA_REJECT_ICMP_CODE].flags || a[NFTA_REJECT_ICMP_CODE].size!=1)) return -EINVAL;
+        e->code=MD_FILTER_REJECT;
+    } else if (!strcmp(name,"immediate")) {
         FIELDS(BIT(NFTA_IMMEDIATE_DREG)|BIT(NFTA_IMMEDIATE_DATA));
         NUM(NFTA_IMMEDIATE_DREG,value);
         if (value==NFT_REG_VERDICT) {

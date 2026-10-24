@@ -693,8 +693,9 @@ existing mount graph. It does not issue these privileged syscalls on the host.
 Context carriers use sealed memfds; mount FDs use O_PATH and the common retained
 origin/ADDFD/SCM_RIGHTS delivery mechanisms. No newer kernel interface is needed.
 `fspick` (5.2) selects a retained mount root, with empty-path and symlink policy,
-for inode, proc and sysfs filesystems. Tmpfs/proc/sysfs support readonly changes;
-persistent inode stores support confirmation of their existing superblock mode.
+for inode, proc and sysfs filesystems. Tmpfs/ramfs/proc/sysfs support readonly
+changes; persistent inode stores deny future writes without revoking existing
+writable descriptions or shared mappings (see namespace-providers.md).
 It never forwards privileged mount operations to Android. Other filesystem
 reconfiguration is explicitly unsupported.
 Provider superblock read-only policy follows aliases, namespace copies, live
@@ -705,7 +706,7 @@ This is an ephemeral mount-graph protocol change, not a persistent store revisio
 transient-store fixture covers detached graph custody and exact FD retirement.
 Attribute changes use the existing single-writer policy, including recursive
 preflight and locked-policy rejection; no host mount_setattr call is required.
-Tmpfs read-only reconfiguration uses baseline `F_SETLEASE/F_RDLCK` under the
+Tmpfs/ramfs read-only reconfiguration uses baseline `F_SETLEASE/F_RDLCK` under the
 existing store gate to detect native writers and shared writable mappings.
 `inode_super.c` releases each probe lease before policy publication; native
 unsupported/permission errors fail the requested reconfiguration only. Lease
@@ -714,10 +715,24 @@ blocking and pending-signal preservation. Policy lives in the retained store,
 not a new per-write syscall adapter. `test_mount_api.py` and the native
 transient-store fixture cover writers, unlinked files, mappings, aliases,
 cross-process snapshots and release. This does not require a post-5.15 kernel.
-Native-leaf tmpfs writer discovery uses this same lease probe before unlink or
+Native-leaf temporary-store writer discovery uses this same lease probe before unlink or
 overwrite; a busy leaf is promoted so an unlinked writer still blocks read-only
 remount until its description/mapping is released. Persistent-store mutation
-does not acquire this tmpfs-only probe.
+does not acquire this temporary-store-only probe. Its readonly policy is cached
+by the existing catalogue generation, shared within the retained store scope,
+and cleared by cold admission after the last root lease. It adds no kernel
+dependency or ordinary read/write interception. `test_fs_context.c` covers peer
+visibility, retained writers/mappings, cold reset and fail-fast maintenance.
+`test_inode_view.c` covers upper-policy propagation into writable overlays,
+denied upper acquisition/activation and independently scoped overlay remounts.
+Both temporary kinds are disk-backed, not memory-only/no-swap implementations.
+
+TCP REJECT uses baseline SO_LINGER with zero linger on relay-owned stream FDs
+(`network_forward.c`), not host netfilter or raw packet injection. Local
+connection admission returns ECONNREFUSED. `test_network_nft.c` covers nft/xt
+wire validation and `test_network_launch.c` checks IPv4/IPv6 native RST for new
+and established peers. Unsupported UDP/ICMP rejection fails rule admission;
+no host ICMP permission or newer kernel capability is assumed.
 
 Protected proc final-link capture uses caller-side O_PATH|O_NOFOLLOW and the
 existing exact-description transport. The filesystem walker verifies the captured

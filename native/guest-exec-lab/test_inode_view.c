@@ -215,7 +215,13 @@ static void overlay_credentials(struct md_inode_store *s) {
     struct md_inode_store *view=NULL;
     assert(!md_inode_view_create(s,MD_FILESYSTEM_OVERLAY,&view));
     assert(!md_inode_overlay_layer(view,s,lower,1));
+    assert(!md_inode_store_reconfigure(s,1));
+    assert(md_inode_overlay_prepare_upper(view,s,upper,work,1)==-EROFS);
+    assert(!md_inode_store_reconfigure(s,0));
     assert(!md_inode_overlay_prepare_upper(view,s,upper,work,1));
+    assert(!md_inode_store_reconfigure(s,1));
+    assert(md_inode_overlay_activate(view)==-EROFS);
+    assert(!md_inode_store_reconfigure(s,0));
     assert(!md_inode_overlay_activate(view));
     assert(!md_inode_overlay_stash(view,&mounter));
     assert(!md_identity_groups(&mounter,NULL,0));
@@ -453,10 +459,26 @@ static void writable_view(struct md_inode_store *s) {
     fd=md_inode_open(view,-1,"/moved",O_RDONLY,0); assert(fd>=0); text(fd,"upper"); close(fd);
     fd=md_inode_open(view,-1,"/renamed/value",O_RDONLY,0); assert(fd>=0); text(fd,"new"); close(fd);
     fd=md_inode_open(s,lower,"file",O_RDONLY,0); assert(fd>=0); text(fd,"lower"); close(fd);
+    fd=md_inode_open(view,-1,"/moved",O_RDWR,0); assert(fd>=0);
+    assert(!md_inode_store_reconfigure(s,1));
+    assert(md_inode_open(view,-1,"/moved",O_WRONLY,0)==-EROFS);
+    assert(md_inode_open(view,-1,"/blocked",O_CREAT|O_WRONLY,0600)==-EROFS);
+    assert(md_inode_unlink(view,-1,"/moved",0)==-EROFS);
+    assert(md_inode_rename(view,-1,"/moved",-1,"/denied",0)==-EROFS);
+    assert(pwrite(fd,"upper",5,0)==5); close(fd);
+    assert(!md_inode_store_reconfigure(view,0));
+    assert(md_inode_open(view,-1,"/moved",O_WRONLY,0)==-EROFS);
+    assert(!md_inode_store_reconfigure(s,0));
+    assert(!md_inode_store_reconfigure(view,1));
+    assert(md_inode_open(view,-1,"/moved",O_WRONLY,0)==-EROFS);
+    fd=md_inode_open(s,upper,"moved",O_RDWR,0); assert(fd>=0); close(fd);
+    assert(!md_inode_store_reconfigure(view,0));
+    fd=md_inode_open(view,-1,"/moved",O_RDWR,0); assert(fd>=0); close(fd);
     close(lower); close(upper); close(work); md_inode_store_close(view);
     close(watcher); md_inode_watch_close(s);
     collect(s); assert(views(s)==1);
     puts("PASS writable overlay: copy-up, upper bodies, links, whiteouts, opaque directories, rollback and reconnect");
+    puts("PASS overlay readonly: upper policy blocks new mutations, retained FDs write, view policy stays scoped");
 }
 static void socket_message(struct md_inode_store *s,const char *path,int receiver) {
     struct sockaddr_un address={.sun_family=AF_UNIX};

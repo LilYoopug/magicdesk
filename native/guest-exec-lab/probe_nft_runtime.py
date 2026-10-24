@@ -4,8 +4,11 @@
 Catalogue/transaction coverage includes iptables-nft CRUD and an xt NAT exchange.
 The separate traffic fixture covers broader filtering/NAT behavior. Unsupported
 expressions must fail without committing earlier batch changes.
+Routed mode publishes the DNS test port on Android and needs native bind access;
+bridge mode checks the same rules and traffic in a private guest network.
 """
 import argparse
+import errno
 import json
 import socket
 from pathlib import Path
@@ -53,6 +56,45 @@ def guest():
         assert tables() == {('ip', 'second')}
         run(['nft', 'flush', 'ruleset'])
         assert not tables()
+        for family, host, table, command in (
+                (socket.AF_INET, '127.0.0.1', 'ip', 'iptables'),
+                (socket.AF_INET6, '::1', 'ip6', 'ip6tables')):
+            with socket.socket(family, socket.SOCK_STREAM) as server, \
+                    socket.socket(family, socket.SOCK_DGRAM) as udp:
+                server.bind((host, 0))
+                server.listen(1)
+                udp.bind((host, 0))
+                udp.settimeout(2)
+                port = server.getsockname()[1]
+                for compat in (False, True):
+                    if compat:
+                        run([command, '-A', 'OUTPUT', '-p', 'tcp', '--dport', str(port),
+                             '-j', 'REJECT', '--reject-with', 'tcp-reset'])
+                    else:
+                        run(['nft', '-f', '-'], f'add table {table} refused\n'
+                            f'add chain {table} refused out {{ type filter hook output priority 0; policy accept; }}\n'
+                            f'add rule {table} refused out tcp dport {port} reject with tcp reset\n')
+                    with socket.socket(family, socket.SOCK_STREAM) as client:
+                        client.settimeout(2)
+                        # EVENT_WAIT: connection rejection; timeout is not a passing REJECT.
+                        assert client.connect_ex((host, port)) == errno.ECONNREFUSED
+                    with socket.socket(family, socket.SOCK_DGRAM) as client:
+                        client.settimeout(2)
+                        client.sendto(b'unaffected', udp.getsockname())
+                        payload, peer = udp.recvfrom(64)
+                        udp.sendto(payload, peer)
+                        assert client.recv(64) == b'unaffected'
+                    before = json.loads(run(['nft', '-j', 'list', 'ruleset']))
+                    run(['nft', '-f', '-'], 'add table inet unsupported_reject\n'
+                        'add chain inet unsupported_reject out { type filter hook output priority 0; policy accept; }\n'
+                        'add rule inet unsupported_reject out reject with icmpx type admin-prohibited\n', success=False)
+                    assert json.loads(run(['nft', '-j', 'list', 'ruleset'])) == before
+                    run(['nft', 'flush', 'ruleset'])
+                with socket.socket(family, socket.SOCK_STREAM) as client:
+                    client.settimeout(2)
+                    client.connect((host, port))
+                    peer, _ = server.accept()
+                    peer.close()
         run(['nft', '-f', '-'], ''.join(f'add table ip table{i}\n' for i in range(150)))
         assert tables() == {('ip', f'table{i}') for i in range(150)}
         run(['nft', 'flush', 'ruleset'])
@@ -147,14 +189,17 @@ def guest():
 
 
 def main():
-    from test_oci_services import Suite
+    from test_oci_services import Suite, add_machine_entry_argument
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build', type=Path)
     parser.add_argument('store')
+    parser.add_argument('--network', choices=('routed', 'bridge'), default='routed')
+    add_machine_entry_argument(parser)
     args = parser.parse_args()
-    suite = Suite(Path('build/nft-results'), args.build)
+    suite = Suite(Path('build/nft-results'), args.build, machine_entry=args.machine_entry)
+    suite.report['network'] = args.network
     target = '/tmp/md-nft-' + suite.report['id']
-    runner = [suite.runner, '--store', args.store, '--user', '0:0', '--network', 'routed']
+    runner = suite.guest(args.store, '--user', '0:0', '--network', args.network)
     created = False
     try:
         suite.transport.upload(suite.client, Path(__file__), suite.base + '/probe.py')
@@ -168,7 +213,7 @@ def main():
         suite.report['nftables'] = report
         assert report['passed'], report.get('failure')
         suite.report['passed'] = True
-        print('PASS stock nft/iptables-nft: catalogue, rollback, verdict maps, chain counters, xt NAT and cleanup')
+        print('PASS stock nft/iptables-nft: TCP REJECT, catalogue, rollback, verdict maps, chain counters, xt NAT and cleanup')
     finally:
         try:
             if created:

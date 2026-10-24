@@ -315,11 +315,13 @@ static void loopback_origin(void) {
         assert(n);
         struct md_identity root=md_identity_new(0,0);
         struct md_fd_object *endpoint=NULL;
-        int server=-1,held=-1;
+        int server=-1;
         struct sockaddr_in local={.sin_family=AF_INET,.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
-        local.sin_port=htons(reserve(&held)); close(held);
         assert(!md_network_endpoint_open(n,0,AF_INET,type,0,&endpoint,&server));
         assert(!md_network_endpoint_bind(endpoint,server,&root,(void *)&local,sizeof(local)));
+        struct sockaddr_storage assigned; socklen_t assigned_size=sizeof(assigned);
+        assert(!md_network_endpoint_name(endpoint,server,0,&assigned,&assigned_size));
+        memcpy(&local,&assigned,sizeof(local));
         if (!udp) assert(!md_network_endpoint_listen(endpoint,server,4));
         struct md_network_filter_table table={.handle=1,.family=NFPROTO_IPV4};
         struct md_filter_chain chains[]={
@@ -371,4 +373,58 @@ static void loopback_origin(void) {
     }
     puts("PASS native loopback TCP/UDP: OUTPUT and INPUT policy, never PREROUTING");
 }
-void test_network_launch(void) { parsing(); routes(); addressing(); ports(); partial_rollback(); reserved_publication(); loopback_origin(); }
+static void expect_reset(int fd) {
+    struct pollfd ready={.fd=fd,.events=POLLIN};
+    /* EVENT_WAIT: native reset wakes the peer; timeout is a failure, not DROP. */
+    assert(poll(&ready,1,2000)==1);
+    char data[8];
+    assert(recv(fd,data,sizeof(data),MSG_DONTWAIT)==-1 && errno==ECONNRESET);
+}
+static void reject_streams(void) {
+    for (unsigned ipv6=0;ipv6<2;++ipv6) {
+        int family=ipv6 ? AF_INET6 : AF_INET;
+        struct md_inet_address address={.ip=md_ip_loopback(family)};
+        struct sockaddr_storage wire; socklen_t size;
+        assert(!md_inet_encode(&address,0,&wire,&size));
+        struct md_network_namespace *n=md_network_namespace_new(NULL,MD_NETWORK_ROUTED); assert(n);
+        struct md_identity root=md_identity_new(0,0);
+        struct md_fd_object *endpoint=NULL;
+        int server=-1;
+        assert(!md_network_endpoint_open(n,0,family,SOCK_STREAM,0,&endpoint,&server));
+        assert(!md_network_endpoint_bind(endpoint,server,&root,(void *)&wire,size));
+        size=sizeof(wire);
+        assert(!md_network_endpoint_name(endpoint,server,0,&wire,&size));
+        assert(!md_network_endpoint_listen(endpoint,server,4));
+        struct md_network_filter_table table={.handle=1,.family=ipv6 ? NFPROTO_IPV6 : NFPROTO_IPV4};
+        struct md_filter_chain chain={.table=1,.handle=2,.hook=NF_INET_LOCAL_IN,.policy=NF_ACCEPT,.counters=1};
+        struct md_filter_rule rule={.chain=2,.count=2,.expressions={
+            {.code=MD_FILTER_TRANSPORT,.transport={.protocol=IPPROTO_TCP,.source={0,65535},.destination={0,65535}}},
+            {.code=MD_FILTER_REJECT}}};
+        struct md_network_filter filter={.tables=&table,.count=1,.chains=&chain,.chain_count=1,.rules=&rule};
+        pthread_mutex_lock(&n->fabric->lock);
+        n->filter=&filter; md_network_forward_changed(n->fabric);
+        pthread_mutex_unlock(&n->fabric->lock);
+        int client=socket(family,SOCK_STREAM|SOCK_CLOEXEC,0); assert(client>=0);
+        assert(!connect(client,(void *)&wire,size));
+        struct pollfd ready={.fd=server,.events=POLLIN};
+        /* EVENT_WAIT: forwarded accept; timeout fails the established-flow fixture. */
+        assert(poll(&ready,1,2000)==1);
+        int peer=accept4(server,NULL,NULL,SOCK_CLOEXEC); assert(peer>=0);
+        pthread_mutex_lock(&n->fabric->lock);
+        filter.rule_count=1; md_network_forward_changed(n->fabric);
+        pthread_mutex_unlock(&n->fabric->lock);
+        expect_reset(client); close(client); close(peer);
+        client=socket(family,SOCK_STREAM|SOCK_CLOEXEC,0); assert(client>=0);
+        int connected=connect(client,(void *)&wire,size);
+        if (!connected) expect_reset(client);
+        else assert(errno==ECONNRESET || errno==ECONNREFUSED);
+        close(client);
+        pthread_mutex_lock(&n->fabric->lock);
+        n->filter=NULL; md_network_forward_changed(n->fabric);
+        pthread_mutex_unlock(&n->fabric->lock);
+        close(server); md_fd_object_release(endpoint);
+        md_identity_release(&root); md_network_namespace_release(n);
+    }
+    puts("PASS TCP REJECT: IPv4/IPv6 native clients receive prompt RST for new and established connections");
+}
+void test_network_launch(void) { parsing(); routes(); addressing(); ports(); partial_rollback(); reserved_publication(); loopback_origin(); reject_streams(); }

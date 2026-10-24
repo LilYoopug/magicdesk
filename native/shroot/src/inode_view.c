@@ -69,6 +69,7 @@ int md_inode_view_create(struct md_inode_store *base, enum md_filesystem_kind ki
     if (r) { md_inode_store_close(s); return r; }
     r=mdi_views_collect(s);
     if (!r) r=mdi_random_id(s->lifetime->scope);
+    s->super_checked=0;
     if (!r && s->lifetime->scope_lease>=0) {
         close(s->lifetime->scope_lease); s->lifetime->scope_lease=-1;
     }
@@ -110,6 +111,7 @@ static int scope_delete(struct md_inode_store *s, const char *scope) {
         "DELETE FROM native_cookies WHERE parent IN (SELECT object FROM objects WHERE scope=?1)",
         "DELETE FROM backings WHERE scope=?1",
         "DELETE FROM inode_views WHERE scope=?1",
+        "DELETE FROM properties WHERE key='runtime_readonly/'||?1",
         "DELETE FROM objects WHERE scope=?1",
         "DELETE FROM sources WHERE scope=?1"
     };

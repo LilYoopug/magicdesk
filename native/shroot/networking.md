@@ -272,11 +272,19 @@ without walking rules for each transfer. A base-chain counter applies only when
 evaluation reaches its policy, not an explicit ACCEPT/DROP rule. Counters measure
 logical UDP datagrams/TCP chunks and payload bytes, not kernel packets, headers,
 retransmissions or connection attempts rejected before relay admission.
-REJECT, logging, queues, dynamic sets, flowtables, unsupported table flags,
-monitoring groups and other netfilter subsystems return errors, not fake success.
-In particular, REJECT is not implemented as DROP: native TCP reset and UDP error
-delivery are separate from denying a flow. Stock configurations that require
-REJECT, including firewalld, are not certified by an ACCEPT/DROP/NAT test.
+TCP REJECT is supported through nft `reject with tcp reset` and revision-zero
+xtables REJECT/TCP_RESET for IPv4/IPv6. Admission requires an explicit TCP
+predicate in the same rule and a filter INPUT/FORWARD/OUTPUT context. Rejection
+returns ECONNREFUSED during logical connection admission; relayed new and
+established native streams close with SO_LINGER reset, so peers observe RST
+rather than waiting for a DROP timeout. Existing direct streams retain the
+ordinary policy-update rule: an update requiring mediation returns EBUSY.
+UDP/ICMP REJECT modes remain explicitly unsupported, including general
+`icmpx admin-prohibited`. UID 2000 cannot inject arbitrary host ICMP errors to
+external peers; dropping an already received datagram is not an implementation
+of REJECT. Logging, queues, dynamic sets, flowtables, unsupported table flags,
+monitoring groups and other netfilter subsystems also return errors, not fake
+success. Stock firewalld configurations requiring those modes remain uncertified.
 The iptables-nft rule-compat attribute is validation metadata, not a packet
 predicate; expressions still supply the matches. Revision-zero TCP/UDP
 matches become typed transport predicates with inclusive source/destination
