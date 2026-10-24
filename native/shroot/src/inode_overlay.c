@@ -317,10 +317,15 @@ static void borrow_scope(struct md_inode_store *out,struct md_inode_store *owner
     out->recording=owner->recording; out->operation_changes=owner->operation_changes;
     out->event_sequence=owner->event_sequence;
     out->read_cache=owner->read_cache; out->cache_checked=owner->cache_checked;
+    /* Prefix generations belong to this borrowed catalogue, not the source
+     * connection. Physical validation also starts with the new gate owner. */
+    out->path_cache=NULL;
+    mdi_directory_checks_reset(out);
     memset(out->queries,0,sizeof(out->queries));
 }
 static void release_scope(struct md_inode_store *borrowed,struct md_inode_store *owner) {
     for (unsigned i=0;i<MDI_QUERY_COUNT;++i) sqlite3_finalize(borrowed->queries[i]);
+    mdi_path_cache_destroy(borrowed);
     owner->operation_changes=borrowed->operation_changes;
     if (owner->event_sequence<borrowed->event_sequence) owner->event_sequence=borrowed->event_sequence;
 }

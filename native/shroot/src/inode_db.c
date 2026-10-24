@@ -120,7 +120,7 @@ int mdi_write(struct md_inode_store *s) {
     if (mdi_readonly(s)) return -EROFS;
     if (s->write_transaction) return 0;
     if (!s->locked || s->read_depth!=1) return -EDEADLK;
-    s->directory_check_count=0;
+    mdi_directory_checks_reset(s);
     int r=watch_writes(s);
     if (!r && sqlite3_get_autocommit(s->db)) r=transaction(s,MDI_BEGIN_WRITE);
     if (!r) {
@@ -142,29 +142,30 @@ static int begin(struct md_inode_store *s,int write,int runtime) {
     if (s->write_transaction) return -EDEADLK;
     /* A retained gate already validated this catalogue. Start a fresh operation
      * without repeating admission; promotion still owns its transaction. */
-    if (s->operation_window && !write && s->cache_checked==1
+    int retained=mdi_window_retained(s);
+    if (retained && !write && s->cache_checked==1
             && s->super_checked && s->super_version==s->locked_version
             && !mdi_publication_pending(s)) {
         begin_read(s); return 0;
     }
-    int r = s->operation_window ? 0 : store_lock(s);
+    int r = retained ? 0 : store_lock(s);
     if (r) return r;
-    if (!s->operation_window || write) s->directory_check_count=0;
+    if (!retained || write) mdi_directory_checks_reset(s);
     if (mdi_publication_pending(s)) {
         r=mdi_publication_recover(s);
-        if (r) return s->operation_window ? r : store_unlock(s,r);
+        if (r) return retained ? r : store_unlock(s,r);
     }
     s->recording = 0;
     s->event_sequence=0;
     s->write_transaction=!!write;
-    if (!s->operation_window) s->cache_checked=0;
+    if (!retained) s->cache_checked=0;
     if (write) r=watch_writes(s);
     /* The store lock serializes all catalogue owners. Read-only scopes need
      * no SQLite transaction; promotion admits one before the first write. */
     if (!r && write) r=transaction(s,MDI_BEGIN_WRITE);
     if (!r && write && s->statistics) ++s->statistics->write_admissions;
     if (!r) {
-        if (!s->operation_window) {
+        if (!retained) {
             sqlite3_stmt *query=NULL;
             r=mdi_query_acquire(s,MDI_DATA_VERSION,&query);
             if (!r) {
@@ -187,7 +188,7 @@ static int begin(struct md_inode_store *s,int write,int runtime) {
     }
     if (r) {
         s->read_depth=s->write_transaction=s->cache_checked=0;
-        return s->operation_window ? r : store_unlock(s,r);
+        return retained ? r : store_unlock(s,r);
     }
     return 0;
 }
@@ -204,23 +205,32 @@ int md_inode_operation_window_begin(void *store) {
 }
 int md_inode_operation_window_end(void *store) {
     struct md_inode_store *s=store;
-    if (!s->operation_window || !s->locked) return -EINVAL;
+    if (!s->operation_window || (!s->locked && !s->operation_window_paused)) return -EINVAL;
     if (s->read_depth || s->write_transaction || !sqlite3_get_autocommit(s->db)) return -EBUSY;
-    s->operation_window=0; s->cache_checked=0;
+    s->operation_window=s->operation_window_paused=0; s->cache_checked=0;
     int r=store_unlock(s,0);
     md_inode_store_close(s);
+    return r;
+}
+int md_inode_operation_window_pause(struct md_inode_store *s) {
+    if (!mdi_window_retained(s)) return 0;
+    if (s->read_depth || s->write_transaction || !sqlite3_get_autocommit(s->db)) return -EBUSY;
+    /* The executor retains the lifetime until its normal window end. Foreign
+     * providers use ordinary scopes; no store gate crosses their acquisition. */
+    int r=store_unlock(s,0);
+    if (!r) { s->operation_window_paused=1; s->cache_checked=0; }
     return r;
 }
 static int finish(struct md_inode_store *s, int result, int *committed) {
     if (s->read_depth) {
         if (--s->read_depth) return result;
-        if (s->operation_window && !s->event_sequence && !s->sync_requested
+        if (mdi_window_retained(s) && !s->event_sequence && !s->sync_requested
                 && sqlite3_get_autocommit(s->db)) {
             if (!result && committed) *committed=1;
             return result;
         }
     }
-    if (!s->operation_window) s->cache_checked=0;
+    if (!mdi_window_retained(s)) s->cache_checked=0;
     if (!result && s->write_transaction && s->overlay) result=mdi_overlay_flush(s);
     if (!result && !sqlite3_get_autocommit(s->db)) result = transaction(s, MDI_COMMIT);
     if (!result && committed) *committed=1;
@@ -229,7 +239,7 @@ static int finish(struct md_inode_store *s, int result, int *committed) {
     if (!result && s->sync_requested) result=mdi_checkpoint(s);
     s->sync_requested=0;
     s->write_transaction=0;
-    return s->operation_window ? result : store_unlock(s, result);
+    return mdi_window_retained(s) ? result : store_unlock(s, result);
 }
 int mdi_finish(struct md_inode_store *s,int result) { return finish(s,result,NULL); }
 #ifndef MD_INODE_TESTING
@@ -306,7 +316,9 @@ int mdi_query_acquire(struct md_inode_store *s, enum mdi_query slot, sqlite3_stm
             "WHERE b.device=?1 AND b.inode=?2 AND b.scope=?3",
         [MDI_LOOKUP] = "SELECT " NODE_COLUMNS " FROM objects o "
             "JOIN names n ON n.object=o.object WHERE n.parent=?1 AND n.name=?2",
-        [MDI_DIRECTORY_NAME] = "SELECT name FROM names WHERE parent=?1 AND object=?2",
+        /* A directory has one incoming name. A parent-index range is also a
+         * SEARCH to SQLite, but scans every sibling on large directory trees. */
+        [MDI_DIRECTORY_NAME] = "SELECT name FROM names INDEXED BY names_object WHERE parent=?1 AND object=?2",
         [MDI_READDIR] = ("SELECT n.cookie,n.name,o.logical_inode,o.kind FROM names n JOIN objects o ON o.object=n.object "
             "WHERE n.parent=?1 AND n.cookie>?2 ORDER BY n.cookie"),
         [MDI_BEGIN_WRITE] = "BEGIN IMMEDIATE",
@@ -760,6 +772,7 @@ void md_inode_store_close(struct md_inode_store *s) {
     if (s->objects >= 0) close(s->objects);
     if (s->watch_presence >= 0) close(s->watch_presence);
     md_inode_lifetime_release(s->lifetime);
+    mdi_path_cache_destroy(s);
     free(s->read_cache); free(s);
 }
 #ifdef MD_INODE_TESTING

@@ -57,6 +57,10 @@ ssize_t __real_fgetxattr(int,const char *,void *,size_t);
 ssize_t __wrap_fgetxattr(int fd,const char *name,void *value,size_t size) {
     ++gets; return __real_fgetxattr(fd,name,value,size);
 }
+ssize_t __real_getxattr(const char *,const char *,void *,size_t);
+ssize_t __wrap_getxattr(const char *path,const char *name,void *value,size_t size) {
+    ++gets; return __real_getxattr(path,name,value,size);
+}
 int __real_fsetxattr(int,const char *,const void *,size_t,int);
 int __wrap_fsetxattr(int fd,const char *name,const void *value,size_t size,int flags) {
     ++sets; if (fail()) return -1;
@@ -259,6 +263,31 @@ static void malformed(int directory) {
     assert(mdi_native_metadata(fd,UINT32_MAX,0,0600)==-EINVAL);
     close(fd); assert(!unlinkat(directory,"malformed",0));
     puts("PASS missing, malformed and out-of-range private metadata fail explicitly");
+}
+static void metadata_reads(int directory) {
+    int fd=mdi_native_prepare(directory,"metadata-reads",O_RDWR,42,43,0644); assert(fd>=0);
+    int path=openat(directory,"metadata-reads",O_PATH|O_CLOEXEC); assert(path>=0);
+    reset(); metadata(fd,42,43,0644,1); assert(gets==1);
+    reset(); metadata(path,42,43,0644,1); assert(gets==2);
+    struct { uint32_t version; struct md_acl_entry entries[44]; } acl={.version=2};
+    acl.entries[0]=(struct md_acl_entry){MD_ACL_USER_OBJ,6,UINT32_MAX};
+    for (unsigned i=1;i<=40;++i) acl.entries[i]=(struct md_acl_entry){MD_ACL_USER,4,1000+i};
+    acl.entries[41]=(struct md_acl_entry){MD_ACL_GROUP_OBJ,4,UINT32_MAX};
+    acl.entries[42]=(struct md_acl_entry){MD_ACL_MASK,4,UINT32_MAX};
+    acl.entries[43]=(struct md_acl_entry){MD_ACL_OTHER,4,UINT32_MAX};
+    assert(md_acl_valid(&acl,sizeof(acl)));
+    assert(!mdi_native_attribute_set(fd,0,&acl,sizeof(acl),0644));
+    reset(); metadata(fd,42,43,0644,1); assert(gets==3);
+    unsigned char actual[sizeof(acl)];
+    assert(mdi_native_attribute(path,0,actual,sizeof(actual))==sizeof(actual));
+    assert(!memcmp(actual,&acl,sizeof(acl)));
+    assert(mdi_native_attribute(fd,0,actual,sizeof(actual)-1)==-ERANGE);
+    assert(!mdi_native_metadata(path,44,45,0600)); metadata(fd,44,45,0600,1);
+    assert(!mdi_native_attribute_set(fd,0,NULL,0,0600));
+    reset(); metadata(path,44,45,0600,1); assert(gets==2);
+    assert(mdi_native_attribute(fd,0,NULL,0)==-ENODATA);
+    close(path); close(fd); assert(!unlinkat(directory,"metadata-reads",0));
+    puts("PASS sparse metadata: one complete read, O_PATH, large ACL spill, live changes and removal");
 }
 static void watch(int directory) {
     int watch=inotify_init1(IN_NONBLOCK|IN_CLOEXEC); assert(watch>=0);
@@ -935,7 +964,7 @@ int main(int argc,char **argv) {
     identities(); ordinary(directory); pinned_birth(directory); detached(directory); staged(directory);
     for (int point=1;point<=4;++point) for (int error=0;error<2;++error) interrupted(directory,point,error);
     puts("PASS SIGKILL and IO failures at all four metadata transition steps retain old-or-new logical permissions");
-    reset(); malformed(directory); watch(directory); close(directory);
+    reset(); malformed(directory); metadata_reads(directory); watch(directory); close(directory);
     char store[PATH_MAX]; snprintf(store,sizeof(store),"%s/store",argv[1]); catalogue(store);
     snprintf(store,sizeof(store),"%s/hybrid",argv[1]); hybrid(store);
     snprintf(store,sizeof(store),"%s/births",argv[1]); catalogue_births(store);

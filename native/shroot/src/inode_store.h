@@ -26,6 +26,9 @@ int md_inode_read_scope_end(void *store);
  * A successful begin retains the connection until successful end. */
 int md_inode_operation_window_begin(void *store);
 int md_inode_operation_window_end(void *store);
+/* Revoke retention before entering a different store/provider. The executor
+ * still ends the window normally; subsequent scopes acquire/release the gate. */
+int md_inode_operation_window_pause(struct md_inode_store *);
 /* Stable format family and independently evolving metadata schema revision. */
 int md_inode_store_format(void);
 int md_inode_store_revision(void);
@@ -39,6 +42,7 @@ struct md_inode_statistics {
     uint64_t walk_components, walk_materializations;
     uint64_t write_admissions;
     uint64_t directory_check_hits, directory_check_misses;
+    uint64_t path_prefix_hits;
 };
 /* Caller-owned diagnostic counters; NULL disables clock sampling. */
 void md_inode_measure(struct md_inode_store *, struct md_inode_statistics *);

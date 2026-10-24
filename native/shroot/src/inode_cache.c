@@ -3,9 +3,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { CACHE_WAYS=4, CACHE_SETS=32, CACHE_SLOTS=CACHE_WAYS*CACHE_SETS };
+enum { CACHE_WAYS=4, CACHE_SETS=1024, CACHE_FD_SETS=256,
+    CACHE_SLOTS=CACHE_WAYS*CACHE_SETS, DEPENDENCIES=4096 };
 struct mdi_cache_entry {
-    uint64_t hash, device, inode, used;
+    uint64_t hash, device, inode, used, epoch;
+    struct mdi_dependency dependencies[3];
+    unsigned dependency_count;
     enum mdi_query query;
     int valid, result;
     char id[33], name[NAME_MAX+1], scope[33];
@@ -13,18 +16,33 @@ struct mdi_cache_entry {
 };
 struct mdi_read_cache {
     sqlite3_int64 version;
-    uint64_t clock;
+    uint64_t clock, epoch;
+    uint64_t dependencies[DEPENDENCIES];
     int dirty;
     unsigned recent[MDI_QUERY_COUNT];
     struct mdi_cache_entry entries[CACHE_SLOTS];
 };
 void mdi_cache_invalidate(struct md_inode_store *s) {
     s->cache_checked=0;
-    if (s->read_cache) memset(s->read_cache,0,sizeof(*s->read_cache));
+    if (s->read_cache) {
+        ++s->read_cache->epoch;
+        memset(s->read_cache->recent,0,sizeof(s->read_cache->recent));
+    }
 }
-static int equals(sqlite3_value *value,const char *text) {
-    int size=sqlite3_value_bytes(value);
-    return size==(int)strlen(text) && !memcmp(sqlite3_value_blob(value),text,(size_t)size);
+uint64_t mdi_cache_epoch(const struct md_inode_store *s) {
+    return s->cache_checked==1 && s->read_cache ? s->read_cache->epoch : 0;
+}
+static uint64_t hash_bytes(uint64_t,const void *,size_t);
+static unsigned dependency(enum mdi_dependency_kind kind,const void *id,size_t length,
+        const void *name,size_t size) {
+    uint64_t hash=hash_bytes(UINT64_C(14695981039346656037),&kind,sizeof(kind));
+    hash=hash_bytes(hash,id,length);
+    return hash_bytes(hash,name,size)%DEPENDENCIES;
+}
+static void changed_key(struct mdi_read_cache *cache,enum mdi_dependency_kind kind,
+        sqlite3_value *id,sqlite3_value *name) {
+    ++cache->dependencies[dependency(kind,sqlite3_value_blob(id),sqlite3_value_bytes(id),
+        name ? sqlite3_value_blob(name) : NULL,name ? sqlite3_value_bytes(name) : 0)];
 }
 /* Observe rows, including trigger writes, rather than duplicating mutation
  * knowledge in open/link/rename/ACL/copy-up callers. This hook does not run SQL
@@ -42,21 +60,18 @@ static void changed_row(struct md_inode_store *s,sqlite3 *db,const char *table,i
     if (!r && backing) r=value(db,2,&device);
     if (!r && backing) r=value(db,3,&inode);
     if (r) { mdi_cache_invalidate(s); return; }
-    for (unsigned i=0;i<CACHE_SLOTS;++i) {
-        struct mdi_cache_entry *e=&s->read_cache->entries[i];
-        if (!e->valid) continue;
-        int node_query=e->query==MDI_NODE || e->query==MDI_LOOKUP || e->query==MDI_FD;
-        int affected=object && ((node_query && !e->result && equals(id,e->value.node.id))
-            || (e->query!=MDI_FD && equals(id,e->id)));
-        if (names) affected=(e->query==MDI_LOOKUP && equals(parent,e->id) && equals(name,e->name))
-            || (e->query==MDI_EMPTY && equals(parent,e->id))
-            || ((e->query==MDI_DIRECTORY_NAME || e->query==MDI_FILE_PATH) && equals(id,e->id));
-        if (backing) affected=e->query==MDI_FD && e->device==(uint64_t)sqlite3_value_int64(device)
-            && e->inode==(uint64_t)sqlite3_value_int64(inode);
-        if (path) affected=e->query==MDI_FILE_PATH && equals(id,e->id);
-        if ((names || dentry) && e->query==MDI_DENTRY_CAPTURE)
-            affected=equals(parent,e->id) && equals(name,e->name);
-        if (affected) { e->valid=0; e->used=0; }
+    /* Version buckets conservatively retire collisions. Invalidation costs
+     * O(changed row), independent of cache capacity, including trigger writes. */
+    if (object) changed_key(s->read_cache,MDI_DEP_OBJECT,id,NULL);
+    if (names || dentry) changed_key(s->read_cache,MDI_DEP_ENTRY,parent,name);
+    if (names) {
+        changed_key(s->read_cache,MDI_DEP_CHILDREN,parent,NULL);
+        changed_key(s->read_cache,MDI_DEP_PATH,id,NULL);
+    }
+    if (path) changed_key(s->read_cache,MDI_DEP_PATH,id,NULL);
+    if (backing) {
+        uint64_t physical[]={(uint64_t)sqlite3_value_int64(device),(uint64_t)sqlite3_value_int64(inode)};
+        ++s->read_cache->dependencies[dependency(MDI_DEP_BACKING,physical,sizeof(physical),NULL,0)];
     }
 }
 static void changed(void *context,sqlite3 *db,int operation,const char *database,
@@ -75,6 +90,7 @@ void mdi_cache_snapshot(struct md_inode_store *s, sqlite3_int64 version) {
     s->cache_checked=-1;
     if (!s->read_cache) {
         if (!(s->read_cache=calloc(1,sizeof(*s->read_cache)))) return;
+        s->read_cache->epoch=1;
         sqlite3_preupdate_hook(s->db,changed,s);
         sqlite3_rollback_hook(s->db,rolled_back,s);
     }
@@ -109,9 +125,39 @@ static uint64_t key_hash(const struct md_inode_store *s, const struct mdi_cache_
     if (key->name) hash=hash_bytes(hash,key->name,strlen(key->name));
     return hash^(hash>>32);
 }
+static struct mdi_cache_entry *cache_set(struct mdi_read_cache *cache,enum mdi_query query,uint64_t hash) {
+    unsigned set=query==MDI_FD ? (hash%CACHE_FD_SETS)
+        : CACHE_FD_SETS+(hash%(CACHE_SETS-CACHE_FD_SETS));
+    return &cache->entries[set*CACHE_WAYS];
+}
+static int dependencies_current(const struct mdi_read_cache *cache,const struct mdi_dependency *deps,unsigned count) {
+    for (unsigned i=0;i<count;++i) {
+        const struct mdi_dependency *d=&deps[i];
+        if (d->version!=cache->dependencies[d->slot]) return 0;
+    }
+    return 1;
+}
+int mdi_cache_dependencies_current(const struct md_inode_store *s,const struct mdi_dependency *deps,unsigned count) {
+    return s->cache_checked==1 && s->read_cache && dependencies_current(s->read_cache,deps,count);
+}
+struct mdi_dependency mdi_cache_dependency(struct md_inode_store *s,enum mdi_dependency_kind kind,
+        const void *id,size_t length,const void *name,size_t size) {
+    unsigned slot=dependency(kind,id,length,name,size);
+    return (struct mdi_dependency){slot,s->read_cache->dependencies[slot]};
+}
+static int current(const struct mdi_read_cache *cache,const struct mdi_cache_entry *entry) {
+    return entry->valid && entry->epoch==cache->epoch
+        && dependencies_current(cache,entry->dependencies,entry->dependency_count);
+}
+static void depends(struct mdi_read_cache *cache,struct mdi_cache_entry *entry,
+        enum mdi_dependency_kind kind,const void *id,size_t length,const void *name,size_t size) {
+    unsigned slot=dependency(kind,id,length,name,size);
+    for (unsigned i=0;i<entry->dependency_count;++i) if (entry->dependencies[i].slot==slot) return;
+    entry->dependencies[entry->dependency_count++]=(struct mdi_dependency){slot,cache->dependencies[slot]};
+}
 static int matches_key(const struct mdi_cache_entry *entry, const struct md_inode_store *s,
         const struct mdi_cache_key *key) {
-    return entry->valid && entry->query==key->query
+    return current(s->read_cache,entry) && entry->query==key->query
         && entry->device==key->device && entry->inode==key->inode
         && !strcmp(entry->scope,s->lifetime->scope)
         && !strcmp(entry->id,key->id ? key->id : "")
@@ -135,7 +181,7 @@ static struct mdi_cache_entry *get(struct md_inode_store *s, const struct mdi_ca
         }
     }
     uint64_t hash=key_hash(s,key);
-    struct mdi_cache_entry *set=&s->read_cache->entries[(hash%CACHE_SETS)*CACHE_WAYS];
+    struct mdi_cache_entry *set=cache_set(s->read_cache,key->query,hash);
     for (unsigned i=0;i<CACHE_WAYS;++i) {
         struct mdi_cache_entry *entry=&set[i];
         if (!matches(entry,s,key,hash)) continue;
@@ -151,16 +197,28 @@ static struct mdi_cache_entry *put(struct md_inode_store *s, const struct mdi_ca
     if (!s->locked || s->cache_checked!=1 || (result && result!=-ENOENT)) return NULL;
     if ((key->id && strlen(key->id)>32) || (key->name && strlen(key->name)>NAME_MAX)) return NULL;
     uint64_t hash=key_hash(s,key);
-    struct mdi_cache_entry *set=&s->read_cache->entries[(hash%CACHE_SETS)*CACHE_WAYS], *entry=set;
+    struct mdi_cache_entry *set=cache_set(s->read_cache,key->query,hash), *entry=set;
     for (unsigned i=0;i<CACHE_WAYS;++i) {
         if (matches(&set[i],s,key,hash)) { entry=&set[i]; break; }
-        if (set[i].used<entry->used) entry=&set[i];
+        if (!current(s->read_cache,&set[i]) || (current(s->read_cache,entry) && set[i].used<entry->used)) entry=&set[i];
     }
     *entry=(struct mdi_cache_entry){.hash=hash,.device=key->device,.inode=key->inode,
-        .query=key->query,.result=result,.valid=1,.used=++s->read_cache->clock};
+        .query=key->query,.result=result,.valid=1,.used=++s->read_cache->clock,.epoch=s->read_cache->epoch};
     strcpy(entry->scope,s->lifetime->scope);
     if (key->id) strcpy(entry->id,key->id);
     if (key->name) strcpy(entry->name,key->name);
+    /* Parent attributes do not change a name lookup's result. Its caller
+     * admits the current parent separately; names/cascades own membership. */
+    if (key->id && key->query!=MDI_LOOKUP && key->query!=MDI_DENTRY_CAPTURE && key->query!=MDI_EMPTY)
+        depends(s->read_cache,entry,MDI_DEP_OBJECT,key->id,strlen(key->id),NULL,0);
+    if (key->query==MDI_FD) {
+        uint64_t physical[]={key->device,key->inode};
+        depends(s->read_cache,entry,MDI_DEP_BACKING,physical,sizeof(physical),NULL,0);
+    } else if (key->query==MDI_LOOKUP || key->query==MDI_DENTRY_CAPTURE)
+        depends(s->read_cache,entry,MDI_DEP_ENTRY,entry->id,strlen(entry->id),entry->name,strlen(entry->name));
+    else if (key->query==MDI_EMPTY) depends(s->read_cache,entry,MDI_DEP_CHILDREN,entry->id,strlen(entry->id),NULL,0);
+    else if (key->query==MDI_DIRECTORY_NAME || key->query==MDI_FILE_PATH)
+        depends(s->read_cache,entry,MDI_DEP_PATH,entry->id,strlen(entry->id),NULL,0);
     s->read_cache->recent[key->query]=(unsigned)(entry-s->read_cache->entries)+1;
     return entry;
 }
@@ -178,6 +236,7 @@ void mdi_cache_put(struct md_inode_store *s, const struct mdi_cache_key *key,
     struct mdi_cache_entry *entry=put(s,key,result);
     if (!entry || result || !node) return;
     entry->value.node=*node;
+    depends(s->read_cache,entry,MDI_DEP_OBJECT,node->id,strlen(node->id),NULL,0);
     /* A resolved object also identifies its current backing. Prime the same
      * versioned descriptor lookup; fstat still verifies the actual description
      * and obtains native attributes. Never alias a node from another view. */
@@ -185,7 +244,10 @@ void mdi_cache_put(struct md_inode_store *s, const struct mdi_cache_key *key,
             && !strcmp(node->scope,s->lifetime->scope)) {
         const struct mdi_cache_key backing={.query=MDI_FD,.device=node->device,.inode=node->inode};
         entry=put(s,&backing,0);
-        if (entry) entry->value.node=*node;
+        if (entry) {
+            entry->value.node=*node;
+            depends(s->read_cache,entry,MDI_DEP_OBJECT,node->id,strlen(node->id),NULL,0);
+        }
     }
 }
 int mdi_cache_name_get(struct md_inode_store *s, const struct mdi_cache_key *key,

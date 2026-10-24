@@ -41,10 +41,10 @@ static int walk_operand(struct md_filesystem *fs, const struct md_fs_request *q,
         |(!index && !clone ? MD_VIEW_MOUNT_TARGET : 0);
     int r;
     if (pending && *pending) {
-        r=md_view_walk_resume(fs,*pending,out);
+        r=md_view_walk_resume(fs,*pending,out,NULL);
         if (r!=-EINPROGRESS) { md_view_walk_destroy(*pending); *pending=NULL; }
     } else if (!*q->path[index]) r=md_view_descriptor(fs,q->directory[index],q->origin[index],out);
-    else if (pending) r=md_view_walk_async(fs,q->directory[index],q->origin[index],q->path[index],follow,0,resolve,out,pending);
+    else if (pending) r=md_view_walk_async(fs,q->directory[index],q->origin[index],q->path[index],follow,0,resolve,out,NULL,pending);
     else r=md_view_walk(fs,q->directory[index],q->origin[index],q->path[index],follow,0,resolve,out);
     if (r==-EREMOTE && fs->store->boundary) fs->store->boundary->operand=index;
     /* Legacy mount targets follow mounts above a retained dentry, including

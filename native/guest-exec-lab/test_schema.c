@@ -27,7 +27,19 @@ static struct mdi_schema_plan future;
 static const struct mdi_schema_plan *selected;
 static int fault, commit_count, notify_fd=-1, continue_fd=-1, admissions;
 static int reject_audits, audit_attempts;
+static int contention_fd=-1;
 enum { NO_FAULT, NO_SPACE, KILL_STAGED, KILL_COMMITTED, PAUSE_STAGED };
+
+int __real_flock(int,int);
+int __wrap_flock(int fd,int operation) {
+    if (contention_fd>=0 && operation==LOCK_EX) {
+        assert(__real_flock(fd,LOCK_EX|LOCK_NB)==-1 && errno==EWOULDBLOCK);
+        char byte=1;
+        assert(write(contention_fd,&byte,1)==1);
+        close(contention_fd); contention_fd=-1;
+    }
+    return __real_flock(fd,operation);
+}
 
 static int no_automatic_audit(void *context,int action,const char *a,const char *b,const char *db,const char *trigger) {
     (void)context; (void)b; (void)db; (void)trigger;
@@ -56,7 +68,7 @@ static void at_step(sqlite3_context *context,int argc,sqlite3_value **argv) {
     if (fault==PAUSE_STAGED) {
         char byte=1;
         assert(write(notify_fd,&byte,1)==1);
-        /* EVENT_WAIT: parent releases the fixture after its busy-admission
+        /* EVENT_WAIT: parent releases the fixture after its contention
          * assertion; the outer test timeout bounds a failed handshake. */
         assert(read(continue_fd,&byte,1)==1);
         fault=NO_FAULT;
@@ -192,6 +204,9 @@ static void lightweight(const char *path) {
     assert(!md_inode_store_open(path,0,&s));
     assert(!md_inode_store_open_inspect(path,&inspection));
     assert(!md_inode_store_reconnect(s->lifetime,&worker));
+    assert(scalar(s,"PRAGMA cache_size")==-8192);
+    assert(scalar(inspection,"PRAGMA cache_size")==-8192);
+    assert(scalar(worker,"PRAGMA cache_size")==-8192);
     int count=admissions;
     for (int i=0;i<100;++i) {
         struct stat st;
@@ -289,11 +304,26 @@ static void concurrent(const char *path) {
      * missing notification instead of treating elapsed time as readiness. */
     assert(read(notify[0],&byte,1)==1);
     selected=&future; struct md_inode_store *s=NULL;
-    assert(md_inode_store_open(path,0,&s)==-EBUSY && !s);
+    assert(md_inode_store_open_exclusive(path,&s)==-EBUSY && !s);
+    int contended[2]; assert(!pipe(contended));
+    pid_t waiter=fork(); assert(waiter>=0);
+    if (!waiter) {
+        close(contended[0]); close(notify[0]); close(resume[1]);
+        contention_fd=contended[1];
+        assert(!md_inode_store_open(path,0,&s)); check(s);
+        assert(scalar(s,"SELECT generation FROM future_metadata")==2);
+        md_inode_store_close(s); _exit(0);
+    }
+    close(contended[1]);
+    /* EVENT_WAIT: the ordinary opener reaches the held operation gate;
+     * the outer test timeout fails a missing contention notification. */
+    assert(read(contended[0],&byte,1)==1); close(contended[0]);
+    int status; assert(waitpid(waiter,&status,WNOHANG)==0);
     assert(write(resume[1],&byte,1)==1); close(notify[0]); close(resume[1]);
-    int status; assert(waitpid(pid,&status,0)==pid && WIFEXITED(status) && !WEXITSTATUS(status));
+    assert(waitpid(pid,&status,0)==pid && WIFEXITED(status) && !WEXITSTATUS(status));
+    assert(waitpid(waiter,&status,0)==waiter && WIFEXITED(status) && !WEXITSTATUS(status));
     assert(!md_inode_store_open(path,0,&s)); check(s); md_inode_store_close(s);
-    puts("PASS concurrent preparation fails busy without waiting or changing the selected store");
+    puts("PASS maintenance fails busy; ordinary admission waits for the complete schema upgrade");
 }
 
 static void invalid_steps(const char *path) {

@@ -160,6 +160,22 @@ static void empty_views(struct md_inode_store *s) {
     }
     assert(costs[0].step.calls==costs[1].step.calls
         && costs[0].transaction.calls==costs[1].transaction.calls);
+    struct md_fs_anchor *directory=anchor(&fs,"/mnt");
+    for (unsigned selected=0;selected<2;++selected) {
+        struct md_filesystem owner=fs;
+        owner.inode_mount=selected ? &fs.mounts->base : NULL;
+        mdi_cache_invalidate(s);
+        struct md_inode_statistics mount_stat={0};
+        md_inode_measure(s,&mount_stat);
+        struct md_fs_request q={.operation=MD_FS_FSTAT,.directory={md_fs_anchor_fd(directory),-1},
+            .origin={directory,NULL},.mode=MD_FS_STAT_MOUNT};
+        struct md_fs_result mounted;
+        md_fs_inode_execute(&owner,&q,&mounted,NULL);
+        md_inode_measure(s,NULL);
+        assert(!mounted.error && mounted.info.mount_id==fs.mounts->base.id);
+        assert(selected ? !mount_stat.path.calls : mount_stat.path.calls>0);
+    }
+    md_fs_anchor_release(directory);
     int wrong=md_inode_open(s,-1,"/jail",O_PATH|O_DIRECTORY,0); assert(wrong>=0);
     struct md_fs_result stale=request(&fs,base,wrong,MD_FS_OPEN,"mnt",O_PATH,0,NULL);
     assert(stale.error==-ESTALE);

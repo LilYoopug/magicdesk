@@ -32,24 +32,31 @@ int md_inode_runtime_prepare(struct md_inode_store *s) {
 }
 
 int mdi_permission_stat(struct md_inode_store *s,const struct mdi_node *node,struct stat *st) {
-    if (!s->locked || node->native || node->source || node->descriptor
+    if (!s->locked || node->native || node->descriptor
             || node->kind!=S_IFDIR || node->mode<0 || strlen(node->backing)!=32)
         return mdi_stat(s,node,st);
-    unsigned slot=0;
-    for (;slot<s->directory_check_count;++slot) {
+    int objects=mdi_backing_directory(s,node);
+    if (objects<0) return objects;
+    uint64_t hash=node->inode^(node->device*UINT64_C(0x9e3779b185ebca87))^(unsigned)objects;
+    hash^=hash>>32;
+    unsigned first=(hash%64)*4,slot=first;
+    for (;slot<first+4;++slot) {
         const struct mdi_directory_check *check=&s->directory_checks[slot];
-        if (check->objects==s->objects && check->device==node->device && check->inode==node->inode
+        if (check->epoch==s->directory_check_epoch && check->objects==objects
+                && check->device==node->device && check->inode==node->inode
                 && !strcmp(check->backing,node->backing)) break;
     }
-    if (slot==s->directory_check_count) {
+    if (slot==first+4) {
         int error=mdi_backing_stat(s,node,st);
         if (error) return error;
         if (s->statistics) ++s->statistics->directory_check_misses;
-        if (slot<sizeof(s->directory_checks)/sizeof(s->directory_checks[0])) {
-            struct mdi_directory_check *check=&s->directory_checks[s->directory_check_count++];
-            *check=(struct mdi_directory_check){.objects=s->objects,.device=node->device,.inode=node->inode};
-            memcpy(check->backing,node->backing,sizeof(check->backing));
-        }
+        slot=first+(s->directory_check_count++%4);
+        for (unsigned i=first;i<first+4;++i)
+            if (s->directory_checks[i].epoch!=s->directory_check_epoch) { slot=i; break; }
+        struct mdi_directory_check *check=&s->directory_checks[slot];
+        *check=(struct mdi_directory_check){.epoch=s->directory_check_epoch,
+            .objects=objects,.device=node->device,.inode=node->inode};
+        memcpy(check->backing,node->backing,sizeof(check->backing));
     } else if (s->statistics) ++s->statistics->directory_check_hits;
     /* Only permission callers use this projection. User-visible stat, native
      * attributes and ordinary file IO always take their own current snapshot. */

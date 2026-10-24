@@ -55,7 +55,7 @@ list(APPEND origins ${src}/network_launch.c ${src}/network_filter_update.c)
 set(mounts ${src}/fs_mounts.c ${src}/fs_mount_path.c ${src}/fs_mount_operations.c ${src}/fs_mount_table.c ${src}/fs_mount_change.c ${src}/fs_mount_lifecycle.c ${src}/fs_temporary.c ${src}/fs_overlay.c ${src}/fs_storage.c)
 list(APPEND mounts ${src}/binfmt.c ${src}/binfmt_rule.c ${src}/proc_paths.c ${src}/procfs_view.c ${src}/proc_fdinfo.c ${src}/fs_proc.c ${src}/fs_cgroup.c ${src}/fs_bpf.c ${src}/fs_sysfs.c ${src}/fs_mqueue.c ${src}/fs_mount_file.c ${src}/mount_source.c ${src}/fs_context.c
     ${src}/fs_landlock.c ${src}/fs_provider.c ${src}/fs_control.c ${src}/fs_mount_propagation.c)
-set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_schema.c ${src}/inode_super.c ${src}/inode_cache.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/watch_source.c ${src}/inode_path.c
+set(inodes ${src}/inode_store.c ${src}/inode_db.c ${src}/inode_schema.c ${src}/inode_super.c ${src}/inode_cache.c ${src}/inode_events.c ${src}/inode_watch.c ${src}/watch_queue.c ${src}/watch_source.c ${src}/inode_path.c ${src}/inode_path_cache.c
     ${src}/inode_directory.c ${src}/inode_import.c ${src}/inode_socket.c ${src}/inode_backing.c ${src}/inode_snapshot.c ${src}/inode_view.c ${src}/inode_maintenance.c ${src}/inode_fifo.c ${src}/inode_channel.c ${src}/file_open.c
     ${identity} ${src}/task_registry.c ${src}/task_status.c ${src}/guest_domain.c ${src}/mount_namespace.c ${origins} ${src}/inode_metadata.c ${src}/inode_xattr.c ${src}/inode_capability.c ${src}/inode_acl.c ${src}/posix_acl.c
     ${src}/inode_overlay_policy.c ${src}/inode_landlock.c ${src}/inode_transient.c ${src}/inode_overlay.c ${src}/inode_overlay_write.c
@@ -383,9 +383,9 @@ if(MAGICDESK_GUEST_FIXTURES)
         target_link_libraries(test_${name} PRIVATE guest-sqlite m)
     endforeach()
     target_link_options(test_durability PRIVATE -Wl,--wrap=fsync -Wl,--wrap=fdatasync)
-    target_link_options(test_schema PRIVATE -Wl,--wrap=mdi_schema_admit)
+    target_link_options(test_schema PRIVATE -Wl,--wrap=mdi_schema_admit -Wl,--wrap=flock)
     target_link_options(test_publication PRIVATE -Wl,--wrap=renameat2 -Wl,--wrap=fsync)
-    target_link_options(test_native_leaf PRIVATE -Wl,--wrap=fgetxattr -Wl,--wrap=fsetxattr -Wl,--wrap=fchmod -Wl,--wrap=fsync -Wl,--wrap=fstatat -Wl,--wrap=mknodat)
+    target_link_options(test_native_leaf PRIVATE -Wl,--wrap=fgetxattr -Wl,--wrap=getxattr -Wl,--wrap=fsetxattr -Wl,--wrap=fchmod -Wl,--wrap=fsync -Wl,--wrap=fstatat -Wl,--wrap=mknodat)
     target_sources(test_native_leaf PRIVATE ${src}/landlock_policy.c)
     guest_executable(durability_guest ../guest-exec-lab/test_durability_guest.c)
     target_compile_options(durability_guest PRIVATE -UNDEBUG)
@@ -449,6 +449,10 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_compile_definitions(benchmark_namespace PRIVATE MD_NO_START MD_USE_LIBC)
     target_compile_options(benchmark_namespace PRIVATE -UNDEBUG)
     target_link_libraries(benchmark_namespace PRIVATE guest-sqlite guest-sha256 m)
+    guest_executable(benchmark_file_batch ../guest-exec-lab/benchmark_file_batch.c ${inodes})
+    target_compile_options(benchmark_file_batch PRIVATE -iquote ${src} -UNDEBUG)
+    target_link_libraries(benchmark_file_batch PRIVATE guest-sqlite m)
+    target_link_options(benchmark_file_batch PRIVATE -Wl,--wrap=fgetxattr -Wl,--wrap=getxattr -Wl,--wrap=fsync)
 endif()
 
 set_source_files_properties(${src}/svc_payload.c PROPERTIES

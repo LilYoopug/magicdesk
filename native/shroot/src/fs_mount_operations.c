@@ -2,6 +2,7 @@
 #include "fs_mount_internal.h"
 #include "fs_native.h"
 #include "inode_internal.h"
+#include "image_catalogue.h"
 #include "fs_storage.h"
 #include "linux_abi.h"
 #include "procfs_view.h"
@@ -593,8 +594,10 @@ static void native(struct md_filesystem *fs, const struct md_fs_request *q,
     if (r) out->error = r;
 }
 static int local_inode_view(struct md_filesystem *fs, const struct md_fs_request *q) {
-    if ((md_mount_namespace_attached(fs->mounts) && !md_mount_namespace_initial_boundary(fs->mounts))
-            || fs->native_root || q->resolve) return 0;
+    /* View object IDs are not inode-store IDs, even without a path crossing. */
+    if (q->operation==MD_FS_OPEN_OBJECT && md_mount_namespace_attached(fs->mounts)) return 0;
+    if (fs->native_root || q->resolve || (fs->mounts
+            && (fs->mounts->root!=&fs->mounts->base || fs->mounts->base.source>=0))) return 0;
     if (md_view_policy_walk(fs,q)) return 0;
     for (unsigned i=0;i<2;++i) {
         const struct md_fs_anchor *p=q->origin[i];
@@ -609,6 +612,11 @@ static int local_inode_view(struct md_filesystem *fs, const struct md_fs_request
     }
     return 1;
 }
+static int base_mount_contains(void *context,uint64_t device,uint64_t inode) {
+    struct md_mount_namespace *view=context;
+    struct stat identity={.st_dev=device,.st_ino=inode};
+    return md_view_mount_lookup(view,&view->base,&identity)!=NULL;
+}
 struct path_operation {
     struct md_fs_continuation base;
     struct md_view_walk_pending *walk;
@@ -616,6 +624,45 @@ struct path_operation {
     struct md_fs_anchor *pins[2];
     unsigned operand;
 };
+struct observation {
+    struct md_filesystem *fs;
+    const struct md_fs_request *request;
+    struct md_fs_result *result;
+    const struct md_fs_output *output;
+};
+/* Read-only completion borrows the walk's admitted inode. It must not start
+ * another lookup, retain that inode, or mutate the store under its read scope. */
+static int observe_inode(void *context,struct md_inode_store *store,struct md_view_mount *mount,
+        const struct mdi_node *node,const struct stat *physical) {
+    struct observation *o=context;
+    const struct md_fs_request *q=o->request;
+    struct md_fs_result *out=o->result;
+    switch (q->operation) {
+    case MD_FS_READLINK: {
+        ssize_t n=mdi_readlink(store,node,o->output ? o->output->data : NULL,
+            o->output ? o->output->capacity : 0,0);
+        if (n<0) return (int)n;
+        out->size=(size_t)n; return 0;
+    }
+    case MD_FS_STAT: {
+        if ((q->flags&~AT_SYMLINK_NOFOLLOW) || (q->mode&~(MD_FS_STAT_MOUNT|MD_FS_STAT_CANONICAL))) return -EINVAL;
+        struct stat st=*physical;
+        mdi_stat_project(node,&st);
+        if (store==o->fs->store) md_catalogue_stat_project(o->fs->images,&st);
+        md_fs_stat_info(&st,&out->info);
+        if (q->mode&MD_FS_STAT_MOUNT)
+            md_fs_info_mount(&out->info,mount->id,mount->source>=0
+                ? md_view_same(physical,&mount->native) : !strcmp(node->id,store->lifetime->scope));
+        return 0;
+    }
+    case MD_FS_ACCESS:
+        if (q->flags&~(AT_SYMLINK_NOFOLLOW|MD_AT_EACCESS)) return -EINVAL;
+        if ((q->mode&X_OK) && node->kind==S_IFREG
+                && (md_mount_policy_flags(&mount->policy)&MD_MOUNT_NOEXEC)) return -EACCES;
+        return mdi_permission(store,node,q->mode,!(q->flags&MD_AT_EACCESS));
+    default: return -EINVAL;
+    }
+}
 static void mounts_execute(struct md_filesystem *,const struct md_fs_request *,
     struct md_fs_result *,const struct md_fs_output *,struct path_operation *);
 static int path_ready(struct md_fs_continuation *base) {
@@ -703,17 +750,20 @@ static void mounts_execute(struct md_filesystem *fs, const struct md_fs_request 
     int local=local_inode_view(fs,q);
     if (local) {
         if (local<0) { out->error=local; return; }
-        struct mdi_mount_boundary guard={.objects=md_mount_namespace_initial_boundary(fs->mounts)};
+        struct mdi_mount_boundary guard={.context=fs->mounts,.contains=base_mount_contains,
+            .filter=md_view_mount_children(fs->mounts,fs->mounts ? &fs->mounts->base : NULL)};
         struct mdi_mount_boundary *previous=fs->store->mount_boundary;
-        fs->store->mount_boundary=guard.objects ? &guard : NULL;
+        fs->store->mount_boundary=guard.filter ? &guard : NULL;
         md_fs_inode_execute(fs,q,out,output);
         fs->store->mount_boundary=previous;
         /* The inode transaction rejected the crossing before any mutation.
          * Only that path (or an unannotated provider FD) needs a mount walk. */
-        if (!guard.crossed && (!guard.objects || (out->error!=-EXDEV
-                && !(out->error==-EREMOTE && md_mount_namespace_managed_paths(fs->mounts))))) return;
+        if (!guard.crossed && (out->error!=-EXDEV
+                && !(out->error==-EREMOTE && md_mount_namespace_managed_paths(fs->mounts)))) return;
         *out=(struct md_fs_result){.fd=-1};
     }
+    int pause_error=md_inode_operation_window_pause(fs->store);
+    if (pause_error) { out->error=pause_error; return; }
     if (q->operation == MD_FS_OPEN_OBJECT) {
         struct md_view_object *p=md_view_object(fs,q->path[0]);
         if (p) {
@@ -777,6 +827,10 @@ static void mounts_execute(struct md_filesystem *fs, const struct md_fs_request 
     }
 paths:;
     struct md_view_location a = {.parent=-1,.fd=-1}, b = {.parent=-1,.fd=-1};
+    struct observation observation={fs,q,out,output};
+    struct md_view_observer observer={.context=&observation,.complete=observe_inode};
+    struct md_view_observer *observer_ptr=q->operation==MD_FS_STAT || q->operation==MD_FS_READLINK
+        || q->operation==MD_FS_ACCESS ? &observer : NULL;
     struct md_view_walk_pending *pending=NULL;
     unsigned operand=0;
     if (resume) {
@@ -789,12 +843,16 @@ paths:;
     uint64_t resolve=q->resolve|MD_VIEW_TASK_PATH;
     int r=0;
     if (!operand) {
-        r=pending ? md_view_walk_resume(fs,pending,&a)
-            : output && output->continuation ? md_view_walk_async(fs,q->directory[0],q->origin[0],q->path[0],
-                follow(q),missing(q),resolve,&a,&pending)
-            : md_view_walk(fs,q->directory[0],q->origin[0],q->path[0],follow(q),missing(q),resolve,&a);
+        r=pending ? md_view_walk_resume(fs,pending,&a,observer_ptr)
+            : md_view_walk_async(fs,q->directory[0],q->origin[0],q->path[0],
+                follow(q),missing(q),resolve,&a,observer_ptr,output && output->continuation ? &pending : NULL);
         if (r==-EINPROGRESS) goto suspended;
         md_view_walk_destroy(pending); pending=NULL;
+        if (observer.completed) {
+            if (r) out->error=r;
+            md_view_location_close(&a); md_view_location_close(&b);
+            return;
+        }
     }
     /* Plain native mounts can pin an existing regular file/directory as well.
      * Typed providers must not open an endpoint and then decline its result. */
@@ -802,9 +860,9 @@ paths:;
             && a.mount->backing!=MD_MOUNT_NATIVE) r=-EXDEV;
     if (!r && pair) {
         operand=1;
-        r=pending ? md_view_walk_resume(fs,pending,&b)
+        r=pending ? md_view_walk_resume(fs,pending,&b,NULL)
             : output && output->continuation ? md_view_walk_async(fs,q->directory[1],q->origin[1],q->path[1],
-                -1,1,MD_VIEW_TASK_PATH,&b,&pending)
+                -1,1,MD_VIEW_TASK_PATH,&b,NULL,&pending)
             : md_view_walk(fs,q->directory[1],q->origin[1],q->path[1],-1,1,MD_VIEW_TASK_PATH,&b);
         if (r==-EINPROGRESS) goto suspended;
         md_view_walk_destroy(pending); pending=NULL;

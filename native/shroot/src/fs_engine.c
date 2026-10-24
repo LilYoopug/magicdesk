@@ -276,10 +276,10 @@ struct md_inode_store *md_fs_context_operation_window(const struct md_fs_context
         if (!origin || !mounts || origin->view!=mounts || origin->mount!=&mounts->base
                 || q->directory[i]!=md_fs_anchor_fd(origin)) return NULL;
     }
-    /* Nested stores/overlay/providers retain their own locking contracts. A
-     * later provider may opt in only after defining cross-store release order. */
-    if ((md_mount_namespace_attached(mounts) && !md_mount_namespace_initial_boundary(mounts))
-            || (md_mount_namespace_managed_paths(mounts) && !md_mount_namespace_initial_boundary(mounts))
+    /* The local inode walker revokes retention before a mount/provider
+     * crossing. Foreign topology imports and restricted roots retain their
+     * independent admission contracts. */
+    if (md_mount_graph_foreign(mounts)
             || (c->authenticated && md_domain_restricted(c->task.fs))) return NULL;
     return c->filesystem->store;
 }
@@ -663,9 +663,12 @@ static void inode_execute(struct md_filesystem *fs,
     case MD_FS_RENAME: r = md_inode_rename(s, first, a, second, b, q->flags); break;
     case MD_FS_STAT: case MD_FS_FSTAT: {
         if (q->mode & ~(MD_FS_STAT_MOUNT|MD_FS_STAT_CANONICAL)) { r=-EINVAL; break; }
-        struct mdi_stat_location location, *previous=s->stat_location;
+        char path[PATH_MAX];
+        struct mdi_stat_location location={0}, *previous=s->stat_location;
         if (q->mode & MD_FS_STAT_MOUNT) {
-            location.path[0]=0; location.device=0; location.inode=0; location.root=0;
+            /* A selected view owns mount identity. Reverse-walk names only for
+             * the base-provider fallback which distinguishes /dev/shm. */
+            if (!fs->inode_mount) { path[0]=0; location.path=path; }
             s->stat_location=&location;
         }
         r = q->operation == MD_FS_STAT ? md_catalogue_stat(images, s, first, a, (int)q->flags, &st)
@@ -680,7 +683,7 @@ static void inode_execute(struct md_filesystem *fs,
                 id=mount->id;
                 if (mount->source>=0)
                     root=location.device==mount->native.st_dev && location.inode==mount->native.st_ino;
-            } else if (*location.path) {
+            } else if (location.path && *location.path) {
                 int shared=!strncmp(location.path,"/dev/shm",8)
                     && (!location.path[8] || location.path[8]=='/');
                 r=md_fs_base_mount(fs,shared,&id);

@@ -107,27 +107,44 @@ static int valid_physical(const struct stat *st) {
 static int physical(int fd,struct stat *st) {
     return fstat(fd,st) ? -errno : valid_physical(st);
 }
-static int load(int fd,const struct stat *st,struct metadata **out) {
-    *out=NULL;
-    ssize_t size=(st->st_mode&S_ISVTX) ? get(fd,NULL,0) : (ssize_t)sizeof(struct metadata);
-    if (size<(ssize_t)sizeof(struct metadata) || size>65536)
-        return size<0 && size!=-ENODATA ? (int)size : -EIO;
-    struct metadata *p=calloc(1,(size_t)size);
-    if (!p) return -ENOMEM;
-    int r=0;
+struct metadata_buffer {
+    struct metadata *record;
+    _Alignas(struct metadata) unsigned char local[256];
+};
+static void release(struct metadata_buffer *buffer) {
+    if ((void *)buffer->record!=buffer->local) free(buffer->record);
+}
+static int load(int fd,const struct stat *st,struct metadata_buffer *buffer) {
+    buffer->record=(void *)buffer->local;
+    struct metadata *p=buffer->record;
     if (!(st->st_mode&S_ISVTX)) {
-        p->magic=htole32(METADATA_MAGIC); p->mode=htole32(st->st_mode&07777);
-    } else {
-        ssize_t n=get(fd,p,(size_t)size);
-        if (n!=size) r=n<0 ? (int)n : -EIO;
+        *p=(struct metadata){.magic=htole32(METADATA_MAGIC),.mode=htole32(st->st_mode&07777)};
+        return 0;
+    }
+    /* The complete xattr is one atomic observation. Common ownership/mode and
+     * small ACL records need neither a size query nor a heap allocation. */
+    ssize_t size=get(fd,p,sizeof(buffer->local));
+    if (size==-ERANGE) {
+        size=get(fd,NULL,0);
+        if (size>0 && size<=65536) {
+            p=malloc((size_t)size);
+            if (!p) return -ENOMEM;
+            buffer->record=p;
+            size=get(fd,p,(size_t)size);
+        }
+    }
+    int r=0;
+    if (size<(ssize_t)sizeof(*p) || size>65536)
+        r=size<0 && size!=-ENODATA ? (int)size : -EIO;
+    if (!r) {
         uint32_t acl=le32toh(p->acl),cap=le32toh(p->cap);
-        if (!r && (le32toh(p->magic)!=METADATA_MAGIC || le32toh(p->uid)==UINT32_MAX
+        if (le32toh(p->magic)!=METADATA_MAGIC || le32toh(p->uid)==UINT32_MAX
                 || le32toh(p->gid)==UINT32_MAX || (le32toh(p->mode)&~07777)
-                || bytes(p)!=(size_t)size || acl>MD_ACL_MAX || cap>MD_FILE_CAPABILITY_MAX)) r=-EIO;
+                || bytes(p)!=(size_t)size || acl>MD_ACL_MAX || cap>MD_FILE_CAPABILITY_MAX) r=-EIO;
         if (!r && acl && !md_acl_valid(p->data,acl)) r=-EIO;
         if (!r && cap && !md_file_capability_valid(p->data+acl,cap)) r=-EIO;
     }
-    if (r) free(p); else *out=p;
+    if (r) release(buffer);
     return r;
 }
 static int publish(int fd,const struct stat *st,const struct metadata *old,const struct metadata *next) {
@@ -149,12 +166,13 @@ int mdi_native_project(int fd,struct stat *st,unsigned *acl) {
     int r=valid_physical(st);
     if (r) return r;
     if (!(st->st_mode&S_ISVTX)) { st->st_uid=st->st_gid=0; return 0; }
-    struct metadata *p;
-    r=load(fd,st,&p);
+    struct metadata_buffer buffer;
+    r=load(fd,st,&buffer);
     if (!r) {
+        const struct metadata *p=buffer.record;
         st->st_uid=le32toh(p->uid); st->st_gid=le32toh(p->gid); st->st_mode=S_IFREG|le32toh(p->mode);
         if (acl && p->acl) *acl=MD_ACL_ACCESS;
-        free(p);
+        release(&buffer);
     }
     return r;
 }
@@ -169,17 +187,18 @@ static int metadata(int fd,uint32_t uid,uint32_t gid,mode_t mode,int clear_capab
     if (r) return r;
     if (!(st.st_mode&S_ISVTX) && mdi_native_eligible(uid,gid,mode))
         return mode==(st.st_mode&07777) ? 0 : change_mode(fd,mode);
-    struct metadata *old;
-    r=load(fd,&st,&old);
+    struct metadata_buffer buffer;
+    r=load(fd,&st,&buffer);
     if (r) return r;
+    const struct metadata *old=buffer.record;
     if (le32toh(old->uid)==uid && le32toh(old->gid)==gid && le32toh(old->mode)==mode
-            && (!clear_capability || !old->cap)) { free(old); return 0; }
+            && (!clear_capability || !old->cap)) { release(&buffer); return 0; }
     struct metadata *next=malloc(bytes(old));
-    if (!next) { free(old); return -ENOMEM; }
+    if (!next) { release(&buffer); return -ENOMEM; }
     memcpy(next,old,bytes(old)); next->uid=htole32(uid); next->gid=htole32(gid); next->mode=htole32(mode);
     if (clear_capability) next->cap=0;
     if (next->acl) md_acl_chmod((struct md_acl *)next->data,le32toh(next->acl),mode,0);
-    r=publish(fd,&st,old,next); free(next); free(old); return r;
+    r=publish(fd,&st,old,next); free(next); release(&buffer); return r;
 }
 int mdi_native_metadata(int fd,uint32_t uid,uint32_t gid,mode_t mode) { return metadata(fd,uid,gid,mode,0); }
 int mdi_native_chown(int fd,uint32_t uid,uint32_t gid,mode_t mode) { return metadata(fd,uid,gid,mode,1); }
@@ -188,14 +207,15 @@ ssize_t mdi_native_attribute(int fd,int capability,void *out,size_t capacity) {
     int r=physical(fd,&st);
     if (r) return r;
     if (!(st.st_mode&S_ISVTX)) return -ENODATA;
-    struct metadata *p;
-    r=load(fd,&st,&p);
+    struct metadata_buffer buffer;
+    r=load(fd,&st,&buffer);
     if (r) return r;
+    const struct metadata *p=buffer.record;
     size_t size=le32toh(capability ? p->cap : p->acl),offset=capability ? le32toh(p->acl) : 0;
     if (!size) r=-ENODATA;
     else if (capacity && (!out || capacity<size)) r=-ERANGE;
     else if (capacity) memcpy(out,p->data+offset,size);
-    free(p); return r ? r : (ssize_t)size;
+    release(&buffer); return r ? r : (ssize_t)size;
 }
 int mdi_native_attribute_set(int fd,int capability,const void *value,size_t size,mode_t mode) {
     if ((!value && size) || (mode&~07777)) return -EINVAL;
@@ -203,16 +223,17 @@ int mdi_native_attribute_set(int fd,int capability,const void *value,size_t size
     struct stat st;
     int r=physical(fd,&st);
     if (r) return r;
-    struct metadata *old;
-    r=load(fd,&st,&old);
+    struct metadata_buffer buffer;
+    r=load(fd,&st,&buffer);
     if (r) return r;
+    const struct metadata *old=buffer.record;
     size_t acl=capability ? le32toh(old->acl) : size,cap=capability ? size : le32toh(old->cap);
-    if (acl+cap>65536-sizeof(*old)) { free(old); return -E2BIG; }
+    if (acl+cap>65536-sizeof(*old)) { release(&buffer); return -E2BIG; }
     struct metadata *next=malloc(sizeof(*next)+acl+cap);
-    if (!next) { free(old); return -ENOMEM; }
+    if (!next) { release(&buffer); return -ENOMEM; }
     *next=*old; next->acl=htole32(acl); next->cap=htole32(cap); next->mode=htole32(mode);
     if (acl) memcpy(next->data,capability ? old->data : value,acl);
     if (cap) memcpy(next->data+acl,capability ? value : old->data+le32toh(old->acl),cap);
     r=bytes(old)==bytes(next) && !memcmp(old,next,bytes(old)) ? 0 : publish(fd,&st,old,next);
-    free(next); free(old); return r;
+    free(next); release(&buffer); return r;
 }

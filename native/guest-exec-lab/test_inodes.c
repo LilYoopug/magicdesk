@@ -863,6 +863,140 @@ static void permission_snapshot(void) {
     md_identity_release(&owner); md_identity_release(&user); md_inode_store_close(s);
     puts("PASS permission snapshot: same-operation directory validation only; credentials, mode, write admission and backing replacement rechecked");
 }
+static int prefix_mount(void *context,uint64_t device,uint64_t inode) {
+    const struct mdi_node *node=context;
+    return node->device==device && node->inode==inode;
+}
+static void path_prefixes(void) {
+    struct md_inode_store *s=store("prefixes",1),*peer=store("prefixes",0);
+    struct md_identity owner=md_identity_new(0,0),user=md_identity_new(1000,1000);
+    s->identity=&owner;
+    int rootfd=md_inode_open(s,-1,"/",O_RDONLY|O_DIRECTORY,0); CHECK(rootfd>=0);
+    CHECK(!md_inode_import_metadata(s,rootfd,0,0,0755));
+    const char *dirs[]={"/a","/a/b","/a/b/c","/proc","/proc/child"};
+    for (unsigned i=0;i<sizeof(dirs)/sizeof(*dirs);++i) CHECK(!md_inode_mkdir(s,-1,dirs[i],0755));
+    int fd=md_inode_create(s,-1,"/a/b/c/file",0644); CHECK(fd>=0);
+    int b=md_inode_open(s,-1,"/a/b",O_RDONLY|O_DIRECTORY,0); CHECK(b>=0);
+    int c=md_inode_open(s,-1,"/a/b/c",O_RDONLY|O_DIRECTORY,0); CHECK(c>=0);
+    int proc=md_inode_create(s,-1,"/proc/child/file",0644); CHECK(proc>=0 && !close(proc));
+    CHECK(!md_inode_symlink(s,"/a/b/c",-1,"/short"));
+    struct md_inode_statistics stats={0}; md_inode_measure(s,&stats);
+    struct stat st;
+    CHECK(!md_inode_operation_window_begin(s));
+    CHECK(!md_inode_stat(s,-1,"/a/b/c/file",0,&st));
+    CHECK(!md_inode_stat(s,-1,"/a/b/c/file",0,&st) && stats.path_prefix_hits);
+    CHECK(!ftruncate(fd,19));
+    CHECK(!md_inode_stat(s,-1,"/a/b/c/file",0,&st) && st.st_size==19);
+    CHECK(!md_inode_stat(s,-1,"/a/b/c/../c/file",0,&st));
+    CHECK(!md_inode_stat(s,-1,"/short/file",0,&st));
+    s->identity=&user;
+    CHECK(!md_inode_stat(s,-1,"/a/b/c/file",0,&st));
+    s->identity=&owner;
+    CHECK(!md_inode_import_metadata(s,b,0,0,0700));
+    CHECK(!md_inode_stat(s,-1,"/a/b/c/file",0,&st));
+    s->identity=&user;
+    CHECK(md_inode_stat(s,-1,"/a/b/c/file",0,&st)==-EACCES);
+    s->identity=&owner;
+    CHECK(!md_inode_import_metadata(s,b,0,0,0755));
+    struct mdi_node node,child;
+    CHECK(!mdi_begin(s,0) && !mdi_fd(s,b,&node) && !mdi_fd(s,c,&child) && !mdi_finish(s,0));
+    CHECK(!md_inode_stat(s,-1,"/a/b/c/file",0,&st));
+    struct mdi_mount_boundary boundary={.filter=md_inode_mount_bit(node.device,node.inode),
+        .context=&node,.contains=prefix_mount};
+    s->mount_boundary=&boundary;
+    CHECK(md_inode_stat(s,-1,"/a/b/c/file",0,&st)==-EXDEV && boundary.crossed);
+    s->mount_boundary=NULL;
+    s->root_id=child.id;
+    CHECK(md_inode_stat(s,-1,"/a/b/c/file",0,&st)==-ENOENT);
+    CHECK(!md_inode_stat(s,-1,"/file",0,&st));
+    s->root_id=NULL;
+    CHECK(!md_inode_stat(s,-1,"/proc/child/file",0,&st));
+    char delegated[PATH_MAX];
+    struct md_inode_boundary host={.path=delegated,.capacity=sizeof(delegated)};
+    s->boundary=&host;
+    CHECK(md_inode_stat(s,-1,"/proc/child/file",0,&st)==-EREMOTE);
+    CHECK(!strcmp(delegated,"/proc/child/file")); s->boundary=NULL;
+    CHECK(!md_inode_operation_window_pause(s));
+    CHECK(!s->locked && s->operation_window_paused);
+    CHECK(!flock(peer->objects,LOCK_EX|LOCK_NB) && !flock(peer->objects,LOCK_UN));
+    CHECK(!md_inode_rename(peer,-1,"/a/b",-1,"/moved",0));
+    CHECK(md_inode_stat(s,-1,"/a/b/c/file",0,&st)==-ENOENT && !s->locked);
+    CHECK(!md_inode_stat(s,-1,"/moved/c/file",0,&st) && !s->locked);
+    CHECK(!md_inode_operation_window_end(s));
+    CHECK(!s->operation_window && !s->operation_window_paused);
+    CHECK(!md_inode_stat(s,b,"c/file",0,&st));
+    CHECK(!close(rootfd) && !close(b) && !close(c) && !close(fd));
+    md_inode_measure(s,NULL); s->identity=NULL;
+    md_identity_release(&owner); md_identity_release(&user);
+    md_inode_store_close(peer); md_inode_store_close(s);
+    puts("PASS path prefixes: warm route, live size/credentials, chmod, root, symlinks, mount/provider boundaries and paused-window external rename");
+}
+static void prefix_mutations(void) {
+    struct md_inode_store *s=store("prefix-mutations",1);
+    struct md_identity owner=md_identity_new(0,0);
+    s->identity=&owner;
+    const char *dirs[]={"a","a/b","a/b/c","other"};
+    for (unsigned i=0;i<sizeof(dirs)/sizeof(*dirs);++i) CHECK(!md_inode_mkdir(s,-1,dirs[i],0755));
+    int fd=md_inode_create(s,-1,"a/b/c/file",0644); CHECK(fd>=0 && !close(fd));
+    struct stat st,original;
+    struct md_inode_statistics stats={0}; md_inode_measure(s,&stats);
+    CHECK(!md_inode_stat(s,-1,"a/b/c/file",0,&original));
+    /* Version-bucket collisions may conservatively miss, but unrelated rows
+     * must not retire every route. Exercise committed SQL writes, not only
+     * native leaves which bypass the catalogue entirely. */
+    for (unsigned i=0;i<64;++i) {
+        char path[64]; snprintf(path,sizeof(path),"other/link-%u",i);
+        CHECK(!md_inode_symlink(s,"target",-1,path));
+        CHECK(!md_inode_stat(s,-1,"a/b/c/file",0,&st));
+    }
+    CHECK(stats.path_prefix_hits>=32);
+    CHECK(!md_inode_rename(s,-1,"a/b",-1,"other/moved",0));
+    CHECK(md_inode_stat(s,-1,"a/b/c/file",0,&st)==-ENOENT);
+    CHECK(!md_inode_stat(s,-1,"other/moved/c/file",0,&st) && st.st_ino==original.st_ino);
+    CHECK(!md_inode_mkdir(s,-1,"a/b",0755));
+    CHECK(!md_inode_mkdir(s,-1,"a/b/c",0755));
+    fd=md_inode_create(s,-1,"a/b/c/file",0644); CHECK(fd>=0 && !close(fd));
+    CHECK(!md_inode_stat(s,-1,"a/b/c/file",0,&st) && st.st_ino!=original.st_ino);
+    CHECK(!md_inode_rename(s,-1,"a/b",-1,"other/moved",RENAME_EXCHANGE));
+    CHECK(!md_inode_stat(s,-1,"a/b/c/file",0,&st) && st.st_ino==original.st_ino);
+    /* A route observed inside a rolled-back transaction cannot survive it. */
+    CHECK(!mdi_begin(s,1));
+    struct mdi_location loc;
+    CHECK(!mdi_walk(s,-1,"a/b",MDI_ENTRY,0,&loc));
+    CHECK(!mdi_delete_name(s,loc.parent.id,loc.name));
+    CHECK(!mdi_add_name(s,loc.parent.id,"hidden",loc.node.id));
+    CHECK(!mdi_walk(s,-1,"a/hidden/c/file",MDI_FOLLOW,0,&loc));
+    CHECK(mdi_finish(s,-ECANCELED)==-ECANCELED);
+    CHECK(md_inode_stat(s,-1,"a/hidden/c/file",0,&st)==-ENOENT);
+    CHECK(!md_inode_stat(s,-1,"a/b/c/file",0,&st) && st.st_ino==original.st_ino);
+    md_inode_measure(s,NULL); s->identity=NULL;
+    md_identity_release(&owner); md_inode_store_close(s);
+    puts("PASS path prefix dependencies: unrelated SQL writes, parent move, name reuse, exchange and rollback");
+}
+static void metadata_working_set(void) {
+    struct md_inode_store *s=store("metadata-working-set",1);
+    enum { COUNT=512 };
+    char names[COUNT][32]; struct stat st;
+    for (unsigned i=0;i<COUNT;++i) {
+        snprintf(names[i],sizeof(names[i]),"/directory-%u",i);
+        CHECK(!md_inode_mkdir(s,-1,names[i],0755));
+    }
+    CHECK(!md_inode_operation_window_begin(s));
+    for (unsigned round=0;round<2;++round) for (unsigned i=0;i<COUNT;++i)
+        CHECK(!md_inode_stat(s,-1,names[i],0,&st));
+    struct md_inode_statistics stats={0}; md_inode_measure(s,&stats);
+    for (unsigned i=0;i<COUNT;++i) CHECK(!md_inode_stat(s,-1,names[i],0,&st));
+    CHECK(stats.metadata_cache_hits>COUNT && stats.metadata_cache_misses<COUNT/8);
+    CHECK(!md_inode_rename(s,-1,names[0],-1,"/renamed",0));
+    stats=(struct md_inode_statistics){0};
+    for (unsigned i=1;i<COUNT;++i) CHECK(!md_inode_stat(s,-1,names[i],0,&st));
+    CHECK(stats.metadata_cache_misses<COUNT/8);
+    CHECK(md_inode_stat(s,-1,names[0],0,&st)==-ENOENT);
+    CHECK(!md_inode_stat(s,-1,"/renamed",0,&st));
+    CHECK(!md_inode_operation_window_end(s));
+    md_inode_measure(s,NULL); md_inode_store_close(s);
+    puts("PASS metadata working set: 512 directories stay hot; rename invalidates dependencies without flushing siblings");
+}
 static void reused_queries(void) {
     struct md_inode_store *s = store("queries", 1), *writer = store("queries", 0);
     int fd = md_inode_create(writer, MD_INODE_ROOT, "value", 0600); CHECK(fd >= 0);
@@ -1169,6 +1303,41 @@ static void lookup_indexes(struct md_inode_store *s) {
     test_sql_indexed_lookup(s->db,"SELECT s.address FROM sockets s JOIN inode_channels c ON c.object=s.object "
         "WHERE c.channel=?1 LIMIT 1");
     puts("PASS retained filesystem and reverse socket lookups use indexed seeks without sorting");
+}
+static void directory_name_cost(void) {
+    struct md_inode_store *s=store("directory-name-cost",1);
+    CHECK(!md_inode_mkdir(s,-1,"parent",0700));
+    int parent=md_inode_open(s,-1,"parent",O_PATH|O_DIRECTORY,0); CHECK(parent>=0);
+    struct mdi_node child;
+    for (unsigned i=0;i<256;++i) {
+        char name[32]; snprintf(name,sizeof(name),"child%u",i);
+        CHECK(!md_inode_mkdir(s,parent,name,0700));
+    }
+    int fd=md_inode_open(s,parent,"child255",O_PATH|O_DIRECTORY,0); CHECK(fd>=0);
+    CHECK(!mdi_begin(s,0) && !mdi_fd(s,fd,&child));
+    for (unsigned probe=0;probe<3;++probe) {
+        sqlite3_stmt *q=NULL;
+        CHECK(!mdi_query_acquire(s,MDI_DIRECTORY_NAME,&q));
+        CHECK(!mdi_bind_id(q,1,probe==1 ? mdi_root(s) : child.parent));
+        CHECK(!mdi_bind_id(q,2,probe==2 ? "ffffffffffffffffffffffffffffffff" : child.id));
+        sqlite3_stmt_status(q,SQLITE_STMTSTATUS_VM_STEP,1);
+        CHECK(mdi_step(s,q)==(probe ? SQLITE_DONE : SQLITE_ROW));
+        if (!probe) {
+            CHECK(sqlite3_column_bytes(q,0)==8 && !memcmp(sqlite3_column_blob(q,0),"child255",8));
+            CHECK(mdi_step(s,q)==SQLITE_DONE);
+        }
+        /* An index range over every sibling is still reported as SEARCH, not
+         * FULLSCAN. Bound actual work, including misses and wrong parents. */
+        int steps=sqlite3_stmt_status(q,SQLITE_STMTSTATUS_VM_STEP,0);
+        if (steps>=64) fprintf(stderr,"directory name probe %u: %d VM steps\n",probe,steps);
+        CHECK(steps<64);
+        CHECK(!mdi_query_release(q,0));
+    }
+    CHECK(!mdi_finish(s,0));
+    char name[PATH_MAX];
+    CHECK(!md_inode_path(s,fd,name,sizeof(name)) && !strcmp(name,"/parent/child255"));
+    close(fd); close(parent); md_inode_store_close(s);
+    puts("PASS reverse directory lookup work is independent of sibling count, including misses");
 }
 static void counter_audit(void) {
     struct md_inode_store *s = store("counter-audit", 1);
@@ -1676,8 +1845,9 @@ int main(int argc, char **argv) {
     descriptors(); dentry_names(); namespace(); directory_times(); contention(); multiple_stores(); across_exec(argv[0]);
     native_plans(); native_births(); native_birth_custody(); native_birth_recovery(); native_birth_acl();
     hierarchy(); symlinks(); permissions(); kernel_reference(); scoped_paths(); read_admission_failure(); operation_windows();
+    path_prefixes(); prefix_mutations(); metadata_working_set();
     permission_snapshot(); reused_queries(); metadata_queries(); cached_path_names();
-    backing_cache(); recent_cache_keys(); mutation_cache(); directory_publication(); membership_queries(); counter_audit(); retained_journal();
+    backing_cache(); recent_cache_keys(); mutation_cache(); directory_publication(); membership_queries(); directory_name_cost(); counter_audit(); retained_journal();
     unsigned serial = 0;
     recovery(CREATE, MD_OBJECT_SYNCED, serial++);
     for (enum operation op = CREATE; op <= EXCHANGE; ++op) {

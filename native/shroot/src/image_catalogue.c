@@ -161,9 +161,12 @@ int md_catalogue_fstat(struct md_image_catalogue *c, struct md_inode_store *s, i
 int md_catalogue_stat(struct md_image_catalogue *c, struct md_inode_store *s, int dir,
         const char *path, int flags, struct stat *st) {
     int error = md_inode_stat(s, dir, path, flags, st);
-    if (!error && c && same(&c->logical, st)) {
+    if (!error) md_catalogue_stat_project(c,st);
+    return error;
+}
+void md_catalogue_stat_project(struct md_image_catalogue *c,struct stat *st) {
+    if (c && same(&c->logical, st)) {
         nlink_t links = st->st_nlink;
         *st = c->logical; st->st_nlink = links;
     }
-    return error;
 }

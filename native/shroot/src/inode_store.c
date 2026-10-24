@@ -123,6 +123,15 @@ int md_inode_symlink(struct md_inode_store *s, const char *target, int dirfd, co
     if (strnlen(target, PATH_MAX) == PATH_MAX) return -ENAMETOOLONG;
     return create_node(s, dirfd, path, S_IFLNK, 0777, target, 0);
 }
+ssize_t mdi_readlink(struct md_inode_store *s,const struct mdi_node *node,char *out,size_t size,int empty) {
+    if (!out) return -EFAULT;
+    if (!size) return -EINVAL;
+    if (node->kind!=S_IFLNK) return empty ? -ENOENT : -EINVAL;
+    int directory=mdi_backing_directory(s,node);
+    if (directory<0) return directory;
+    ssize_t n=readlinkat(directory,node->backing,out,size);
+    return n<0 ? -errno : n;
+}
 ssize_t md_inode_readlink(struct md_inode_store *s, int dirfd, const char *path, char *out, size_t size) {
     if (!out) return -EFAULT;
     if (!size) return -EINVAL;
@@ -132,9 +141,8 @@ ssize_t md_inode_readlink(struct md_inode_store *s, int dirfd, const char *path,
     int empty = path && !*path;
     r = empty ? (dirfd == MD_INODE_ROOT ? -ENOENT : mdi_fd(s, dirfd, &loc.node))
         : mdi_walk(s, dirfd, path, MDI_NOFOLLOW, 0, &loc);
-    if (!r && loc.node.kind != S_IFLNK) r = empty ? -ENOENT : -EINVAL;
     ssize_t n = -1;
-    if (!r && (n = readlinkat(s->objects, loc.node.backing, out, size)) < 0) r = -errno;
+    if (!r && (n=mdi_readlink(s,&loc.node,out,size,empty))<0) r=(int)n;
     r = mdi_finish(s, r);
     return r ? r : n;
 }
@@ -180,7 +188,6 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
             | O_CREAT | O_EXCL | O_NONBLOCK | O_NOCTTY | O_NOATIME | O_LARGEFILE | O_SYNC | O_DSYNC | O_DIRECT)) return -ENOTSUP;
     if ((flags & O_ACCMODE) == O_ACCMODE) return -EINVAL;
     if (flags & O_PATH) flags &= O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
-    if ((flags & O_TRUNC) && !(flags & (O_WRONLY | O_RDWR))) return -EINVAL;
     int create = flags & O_CREAT;
     if (create && (flags & O_DIRECTORY)) return -EINVAL;
     if (create && (mode & ~(s->identity ? 07777 : 01777))) return -ENOTSUP;
@@ -192,6 +199,9 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     r=native_plan ? mdi_walk_pinned(s,dirfd,path,follow,!!create,resolve,&loc,&pin)
         : mdi_walk_resolved(s,dirfd,path,follow,!!create,resolve,&loc);
     int fd=pin.fd;
+    /* The selected provider owns data-open semantics. Do not reject this
+     * inode endpoint combination before discovering a mount crossing. */
+    if (!r && (flags&O_TRUNC) && !(flags&O_ACCMODE)) r=-EINVAL;
     if (!r && create && loc.trailing) r = -EISDIR;
     if (!r && create && (flags & O_EXCL) && loc.exists) r = -EEXIST;
     if (!r && !loc.exists) {
@@ -445,7 +455,7 @@ int md_inode_stat(struct md_inode_store *s, int dirfd, const char *path, int fla
         struct mdi_stat_location *p=s->stat_location;
         p->device=loc.node.device; p->inode=loc.node.inode;
         p->root=!strcmp(loc.node.id,s->lifetime->scope);
-        if (mdi_location_path(s,&loc,p->path,sizeof(p->path))) p->path[0]=0;
+        if (p->path && mdi_location_path(s,&loc,p->path,PATH_MAX)) p->path[0]=0;
     }
     return mdi_finish(s, r);
 }
@@ -459,7 +469,7 @@ int md_inode_fstat_origin(struct md_inode_store *s, int fd, struct stat *st, int
         struct mdi_stat_location *p=s->stat_location;
         p->device=node.device; p->inode=node.inode;
         p->root=!strcmp(node.id,s->lifetime->scope);
-        if (mdi_node_path(s,&node,p->path,sizeof(p->path))) p->path[0]=0;
+        if (p->path && mdi_node_path(s,&node,p->path,PATH_MAX)) p->path[0]=0;
     }
     return mdi_finish(s, r);
 }

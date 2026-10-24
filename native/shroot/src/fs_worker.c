@@ -233,6 +233,9 @@ static void *run(void *context) {
             (unsigned long long)stats.write_admissions);
         fprintf(stderr,"MD_STORE metadataCacheHits=%llu metadataCacheMisses=%llu\n",
             (unsigned long long)stats.metadata_cache_hits,(unsigned long long)stats.metadata_cache_misses);
+        fprintf(stderr,"MD_STORE pathPrefixHits=%llu directoryCheckHits=%llu directoryCheckMisses=%llu\n",
+            (unsigned long long)stats.path_prefix_hits,(unsigned long long)stats.directory_check_hits,
+            (unsigned long long)stats.directory_check_misses);
         fprintf(stderr, "MD_STORE linkCountQueries=%llu membershipQueries=%llu\n",
             (unsigned long long)stats.link_count_queries, (unsigned long long)stats.membership_queries);
         md_fs_statistics_report(STDERR_FILENO,&rpc);

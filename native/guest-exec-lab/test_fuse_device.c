@@ -217,7 +217,6 @@ void md_test_fuse_device(const char *path) {
     struct md_provider_tree *sys=NULL,*dev=NULL;
     assert(!md_fs_sysfs_prepare(&fs,&sys));
     assert(!md_fs_devices_prepare(&fs,0,&dev)); fs.devices=dev;
-    assert(md_mount_namespace_initial_boundary(fs.mounts));
     struct md_fs_context context={.filesystem=&fs};
     struct md_fs_request stat={.operation=MD_FS_STAT,.directory={-1,-1},.path={"/",NULL}};
     assert(md_fs_context_operation_window(&context,&stat,0)==store);

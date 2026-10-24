@@ -6,6 +6,7 @@
 #include "user_namespace.h"
 #include "namespace_identity.h"
 #include "native_mounts.h"
+#include "inode_mount_boundary.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -44,6 +45,32 @@ static unsigned placement_hash(const struct md_view_mount *parent,const struct s
     key^=key>>33; key*=UINT64_C(0xff51afd7ed558ccd); key^=key>>33;
     return (unsigned)key&1023;
 }
+static void placement_index(struct md_mount_namespace *view) {
+    struct md_fs_mounts *tree=view->tree;
+    if (tree->lookup.valid && tree->lookup.count==tree->count) return;
+    memset(tree->lookup.buckets,0,sizeof(tree->lookup.buckets));
+    memset(tree->lookup.children,0,(tree->count+1)*sizeof(*tree->lookup.children));
+    /* Reverse insertion retains ascending slot precedence on collisions.
+     * Topology publication/retirement invalidates this one shared index. */
+    for (unsigned end=tree->count+1;end;--end) {
+        unsigned i=end-1;
+        struct md_view_mount *m=md_view_mount_node(view,i);
+        if (m->source<0 || m->detached) continue;
+        unsigned hash=placement_hash(m->parent,&m->guest);
+        tree->lookup.next[i]=tree->lookup.buckets[hash];
+        tree->lookup.buckets[hash]=(uint16_t)(i+1);
+        int parent=md_view_mount_slot(view,m->parent,tree->count);
+        if (parent>=0) tree->lookup.children[parent]|=md_inode_mount_bit(m->guest.st_dev,m->guest.st_ino);
+    }
+    tree->lookup.count=tree->count; tree->lookup.valid=1;
+}
+uint64_t md_view_mount_children(struct md_mount_namespace *view,const struct md_view_mount *parent) {
+    if (!view || !view->tree) return 0;
+    int slot=md_view_mount_slot(view,parent,view->tree->count);
+    if (slot<0) return UINT64_MAX;
+    placement_index(view);
+    return view->tree->lookup.children[slot];
+}
 struct md_view_mount *md_view_mount_lookup(struct md_mount_namespace *view,
         const struct md_view_mount *parent,const struct stat *st) {
     struct md_fs_mounts *tree=view ? view->tree : NULL;
@@ -55,20 +82,7 @@ struct md_view_mount *md_view_mount_lookup(struct md_mount_namespace *view,
         }
         return NULL;
     }
-    if (!tree->lookup.valid || tree->lookup.count!=tree->count) {
-        memset(tree->lookup.buckets,0,sizeof(tree->lookup.buckets));
-        /* Reverse insertion retains ascending slot precedence on collisions,
-         * including stacked roots. Topology owners invalidate before reuse. */
-        for (unsigned end=tree->count+1;end;--end) {
-            unsigned i=end-1;
-            struct md_view_mount *m=md_view_mount_node(view,i);
-            if (m->source<0 || m->detached) continue;
-            unsigned hash=placement_hash(m->parent,&m->guest);
-            tree->lookup.next[i]=tree->lookup.buckets[hash];
-            tree->lookup.buckets[hash]=(uint16_t)(i+1);
-        }
-        tree->lookup.count=tree->count; tree->lookup.valid=1;
-    }
+    placement_index(view);
     for (unsigned link=tree->lookup.buckets[placement_hash(parent,st)];link;link=tree->lookup.next[link-1]) {
         struct md_view_mount *m=md_view_mount_node(view,link-1);
         if (m->parent==parent && md_view_same(st,&m->guest)) return m;
@@ -263,16 +277,4 @@ int md_mount_namespace_attached(const struct md_mount_namespace *n) {
 }
 int md_mount_namespace_managed_paths(const struct md_mount_namespace *n) {
     return n && atomic_load_explicit(&n->managed_paths,memory_order_acquire);
-}
-const struct md_inode_mount_boundaries *md_mount_namespace_initial_boundary(const struct md_mount_namespace *n) {
-    if (!n || !n->initial_boundary.count || n->root!=&n->base || n->base.source>=0
-            || !n->tree || n->tree->count!=n->initial_boundary.count) return NULL;
-    for (unsigned i=0;i<n->initial_boundary.count;++i) {
-        const struct md_view_mount *m=&n->tree->mounts[i];
-        if (m->id!=n->initial_boundary.mounts[i].id || m->detached
-                || m->parent!=n->initial_boundary.mounts[i].parent
-                || m->guest.st_dev!=n->initial_boundary.mounts[i].device
-                || m->guest.st_ino!=n->initial_boundary.mounts[i].inode) return NULL;
-    }
-    return &n->initial_boundary.boundaries;
 }

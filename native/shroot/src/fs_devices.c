@@ -40,7 +40,6 @@ static int attach_nodes(struct md_filesystem *fs,struct md_inode_store *store) {
 }
 int md_fs_devices_prepare(struct md_filesystem *fs,int hide_native_input,struct md_provider_tree **out) {
     *out=NULL;
-    int initial=md_mount_namespace_initial_boundary(fs->mounts)!=NULL;
     int parent=md_fs_private_mounts_parent(fs->store);
     if (parent<0) return parent;
     struct md_provider_tree *dev=md_device_tree_new(parent,hide_native_input);
@@ -66,7 +65,6 @@ int md_fs_devices_prepare(struct md_filesystem *fs,int hide_native_input,struct 
     if (!error) error=attach_nodes(fs,nodes);
     if (!error) error=md_view_walk(fs,-1,NULL,"/dev/shm",1,0,MD_VIEW_MOUNT_TARGET,&target);
     if (!error) error=md_view_attach_source(fs,&source,&target,NULL);
-    if (!error && initial) error=md_fs_initial_boundaries_capture(fs);
     md_view_location_close(&target); md_view_location_close(&shm);
     md_inode_store_close(nodes);
     if (error) md_provider_tree_release(dev); else *out=dev;

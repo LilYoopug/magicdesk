@@ -540,13 +540,6 @@ int md_fs_mounts_copy(struct md_filesystem *fs, const struct md_fs_location *roo
     }
     if (!r && fs->mounts->root!=&fs->mounts->base)
         copy->root=&copy->tree->mounts[fs->mounts->root-source->mounts];
-    if (!r && md_mount_namespace_initial_boundary(fs->mounts)) {
-        copy->initial_boundary=fs->mounts->initial_boundary;
-        for (unsigned i=0;i<copy->initial_boundary.count;++i) {
-            copy->initial_boundary.mounts[i].id=copy->tree->mounts[i].id;
-            copy->initial_boundary.mounts[i].parent=copy->tree->mounts[i].parent;
-        }
-    }
     struct md_fs_location selected=*root;
     if (!r && origin) {
         struct md_filesystem candidate={.store=fs->store,.storage=fs->storage,.mounts=copy};

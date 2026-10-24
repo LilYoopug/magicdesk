@@ -147,6 +147,14 @@ static int point_fd(struct path_walk *w,struct path_point *p) {
     if (s->statistics) ++s->statistics->walk_materializations;
     p->fd=fd; return 0;
 }
+static int observe(struct path_walk *w,struct md_mount_namespace *view,struct md_view_mount *mount,
+        struct path_point *point,struct md_view_observer *observer,int *error) {
+    if (!observer || !md_view_inode(mount)) return 0;
+    *error=walk_select(w,view,mount);
+    if (!*error) *error=point_logical(w,point);
+    if (!*error) *error=observer->complete(observer->context,w->scope.store,mount,&point->node,&point->identity);
+    observer->completed=1; return 1;
+}
 static int component(struct path_walk *w,struct md_mount_namespace *view,
         struct md_view_mount *mount,struct path_point *current,const char *name,
         const char *tail,int covered,struct path_point *next) {
@@ -157,10 +165,13 @@ static int component(struct path_walk *w,struct md_mount_namespace *view,
         r=point_logical(w,current);
         struct md_inode_boundary *boundary=s->boundary;
         if (covered) s->boundary=NULL;
-        if (!r) r=mdi_path_step(s,&current->node,name,tail,0,&next->node,NULL,NULL);
+        if (!r) r=mdi_path_step(s,&current->node,name,tail,0,&next->node,&next->identity,NULL);
         s->boundary=boundary;
-        if (!r) r=mdi_backing_stat(s,&next->node,&next->identity);
         if (!r) {
+            /* Lookup already read the attributes, including native leaves.
+             * Placement needs backing identity, not projected guest dev/ino. */
+            next->identity.st_dev=next->node.device;
+            next->identity.st_ino=next->node.inode;
             next->logical=1;
             if (s->statistics) ++s->statistics->walk_components;
         }
@@ -233,7 +244,7 @@ static int parent(struct path_walk *w, struct md_mount_namespace *view,
 }
 static int walk_path(struct md_filesystem *fs, int base, const struct md_fs_anchor *origin,
         const char *path, int follow, int missing,
-        uint64_t resolve, struct md_view_location *out,struct md_view_walk_pending **pending,
+        uint64_t resolve, struct md_view_location *out,struct md_view_observer *observer,struct md_view_walk_pending **pending,
         struct md_view_walk_pending *resume) {
     *out = (struct md_view_location){.parent=-1,.fd=-1};
     struct md_provider_lookup *lookup=NULL;
@@ -306,6 +317,7 @@ static int walk_path(struct md_filesystem *fs, int base, const struct md_fs_anch
         if (!S_ISDIR(current.identity.st_mode)) { r = -ENOTDIR; break; }
         char *start = todo; while (*start == '/') ++start;
         if (!*start) {
+            if (observe(&walk,view,mount,&current,observer,&r)) break;
             r=point_fd(&walk,&current);
             if (!r) {
                 out->parent=duplicate(current.fd); out->fd=current.fd; current.fd=-1;
@@ -442,6 +454,7 @@ component_complete:
         if (!r && (!last || trailing) && !S_ISDIR(next.identity.st_mode)) r = -ENOTDIR;
         if (r) { point_close(&next); break; }
         if (last) {
+            if (observe(&walk,view,next_mount,&next,observer,&r)) { point_close(&next); break; }
             out->boundary = next_mount != mount;
             /* A mount root is materialized by its source FD, never its covered dentry. */
             if (out->boundary || !strcmp(name, "..")) {
@@ -466,14 +479,14 @@ component_complete:
 }
 int md_view_walk(struct md_filesystem *fs,int base,const struct md_fs_anchor *origin,
         const char *path,int follow,int missing,uint64_t resolve,struct md_view_location *out) {
-    return walk_path(fs,base,origin,path,follow,missing,resolve,out,NULL,NULL);
+    return walk_path(fs,base,origin,path,follow,missing,resolve,out,NULL,NULL,NULL);
 }
 int md_view_walk_async(struct md_filesystem *fs,int base,const struct md_fs_anchor *origin,
-        const char *path,int follow,int missing,uint64_t resolve,struct md_view_location *out,
+        const char *path,int follow,int missing,uint64_t resolve,struct md_view_location *out,struct md_view_observer *observer,
         struct md_view_walk_pending **pending) {
-    *pending=NULL;
-    return walk_path(fs,base,origin,path,follow,missing,resolve,out,pending,NULL);
+    if (pending) *pending=NULL;
+    return walk_path(fs,base,origin,path,follow,missing,resolve,out,observer,pending,NULL);
 }
-int md_view_walk_resume(struct md_filesystem *fs,struct md_view_walk_pending *p,struct md_view_location *out) {
-    return walk_path(fs,-1,NULL,NULL,0,0,0,out,&p,p);
+int md_view_walk_resume(struct md_filesystem *fs,struct md_view_walk_pending *p,struct md_view_location *out,struct md_view_observer *observer) {
+    return walk_path(fs,-1,NULL,NULL,0,0,0,out,observer,&p,p);
 }

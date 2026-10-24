@@ -80,7 +80,6 @@ int md_fs_mount_overlay(struct md_filesystem *, const struct md_fs_request *, st
 int md_fs_private_mounts_parent(struct md_inode_store *);
 int md_fs_provider_mount(struct md_filesystem *,struct md_provider_tree *,const char *);
 int md_fs_sysfs_prepare(struct md_filesystem *,struct md_provider_tree **);
-int md_fs_initial_boundaries_capture(struct md_filesystem *);
 
 enum { MD_VIEW_BUCKETS = 4096, MD_VIEW_OBJECT_LIMIT = 65536 };
 static inline int md_view_base(const struct md_mount_namespace *view, const struct md_view_mount *m) {
@@ -120,10 +119,12 @@ struct md_fs_mounts {
         unsigned count;
         int valid;
         uint16_t buckets[1024], next[MD_FS_MOUNTS_MAX+1];
+        uint64_t children[MD_FS_MOUNTS_MAX+1];
     } lookup;
 };
 _Static_assert(MD_FS_MOUNTS_MAX+1<=UINT16_MAX,"mount lookup slots");
 void md_view_mount_lookup_changed(struct md_mount_namespace *);
+uint64_t md_view_mount_children(struct md_mount_namespace *,const struct md_view_mount *parent);
 struct md_view_mount *md_view_mount_lookup(struct md_mount_namespace *,
     const struct md_view_mount *parent,const struct stat *);
 /* Stable addresses for retained origins; untouched slots consume no physical
@@ -214,10 +215,18 @@ int md_view_task_path(struct md_filesystem *, int, const char *, const char *, u
 int md_view_walk(struct md_filesystem *, int base, const struct md_fs_anchor *, const char *path, int follow, int missing,
         uint64_t resolve, struct md_view_location *);
 struct md_view_walk_pending;
+struct mdi_node;
+/* Read-only completion borrows the selected inode and attributes with backing
+ * identity under its read scope. It cannot retain pointers, mutate or suspend. */
+struct md_view_observer {
+    void *context;
+    int (*complete)(void *,struct md_inode_store *,struct md_view_mount *,const struct mdi_node *,const struct stat *);
+    int completed;
+};
 int md_view_walk_async(struct md_filesystem *,int base,const struct md_fs_anchor *,const char *,int follow,int missing,
-    uint64_t resolve,struct md_view_location *,struct md_view_walk_pending **);
+    uint64_t resolve,struct md_view_location *,struct md_view_observer *,struct md_view_walk_pending **);
 int md_view_walk_ready(struct md_view_walk_pending *);
-int md_view_walk_resume(struct md_filesystem *,struct md_view_walk_pending *,struct md_view_location *);
+int md_view_walk_resume(struct md_filesystem *,struct md_view_walk_pending *,struct md_view_location *,struct md_view_observer *);
 void md_view_walk_destroy(struct md_view_walk_pending *);
 void md_view_location_close(struct md_view_location *);
 int md_view_fdpath(int fd, char *, size_t);

@@ -163,7 +163,9 @@ int mdi_schema_configure(struct md_inode_store *s, int create) {
     int r=create ? journal_mode(s,"PRAGMA journal_mode=WAL","wal") : 0;
     /* Connection policy is independent of persistent format and revision. */
     if (!r) r=mdi_sql(s,s->lifetime->temporary ? "PRAGMA synchronous=OFF" : "PRAGMA synchronous=NORMAL");
-    if (!r) r=mdi_sql(s,"PRAGMA wal_autocheckpoint=1024; PRAGMA journal_size_limit=4194304");
+    /* The default 2 MiB repeatedly evicts directory/index pages in broad path
+     * walks. This is a demand-grown page-cache target, not an allocation. */
+    if (!r) r=mdi_sql(s,"PRAGMA cache_size=-8192; PRAGMA wal_autocheckpoint=1024; PRAGMA journal_size_limit=4194304");
     return r;
 }
 

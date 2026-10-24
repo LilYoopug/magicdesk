@@ -9,30 +9,6 @@
 #include <unistd.h>
 #include <string.h>
 
-int md_fs_initial_boundaries_capture(struct md_filesystem *fs) {
-    struct md_mount_namespace *n=fs->mounts;
-    if (!n || n->root!=&n->base || n->base.source>=0 || !n->tree) return -EINVAL;
-    memset(&n->initial_boundary,0,sizeof(n->initial_boundary));
-    /* Admission is an optimization, not a limit on the launch mount graph. */
-    if (n->tree->count>sizeof(n->initial_boundary.mounts)/sizeof(*n->initial_boundary.mounts)) return 0;
-    for (unsigned i=0;i<n->tree->count;++i) {
-        const struct md_view_mount *m=&n->tree->mounts[i];
-        if (!m->id || m->detached) return -EINVAL;
-        n->initial_boundary.mounts[i].id=m->id;
-        n->initial_boundary.mounts[i].device=m->guest.st_dev;
-        n->initial_boundary.mounts[i].inode=m->guest.st_ino;
-        n->initial_boundary.mounts[i].parent=m->parent;
-        if (m->parent!=&n->base) continue;
-        struct md_inode_mount_boundaries *b=&n->initial_boundary.boundaries;
-        if (b->count==MD_INODE_INITIAL_BOUNDARIES) return 0;
-        int error=md_inode_object_id(fs->store,m->target,b->objects[b->count]);
-        if (error) return error;
-        b->filter|=md_inode_mount_bit(b->objects[b->count++]);
-    }
-    n->initial_boundary.count=n->tree->count;
-    return 0;
-}
-
 int md_fs_sysfs_prepare(struct md_filesystem *fs,struct md_provider_tree **out) {
     *out=NULL;
     int initial=!md_mount_namespace_attached(fs->mounts) && !md_mount_namespace_managed_paths(fs->mounts);
@@ -44,12 +20,9 @@ int md_fs_sysfs_prepare(struct md_filesystem *fs,struct md_provider_tree **out) 
     if (!error && fs->render_device.ops) error=md_render_device_sysfs(fs->render_device,md_provider_tree_root(tree));
     if (!error) error=md_fs_provider_mount(fs,tree,"/sys");
     if (!error && initial) {
-        error=md_fs_initial_boundaries_capture(fs);
-        if (!error) {
-            /* /sys never used proc/dev's native passthrough. Preparing only
-             * this provider must not disable that existing launch contract. */
-            atomic_store_explicit(&fs->mounts->managed_paths,0,memory_order_release);
-        }
+        /* /sys never used proc/dev's native passthrough. Preparing only
+         * this provider must not disable that existing launch contract. */
+        atomic_store_explicit(&fs->mounts->managed_paths,0,memory_order_release);
     }
     if (error) md_provider_tree_release(tree);
     else *out=tree;

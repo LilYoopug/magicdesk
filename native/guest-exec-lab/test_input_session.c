@@ -60,7 +60,6 @@ static struct md_fs_result request(struct md_filesystem *fs,unsigned operation,c
     struct md_fs_result result; md_fs_execute(fs,&q,&result,&output); return result;
 }
 static void initial_sysfs(struct md_filesystem *fs) {
-    assert(md_mount_namespace_initial_boundary(fs->mounts));
     const char *dirs[]={"/sys/block","/sys/bus","/sys/dev/block","/sys/dev/char","/sys/fs/cgroup"};
     for (unsigned i=0;i<sizeof(dirs)/sizeof(*dirs);++i) {
         struct md_fs_result st=request(fs,MD_FS_STAT,dirs[i],0,NULL,NULL);
@@ -69,6 +68,7 @@ static void initial_sysfs(struct md_filesystem *fs) {
     }
     assert(request(fs,MD_FS_STAT,"/sys/devices/platform",0,NULL,NULL).error==-ENOENT);
     assert(request(fs,MD_FS_OPEN,"/sys/devices/system/cpu/possible",O_WRONLY,NULL,NULL).error==-EROFS);
+    assert(request(fs,MD_FS_OPEN,"/sys/devices/system/cpu/possible",O_RDONLY|O_TRUNC,NULL,NULL).error==-EROFS);
     assert(!md_inode_symlink(fs->store,"/sys/devices/system/cpu/possible",-1,"/cpu-alias"));
     struct md_fs_result alias=request(fs,MD_FS_OPEN,"/cpu-alias",O_RDONLY,NULL,NULL);
     assert(!alias.error && alias.fd>=0); close(alias.fd);

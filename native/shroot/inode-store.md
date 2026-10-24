@@ -60,7 +60,10 @@ misses trim idle excess. Cache capacity is not a guest `EMFILE` condition.
 connection journal policy and rebuildable lookup indexes;
 `inode_path.c` resolves paths and reconstructs directory paths;
 `inode_path_cache.c` retains bounded directory-prefix routes and revalidates
-their ancestors against current caller and mount policy;
+their ancestors against current caller and mount policy. Routes share the
+metadata cache's exact ancestor-object and parent/name dependencies; unrelated
+row writes do not flush every route. Rollback and foreign commits invalidate
+the snapshot as before;
 `inode_cache.c` owns bounded metadata caching and row-dependency invalidation;
 `inode_store.c` defines namespace operations, `inode_directory.c` implements
 directory cursors, `inode_socket.c` implements socket publication and address
@@ -309,6 +312,9 @@ enabling leaf creation in a store; capability denial must not be inferred away.
 
 Metadata operations use the retained FD, with its proc magic link for O_PATH,
 including after rename/unlink. They never reopen the former guest pathname.
+Common records are read once into a bounded local buffer; larger ACL records
+use a heap buffer after a size query. Every read validates the complete record,
+and no native-leaf metadata or permission result is retained between operations.
 The shared xattr boundary hides/rejects the reserved `user.shroot.` namespace.
 Attribute copying for COW and overlay does not import a source's private record
 or erase a destination's record. Portable backups export logical ownership and

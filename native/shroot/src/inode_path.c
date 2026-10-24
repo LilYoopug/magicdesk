@@ -34,14 +34,10 @@ int mdi_path_step(struct md_inode_store *s, const struct mdi_node *current,
     } else {
         r=mdi_lookup(s,current,name,next,attributes,pin);
         if (r) return r;
-        if (s->mount_boundary && md_inode_mount_contains(s->mount_boundary->objects,next->id)) {
-            s->mount_boundary->crossed=1; return -EXDEV;
-        }
+        if (s->mount_boundary && md_inode_mount_contains(s->mount_boundary,next->device,next->inode)) return -EXDEV;
         return 0;
     }
-    if (!r && s->mount_boundary && md_inode_mount_contains(s->mount_boundary->objects,next->id)) {
-        s->mount_boundary->crossed=1; return -EXDEV;
-    }
+    if (!r && s->mount_boundary && md_inode_mount_contains(s->mount_boundary,next->device,next->inode)) return -EXDEV;
     return !r && attributes ? mdi_stat(s,next,attributes) : r;
 }
 static int walk(struct md_inode_store *,int,const char *,enum mdi_follow,int,uint64_t,
@@ -89,8 +85,21 @@ static int walk(struct md_inode_store *s,int dirfd,const char *path,
         if (!S_ISDIR(native.st_mode)) return -ENOTDIR;
     }
     if (r) return r;
+    if (((path[0]=='/' && !(resolve&RESOLVE_IN_ROOT)) || dirfd==MD_INODE_ROOT) && s->mount_boundary
+            && md_inode_mount_contains(s->mount_boundary,current.device,current.inode)) return -EXDEV;
     if (current.kind != S_IFDIR) return -ENOTDIR;
     struct mdi_node boundary = current;
+    struct mdi_path_prefix prefix;
+    prefix.count=1;
+    prefix.nodes[0]=current;
+    int remember=!resolve && !current.native && !current.descriptor;
+    size_t prefix_length=0;
+    if (remember) {
+        r=mdi_path_prefix_get(s,path,&prefix,&prefix_length);
+        if (r) return r;
+        current=prefix.nodes[prefix.count-1];
+        cursor=path+prefix_length;
+    }
     unsigned links = 0;
     memset(out, 0, sizeof(*out));
     for (;;) {
@@ -111,6 +120,10 @@ static int walk(struct md_inode_store *s,int dirfd,const char *path,
         int last = !*rest;
         struct mdi_node next;
         int special = !strcmp(name, ".") || !strcmp(name, "..");
+        if (remember && (last || special)) {
+            mdi_path_prefix_put(s,path,prefix_length,&prefix);
+            remember=0;
+        }
         if (!strcmp(name,"..") && (resolve&(RESOLVE_BENEATH|RESOLVE_IN_ROOT))
                 && !strcmp(current.id,boundary.id)) {
             r=mdi_access(s,&current,X_OK);
@@ -128,6 +141,8 @@ static int walk(struct md_inode_store *s,int dirfd,const char *path,
         if (r) return r;
         if (next.kind == S_IFLNK && (!last || follow == MDI_FOLLOW
                 || (follow == MDI_NOFOLLOW && slash))) {
+            if (remember) mdi_path_prefix_put(s,path,prefix_length,&prefix);
+            remember=0;
             if (resolve & RESOLVE_NO_SYMLINKS) return -ELOOP;
             if (++links > 40) return -ELOOP;
             char target[PATH_MAX];
@@ -143,6 +158,7 @@ static int walk(struct md_inode_store *s,int dirfd,const char *path,
                 if (resolve & RESOLVE_BENEATH) return -EXDEV;
                 if (resolve & RESOLVE_IN_ROOT) current = boundary;
                 else if ((r = mdi_node(s, mdi_root(s), &current))) return r;
+                if (s->mount_boundary && md_inode_mount_contains(s->mount_boundary,current.device,current.inode)) return -EXDEV;
             }
             continue;
         }
@@ -151,6 +167,14 @@ static int walk(struct md_inode_store *s,int dirfd,const char *path,
             out->parent = current; out->node = next; strcpy(out->name, name);
             out->exists = 1; out->special = special; out->trailing = slash;
             return 0;
+        }
+        if (remember) {
+            if (next.native || next.descriptor || prefix.count==MDI_PATH_PREFIX_DEPTH) {
+                mdi_path_prefix_put(s,path,prefix_length,&prefix); remember=0;
+            } else {
+                prefix.nodes[prefix.count++]=next;
+                prefix_length=(size_t)(end-path);
+            }
         }
         current = next;
     }

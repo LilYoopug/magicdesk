@@ -12,7 +12,6 @@
 #include "inode_mount_boundary.h"
 struct md_fs_result;
 struct md_fs_output;
-struct mdi_mount_boundary { const struct md_inode_mount_boundaries *objects; int crossed; };
 struct md_inode_boundary {
     char *path; size_t capacity; unsigned operand;
     int mount_root, native_directory;
@@ -45,8 +44,9 @@ enum mdi_query { MDI_NODE, MDI_FD, MDI_LOOKUP, MDI_DIRECTORY_NAME, MDI_READDIR,
     MDI_DENTRY_CAPTURE, MDI_DENTRY_PATH, MDI_DENTRY_BIRTH,
     MDI_SUPER_READONLY, MDI_OVERLAY_READONLY, MDI_QUERY_COUNT };
 struct mdi_read_cache;
+struct mdi_path_cache;
 struct mdi_stat_location {
-    char path[PATH_MAX];
+    char *path; /* Optional PATH_MAX buffer for mount lookup without a selected view. */
     dev_t device;
     ino_t inode;
     int root;
@@ -55,6 +55,7 @@ struct mdi_stat_location {
  * admission. Native leaf changes do not replace directory backings. Logical
  * permissions are taken from the current node and are never memoized here. */
 struct mdi_directory_check {
+    uint64_t epoch;
     dev_t device;
     ino_t inode;
     int objects;
@@ -83,12 +84,15 @@ struct md_inode_store {
     int write_transaction;
     int sync_requested;
     struct mdi_read_cache *read_cache;
+    struct mdi_path_cache *path_cache;
     int cache_checked;
     unsigned read_depth;
     int operation_window;
+    int operation_window_paused;
     sqlite3_int64 locked_version;
     unsigned directory_check_count;
-    struct mdi_directory_check directory_checks[4];
+    uint64_t directory_check_epoch;
+    struct mdi_directory_check directory_checks[256];
     sqlite3_stmt *queries[MDI_QUERY_COUNT];
     struct mdi_publication *publication;
     sqlite3_int64 operation_changes;
@@ -98,6 +102,13 @@ struct md_inode_store {
     void *context;
 #endif
 };
+static inline int mdi_window_retained(const struct md_inode_store *s) {
+    return s->operation_window && !s->operation_window_paused;
+}
+static inline void mdi_directory_checks_reset(struct md_inode_store *s) {
+    s->directory_check_count=0;
+    ++s->directory_check_epoch;
+}
 static inline int mdi_readonly(const struct md_inode_store *s) {
     return s->readonly || s->mount_readonly || s->super_readonly;
 }
@@ -145,6 +156,19 @@ int mdi_cache_get(struct md_inode_store *, const struct mdi_cache_key *, struct 
 void mdi_cache_put(struct md_inode_store *, const struct mdi_cache_key *, const struct mdi_node *, int result);
 void mdi_cache_invalidate(struct md_inode_store *);
 void mdi_cache_snapshot(struct md_inode_store *, sqlite3_int64 version);
+enum mdi_dependency_kind { MDI_DEP_OBJECT, MDI_DEP_ENTRY, MDI_DEP_CHILDREN, MDI_DEP_PATH, MDI_DEP_BACKING };
+struct mdi_dependency { unsigned slot; uint64_t version; };
+uint64_t mdi_cache_epoch(const struct md_inode_store *);
+struct mdi_dependency mdi_cache_dependency(struct md_inode_store *,enum mdi_dependency_kind,
+    const void *,size_t,const void *,size_t);
+int mdi_cache_dependencies_current(const struct md_inode_store *,const struct mdi_dependency *,unsigned);
+enum { MDI_PATH_PREFIX_DEPTH=32 };
+/* Only directory prefixes are remembered, never terminal entries, native
+ * attributes or authority. Symlinks and constrained walks keep their walker. */
+struct mdi_path_prefix { unsigned count; struct mdi_node nodes[MDI_PATH_PREFIX_DEPTH]; };
+int mdi_path_prefix_get(struct md_inode_store *,const char *,struct mdi_path_prefix *,size_t *);
+void mdi_path_prefix_put(struct md_inode_store *,const char *,size_t,const struct mdi_path_prefix *);
+void mdi_path_cache_destroy(struct md_inode_store *);
 int mdi_landlock(struct md_inode_store *,const struct mdi_node *,const struct mdi_node *,uint64_t);
 int mdi_landlock_object(struct md_inode_store *,const struct mdi_node *,uint64_t);
 /* ENTRY retains the final directory entry (unlink/rename/create). NOFOLLOW
@@ -184,6 +208,7 @@ int mdi_fd_membership(struct md_inode_store *, int, struct mdi_node *, int *atta
 int mdi_lookup(struct md_inode_store *, const struct mdi_node *parent, const char *, struct mdi_node *, struct stat *, struct mdi_path_pin *);
 int mdi_catalogue_lookup(struct md_inode_store *, const char *parent, const char *, struct mdi_node *);
 int mdi_stat(struct md_inode_store *, const struct mdi_node *, struct stat *);
+ssize_t mdi_readlink(struct md_inode_store *,const struct mdi_node *,char *,size_t,int empty);
 void mdi_stat_project(const struct mdi_node *, struct stat *);
 int mdi_backing_stat(struct md_inode_store *, const struct mdi_node *, struct stat *);
 int mdi_backing_fstat(const struct mdi_node *, int, struct stat *);
