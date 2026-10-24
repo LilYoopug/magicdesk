@@ -26,6 +26,8 @@ int md_shm_export(struct md_shm *,const struct md_identity *,pid_t,int segment,
 struct md_shm_space *md_shm_space_new(void);
 struct md_shm_space *md_shm_space_fork(struct md_shm_space *, int shared);
 int md_shm_space_release(struct md_shm_space *);
+/* Includes pending attachments; fork must order behind their publication. */
+int md_shm_space_used(const struct md_shm_space *);
 int md_shm_abort(struct md_shm_mapping **);
 size_t md_shm_pending_size(const struct md_shm_mapping *);
 int md_shm_intersects(const struct md_shm_space *, uintptr_t, size_t);

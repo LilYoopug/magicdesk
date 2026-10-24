@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <linux/shm.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -687,7 +688,14 @@ int main(int argc, char **argv) {
         }
         return 0;
     }
-    if (!strcmp(argv[1],"--automatic")) {
+    if (!strcmp(argv[1],"--automatic") || !strcmp(argv[1],"--automatic-shm")) {
+        int segment=-1;
+        void *shared=NULL;
+        if (!strcmp(argv[1],"--automatic-shm")) {
+            segment=syscall(SYS_shmget,IPC_PRIVATE,page,0600); assert(segment>=0);
+            shared=(void *)syscall(SYS_shmat,segment,NULL,0); assert(shared!=(void *)-1);
+            *(unsigned char *)shared=71;
+        }
         unsigned char code[32]={0}; emit(code,11);
         assert(pwrite(fd,code,sizeof(code),0)==sizeof(code));
         unsigned char *p=mmap(NULL,page,PROT_READ|PROT_WRITE,MAP_PRIVATE,fd,0);
@@ -700,6 +708,22 @@ int main(int argc, char **argv) {
         assert(!mprotect(p,page,PROT_READ|PROT_WRITE)); emit(p,43);
         assert(!mprotect(p,page,PROT_READ|PROT_EXEC) && run()==43);
         assert(!munmap(p,page));
+        if (segment>=0) {
+            pid_t child=fork(); assert(child>=0);
+            if (!child) {
+                struct shmid64_ds st;
+                assert(!syscall(SYS_shmctl,segment,IPC_STAT,&st) && st.shm_nattch==2);
+                assert(*(unsigned char *)shared==71);
+                assert(!syscall(SYS_shmdt,shared)); _exit(0);
+            }
+            wait_child(child);
+            struct shmid64_ds st;
+            assert(!syscall(SYS_shmctl,segment,IPC_STAT,&st) && st.shm_nattch==1);
+            assert(!munmap(shared,page));
+            assert(!syscall(SYS_shmctl,segment,IPC_STAT,&st) && !st.shm_nattch);
+            assert(!syscall(SYS_shmctl,segment,IPC_RMID,NULL));
+            puts("PASS private-file JIT with SysV attachment, fork and native unmap");
+        }
         puts("PASS automatic private-file JIT: closed source FD, generated code, DONTNEED and repeated RX");
         return 0;
     }

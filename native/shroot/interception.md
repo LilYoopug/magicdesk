@@ -133,6 +133,12 @@ Kernel events without debugger accounting explicitly carry zero `rusage`.
 Deferred events retain their captured accounting across debugger attachment
 changes; replay neither queries it again nor inherits another event's values.
 
+Before changing mappings, memory repair yields if a stopped participant owns a
+pending broker temporary-FD retirement. It releases its writer barrier and worker
+pause request, retaining the original syscall-exit event. Task-affine cleanup can
+then finish; replay revalidates the mapping and resumes repair, without executing
+the guest syscall again. Once mapping mutation starts, this handoff is forbidden.
+
 The same address-space owner retains shared adapter buffers. Namespace
 bootstrap obtains a size-sealed memfd through ADDFD_SEND, maps it and closes the
 setup FD before entering the guest image. Setup occurs once per fresh exec, not

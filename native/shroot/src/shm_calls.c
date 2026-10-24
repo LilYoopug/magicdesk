@@ -5,34 +5,6 @@
 #include "raw.h"
 #include <errno.h>
 #include <limits.h>
-#include <sys/mman.h>
-#include <linux/filter.h>
-#include <linux/seccomp.h>
-
-static long observe_mappings(void) {
-    long r = RAW2(prctl,MD_GUEST_SHM_FILTER,0);
-    if (r) return r < 0 ? r : 0;
-    uintptr_t gate = (uintptr_t)md_raw_return;
-    struct sock_filter code[] = {
-        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
-        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(unsigned)(gate>>32),0,3),
-        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
-        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(unsigned)gate,0,1),
-        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
-        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
-        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_munmap,5,0),
-        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_mremap,4,0),
-        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_mmap,0,2),
-        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,args[3])),
-        BPF_JUMP(BPF_JMP|BPF_JSET|BPF_K,MAP_FIXED,1,0),
-        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
-        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_MEMORY)
-    };
-    struct sock_fprog program = {sizeof(code)/sizeof(*code),code};
-    r = RAW3(seccomp,SECCOMP_SET_MODE_FILTER,SECCOMP_FILTER_FLAG_TSYNC,&program);
-    if (r > 0) return -ENOTSUP;
-    return r ? r : RAW2(prctl,MD_GUEST_SHM_FILTER,1);
-}
 
 static long request(unsigned op, unsigned long a, unsigned long b, unsigned long c) {
     return RAW5(prctl,MD_GUEST_SHM,op,a,b,c);
@@ -45,8 +17,6 @@ long md_shm_dispatch(long nr, const unsigned long *a) {
         if (flags & ~(SHM_RDONLY|SHM_RND|SHM_EXEC)) return -ENOTSUP;
         if (flags & SHM_RND) address &= ~(md_page_size-1);
         if (address & (md_page_size-1)) return -EINVAL;
-        long activated = observe_mappings();
-        if (activated < 0) return activated;
         long memory=md_adapter_buffer_take();
         if (memory<0) return memory;
         long mapped=md_guest_task_control();

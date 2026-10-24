@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +47,7 @@ static void *thread_ids(void *unused) {
     CHECK(syscall(SYS_getuid)==0);
     CHECK(!syscall(SYS_setresuid,1000,1000,0));
     CHECK(syscall(SYS_getuid)==1000 && syscall(SYS_geteuid)==1000);
+    CHECK(!syscall(SYS_tgkill,getpid(),getpid(),0));
     return NULL;
 }
 static void *libc_ids(void *context) {
@@ -78,7 +80,54 @@ static void libc_broadcast(void) {
     }
     child_done(child);
 }
+static void signal_credentials(void) {
+    pid_t parent=getpid(),outside=getppid();
+    errno=0; CHECK(kill(outside,0)==-1 && errno==ESRCH);
+    int outside_fd=syscall(SYS_pidfd_open,outside,0); CHECK(outside_fd>=0);
+    errno=0; CHECK(syscall(SYS_pidfd_send_signal,outside_fd,0,NULL,0)==-1 && errno==ESRCH);
+    CHECK(!close(outside_fd));
+    errno=0; CHECK(kill(-1,0)==-1 && errno==ESRCH);
+    int ready[2]; CHECK(!pipe(ready));
+    pid_t victim=fork(); CHECK(victim>=0);
+    if (!victim) {
+        CHECK(!close(ready[0]) && !setuid(30001));
+        CHECK(write(ready[1],"r",1)==1);
+        /* EVENT_WAIT: the same-UID cleanup child kills this fixture process. */
+        for (;;) pause();
+    }
+    CHECK(!close(ready[1])); char byte;
+    /* EVENT_WAIT: victim has adopted its guest build-user identity. */
+    CHECK(read(ready[0],&byte,1)==1 && !close(ready[0]));
+    pid_t cleaner=fork(); CHECK(cleaner>=0);
+    if (!cleaner) {
+        int fd=syscall(SYS_pidfd_open,parent,0); CHECK(fd>=0);
+        CHECK(!setuid(30001));
+        /* These harmless probes must fail first even on an unfixed runtime;
+         * never attempt the broadcast SIGKILL with native UID authority. */
+        errno=0; CHECK(kill(parent,0)==-1 && errno==EPERM);
+        errno=0; CHECK(syscall(SYS_tkill,parent,0)==-1 && errno==EPERM);
+        errno=0; CHECK(syscall(SYS_tgkill,parent,parent,0)==-1 && errno==EPERM);
+        siginfo_t info={.si_code=SI_QUEUE};
+        errno=0; CHECK(syscall(SYS_rt_sigqueueinfo,parent,0,&info)==-1 && errno==EPERM);
+        errno=0; CHECK(syscall(SYS_rt_tgsigqueueinfo,parent,parent,0,&info)==-1 && errno==EPERM);
+        errno=0; CHECK(syscall(SYS_pidfd_send_signal,fd,0,NULL,0)==-1 && errno==EPERM);
+        CHECK(!close(fd) && !kill(victim,0) && !kill(-1,0));
+        CHECK(!kill(-1,SIGKILL));
+        _exit(0);
+    }
+    child_done(cleaner);
+    int status;
+    /* EVENT_WAIT: only the selected build user's process has been killed. */
+    CHECK(waitpid(victim,&status,0)==victim && WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL);
+    puts("PASS signal credentials and broadcast cleanup without a PID namespace");
+}
 int main(int argc, char **argv) {
+    if (argc==2 && !strcmp(argv[1],"signals")) {
+        signal_credentials(); groups();
+        pthread_t thread; CHECK(!pthread_create(&thread,NULL,thread_ids,NULL));
+        CHECK(!pthread_join(thread,NULL)); CHECK(getuid()==0 && geteuid()==0);
+        libc_broadcast(); return 0;
+    }
     if (argc==2 && !strcmp(argv[1],"exec")) {
         CHECK(getuid()==1000 && geteuid()==1000 && getgid()==1234 && getegid()==1234);
         CHECK(getauxval(AT_UID)==1000 && getauxval(AT_EUID)==1000);
@@ -88,6 +137,7 @@ int main(int argc, char **argv) {
         puts("PASS exec identity and no-new-privs"); return 0;
     }
     CHECK(getuid()==0 && geteuid()==0 && getauxval(AT_UID)==0);
+    signal_credentials();
     groups();
     pid_t child=fork(); CHECK(child>=0);
     if (!child) { CHECK(!prctl(PR_SET_DUMPABLE,0)); groups(); _exit(0); }

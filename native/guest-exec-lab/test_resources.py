@@ -623,6 +623,13 @@ def main():
                   + root + "/store --deadline-seconds 60 -- /bin/test --automatic",
                   "PASS automatic private-file JIT",
                   patterns=(r"PROBE memory-repair pid=\d+ address=0x[0-9a-f]+ size=4096 pages=1 result=0",))
+            for entry in (0, 1):
+                check(f"private-file JIT with SysV memory entry={entry}",
+                      root + "/libmagicdesk_guest_run.so --diagnostics --user 1000:1000 --store "
+                      + root + "/store --env SHROOT_MACHINE_ENTRY=" + str(entry)
+                      + " --deadline-seconds 60 -- /bin/test --automatic-shm",
+                      "PASS private-file JIT with SysV attachment, fork and native unmap",
+                      patterns=(r"PROBE memory-repair .* result=0",))
             check("automatic concurrent private-file JIT", root + "/libmagicdesk_guest_run.so --diagnostics --user 1000:1000 --store "
                   + root + "/store --deadline-seconds 60 -- /bin/test --automatic-threads",
                   "PASS automatic concurrent private-file JIT: protected=1")

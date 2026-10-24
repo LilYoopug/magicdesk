@@ -469,7 +469,6 @@ struct thread {
     enum memory_action memory_action;
     struct md_fd_order memory_files;
     struct md_mapping_change memory_change;
-    int shm_filter;
     int pid_filter, pid_preflight, filter_preflight, debug_replay_entry;
     struct md_pid_identity *pid_reservation;
     struct md_process_member *process_reservation;
@@ -6011,7 +6010,7 @@ static pid_t native_pid(struct thread *t,pid_t visible) {
     md_pid_identity_release(id); return number;
 }
 static int signal_identity_allowed(const struct thread *from,const struct md_identity *identity,pid_t group,int signal) {
-    return from->identity.uid.real==identity->uid.real
+    return from->tgid==group || from->identity.uid.real==identity->uid.real
         || from->identity.uid.real==identity->uid.saved
         || from->identity.uid.effective==identity->uid.real
         || from->identity.uid.effective==identity->uid.saved
@@ -6081,7 +6080,7 @@ static void pidfd_result(struct thread *t,struct md_pid_identity *identity,pid_t
     struct thread *target=native>0 ? find_thread(native) : NULL;
     if (!error && (native<0 || (identity && (!target || target->resources.pid_group!=identity)))) error=-ESRCH;
     if (!error && target && !target->born) error=-ESRCH;
-    if (!error && !target) error=namespace ? MD_CALL_NATIVE : 0;
+    if (!error && !target) error=namespace ? MD_CALL_NATIVE : -ESRCH;
     else if (!error && namespace) {
         unsigned command=(unsigned)t->original.regs[1];
         if (t->original.regs[2]) error=-EINVAL;
@@ -6169,14 +6168,20 @@ static long signal_process_next(struct thread *from,pid_t selector,int signal,pi
         : selection.found ? -EPERM : after ? 0 : -ESRCH;
 }
 static int process_call(struct thread *t,struct user_pt_regs *r,unsigned long *cookie) {
+    long nr=r->regs[8];
+    int signaling=nr==SYS_kill || nr==SYS_tkill || nr==SYS_tgkill
+        || nr==SYS_rt_sigqueueinfo || nr==SYS_rt_tgsigqueueinfo || nr==SYS_pidfd_send_signal;
     /* A later FD selector can replace the PID selector's cookie, including
      * after close/reuse. Terminal IDs still belong to the caller's PID view. */
     int terminal=t->resources.pid && t->phase==IDLE && r->pc!=RAW_GATE
         && r->regs[8]==SYS_ioctl && md_terminal_identity_command((unsigned)r->regs[1]);
-    if (*cookie!=MD_INTERCEPT_PROCESS && !terminal) return 0;
+    /* Guest credentials never authorize signals against Android's executor
+     * UID. The baseline already observes these calls; PID views only add ID
+     * translation. Internal delivery uses its validated, positive native PID. */
+    if (*cookie!=MD_INTERCEPT_PROCESS && !terminal
+            && !(signaling && t->phase==IDLE && r->pc!=RAW_GATE)) return 0;
     *cookie=MD_INTERCEPT_NATIVE;
     if (t->phase!=IDLE) return 0;
-    long nr=r->regs[8];
     if (nr==SYS_pidfd_open) {
         struct user_pt_regs native=*r;
         native.regs[0]=native_pid(t,(pid_t)r->regs[0]);
@@ -6190,7 +6195,7 @@ static int process_call(struct thread *t,struct user_pt_regs *r,unsigned long *c
                 && shield(t) && skip(t->pid)) dispatch_with_stack(t);
         return 1;
     }
-    if (!t->resources.pid) return 0;
+    if (!t->resources.pid && !signaling) return 0;
     if (nr==SYS_futex) {
         /* The PID selector intercepts only PI operations. Passing a logical
          * owner TID to the native PI state can deadlock even after unlock.
@@ -6265,15 +6270,16 @@ static int process_call(struct thread *t,struct user_pt_regs *r,unsigned long *c
             pid_t mapped=native_pid(t,target);
             if (!mapped) { return_value(t,r,nr==SYS_wait4 ? -ECHILD : -ESRCH); return 1; }
             native.regs[index]=mapped;
-            if (nr==SYS_kill || nr==SYS_tkill || nr==SYS_tgkill
-                    || nr==SYS_rt_sigqueueinfo || nr==SYS_rt_tgsigqueueinfo) {
+            if (signaling) {
                 struct thread *to=find_thread(mapped);
                 int signal=(int)r->regs[index+1];
                 if (signal<0 || signal>=NSIG) { return_value(t,r,-EINVAL); return 1; }
+                if (to && !to->born) { return_value(t,r,-ESRCH); return 1; }
                 if (to && !signal_allowed(t,to,signal)) { return_value(t,r,-EPERM); return 1; }
                 if (!to) {
                     struct md_task_retired_view retired=md_task_registry_retired(tasks,mapped);
-                    if (retired.identity && !signal_identity_allowed(t,retired.identity,mapped,signal)) {
+                    if (!retired.identity) { return_value(t,r,-ESRCH); return 1; }
+                    if (!signal_identity_allowed(t,retired.identity,mapped,signal)) {
                         return_value(t,r,-EPERM); return 1;
                     }
                 }
@@ -7964,6 +7970,8 @@ struct memory_execution {
     enum memory_stage stage;
     int64_t deadline, timing[7];
     struct user_pt_regs returned;
+    int status;
+    struct rusage usage;
     struct md_private_memory mapping;
     struct md_private_memory_plan plan;
     struct md_private_memory_scan *scan;
@@ -7986,8 +7994,8 @@ static int64_t memory_deadline(void) {
 static void memory_discard(void) {
     struct memory_execution *execution=memory_execution;
     if (!execution) return;
-    /* Called only after all tracees and helpers have been reaped. No uncertain
-     * replacement is resumed during cancellation or supervisor failure. */
+    /* No helper or replacement may still be executing: either teardown reaped
+     * the tree, or an unmodified repair yielded before MEMORY_MAP. */
     md_buffer_release(&execution->buffer);
     md_private_memory_scan_end(execution->scan);
     if (execution->pause.owner) md_fs_worker_pause_end(&execution->pause);
@@ -8073,13 +8081,36 @@ static void memory_finish(struct memory_execution *execution) {
     CHECK(!md_resource_order_complete(&t->memory_order)); t->memory_action=0;
     t->phase=IDLE; resume(t->pid,0);
 }
+static int memory_yield_retirement(struct memory_execution *execution) {
+    if (execution->stage>MEMORY_WORKER) return 0;
+    struct task_action *retirement=loan_retirements;
+    while (retirement && (!retirement->retirement.complete
+            || !md_task_quiesce_contains(memory_barrier,retirement->retirement.task)))
+        retirement=retirement->next;
+    if (!retirement) return 0;
+    /* A losing native birth must close its provisional FD before the broker
+     * releases the caller's stop. Do not wait for that close behind our own
+     * barrier. The original mprotect exit is replayed, not the syscall; its
+     * mapping is validated afresh after the existing task-action owner drains. */
+    struct thread *actor=execution->actor;
+    TRACE("PROBE memory-repair-defer pid=%d retirement=%d\n",actor->pid,retirement->retirement.task);
+    CHECK(!md_task_quiesce_event(memory_barrier,actor->pid,execution->status,&execution->usage));
+    if (execution->pause.owner) CHECK(!md_fs_worker_pause_end(&execution->pause));
+    CHECK(!md_task_quiesce_release(memory_barrier));
+    memory_discard();
+    if (filesystem) memory_completions_pending=1;
+    task_action_unpark();
+    return 1;
+}
 static void memory_progress(void) {
     struct memory_execution *execution=memory_execution;
     if (!execution) return;
     if (cancelling) exit(result);
+    if (memory_yield_retirement(execution)) return;
     if (md_event_now()>=execution->deadline) {
         fprintf(stderr,"Shroot: memory repair expired pid=%d stage=%d\n",execution->actor->pid,execution->stage);
         md_task_quiesce_describe(memory_barrier,STDERR_FILENO);
+        md_broker_describe(broker,STDERR_FILENO);
         errno=ETIMEDOUT; CHECK(0);
     }
     struct thread *t=execution->actor;
@@ -8246,7 +8277,7 @@ static int memory_event(pid_t pid,int status,const struct rusage *usage) {
     CHECK(!md_task_quiesce_event(memory_barrier,pid,status,usage));
     return 1;
 }
-static int memory_repair(struct thread *t,const struct user_pt_regs *returned) {
+static int memory_repair(struct thread *t,const struct user_pt_regs *returned,int status,const struct rusage *usage) {
     const struct md_private_memory_access *access=md_memory_private_access(t->memory);
     if (!access) return 0;
     struct md_private_memory mapping={.address=t->original.regs[0],.length=t->original.regs[1],
@@ -8263,6 +8294,7 @@ static int memory_repair(struct thread *t,const struct user_pt_regs *returned) {
     if (!memory_barrier) { memory_barrier=md_task_quiesce_new(quiesce_trace); CHECK(memory_barrier); }
     if (statistics) ++statistics->memory_repairs;
     execution->actor=t; execution->returned=*returned; execution->mapping=mapping;
+    execution->status=status; execution->usage=*usage;
     execution->global=md_memory_exposed(t->memory);
     execution->timing[0]=md_event_now();
     /* EVENT_WAIT: writer, worker and helper acknowledgements share one failure
@@ -8758,7 +8790,6 @@ int main(int argc, char **argv) {
             c->debug_call_active=0;
             c->debug_options=t->debug_options;
             c->terminal_observation=t->terminal_observation;
-            c->shm_filter = t->shm_filter;
             c->pid_filter=t->pid_filter;
             c->application_filter=t->application_filter;
             c->cooperative_blocked=t->cooperative_blocked;
@@ -8898,13 +8929,6 @@ int main(int argc, char **argv) {
                 if (regs.regs[8] < 512) statistics->calls[regs.regs[8]].trace++;
                 else statistics->unknown++;
             }
-            if (regs.regs[8] == SYS_prctl && regs.regs[0] == MD_GUEST_SHM_FILTER
-                    && regs.pc == RAW_GATE && t->phase == DISPATCHING) {
-                long value = regs.regs[1] == 0 ? t->shm_filter : regs.regs[1] == 1 ? 0 : -EINVAL;
-                if (regs.regs[1] == 1) for (struct thread *member = threads; member; member = member->next)
-                    if (member->pid && member->tgid == t->tgid) member->shm_filter = 1;
-                return_value(t,&regs,value); continue;
-            }
             if (regs.regs[8]==SYS_prctl && regs.regs[0]==MD_GUEST_PID_FILTER
                     && regs.pc==RAW_GATE && t->phase==DISPATCHING) {
                 long value=regs.regs[1]==1 ? 0 : -EINVAL;
@@ -8928,7 +8952,7 @@ int main(int argc, char **argv) {
             if (domain_call(t, &regs, cookie)) continue;
             if (cookie==MD_INTERCEPT_FD || cookie==MD_INTERCEPT_CWD || cookie==MD_INTERCEPT_CAPTURE) {
                 if (cookie==MD_INTERCEPT_FD && md_clone_call(regs.regs[8])
-                        && (t->shm_filter || md_memory_has_policy(t->memory))
+                        && (md_shm_space_used(t->shm_space) || md_memory_has_policy(t->memory))
                         && !(t->cloning&CLONE_VM)) {
                     memory_begin(t,&regs,MEMORY_FORK); continue;
                 }
@@ -9362,7 +9386,7 @@ int main(int argc, char **argv) {
                     if (memory_capture_begin(t,&regs)) continue;
                     if (t->original.regs[8]==SYS_mprotect) {
                         if ((long)regs.regs[0]==-EACCES) {
-                            if (memory_repair(t,&regs)) continue;
+                            if (memory_repair(t,&regs,status,&usage)) continue;
                         }
                     } else md_memory_mapping_finish(t->memory,&t->memory_change,(long)regs.regs[0]);
                     if (t->memory_files.table) CHECK(!md_fd_order_complete(&t->memory_files));

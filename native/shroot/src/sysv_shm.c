@@ -26,7 +26,7 @@ struct md_shm_mapping {
     uintptr_t base;
     size_t size;
 };
-struct md_shm_space { unsigned references; uint64_t id; struct md_shm_mapping *maps; };
+struct md_shm_space { unsigned references; int used; uint64_t id; struct md_shm_mapping *maps; };
 static uint64_t spaces;
 static int sql(int rc) { return md_ipc_database_sql(rc); }
 static int exec_sql(struct md_shm *s, const char *text) { return md_ipc_database_exec(&s->database,text); }
@@ -198,6 +198,7 @@ struct md_shm_space *md_shm_space_new(void) {
 struct md_shm_space *md_shm_space_fork(struct md_shm_space *old, int shared) {
     if (shared) { ++old->references; return old; }
     struct md_shm_space *m = md_shm_space_new();
+    if (m) m->used=old->used;
     if (!m || !old->maps) return m;
     int r = 0;
     struct md_shm_mapping *pending=NULL;
@@ -229,6 +230,7 @@ struct md_shm_space *md_shm_space_fork(struct md_shm_space *old, int shared) {
     }
     return m;
 }
+int md_shm_space_used(const struct md_shm_space *m) { return m && m->used; }
 int md_shm_space_release(struct md_shm_space *m) {
     if (!m || --m->references) return 0;
     int r = 0;
@@ -412,6 +414,7 @@ long md_shm_call(struct md_shm *s, struct md_shm_space *m, struct md_shm_mapping
     } else {
         r = load_live(s,segment,&st);
         if (!r && op == MD_SHM_OPEN) {
+            m->used=1;
             if (*pending) r = -EBUSY;
             if (!r) r = permission(s,id,&st,(a[1]&SHM_RDONLY)?4:6);
             if (!r && (a[1]&SHM_EXEC)) r = permission(s,id,&st,1);

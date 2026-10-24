@@ -539,12 +539,12 @@ int main(int argc, char **argv) {
         assert(!ctl(id,0,SETVAL,1)); struct sembuf op={0,-1,SEM_UNDO}; assert(!semop(id,&op,1));
         printf("SYSV-OWNER %d\n",getppid()); for (;;) pause();
     } else if (!strcmp(argv[1],"peer")) {
-        assert(argc==4); int id=semget(atoi(argv[2]),1,0); assert(id>=0);
+        assert(argc==3); int id=semget(atoi(argv[2]),1,0); assert(id>=0);
         struct sigaction action={.sa_handler=caught}; assert(!sigaction(SIGCHLD,&action,NULL));
         pid_t helper=fork(); assert(helper>=0);
-        if (!helper) { wait_registered(id); assert(!kill(atoi(argv[3]),SIGKILL)); _exit(0); }
+        if (!helper) { wait_registered(id); puts("SYSV-PEER-WAITING"); _exit(0); }
         puts("SYSV-PEER"); struct sembuf op={0,-1,0};
-        // The killer's SIGCHLD may interrupt this wait. Only acquisition, not
+        // The observer's SIGCHLD may interrupt this wait. Only acquisition, not
         // that signal or the outer timeout, proves crash-time undo succeeded.
         int result; do { result=semop(id,&op,1); } while (result && errno==EINTR);
         assert(!result);

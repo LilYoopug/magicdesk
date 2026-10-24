@@ -47,8 +47,16 @@ def main():
                     try:
                         owner.ready('SYSV-OWNER ', timeout=10)
                         supervisor = int(next(line.split()[1] for line in owner.log if line.startswith('SYSV-OWNER ')))
-                        output = suite.command(command(fixture, 'peer', key, str(supervisor)), timeout=25)
-                        assert 'PASS peer' in output
+                        peer = Server(suite, command(fixture, 'peer', key))
+                        try:
+                            peer.ready('SYSV-PEER-WAITING', timeout=10)
+                            # The host fixture owns this supervisor. A guest
+                            # cannot signal another launch or its supervisor.
+                            suite.command(['kill', '-KILL', str(supervisor)])
+                            peer.ready('PASS peer', timeout=10)
+                            peer.completed()
+                        finally:
+                            peer.close()
                         owner.completed(expected=125)
                     finally:
                         owner.close()

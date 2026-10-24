@@ -154,6 +154,8 @@ void md_broker_describe(struct md_namespace_broker *b,int fd) {
         if (shown++>=16) continue;
         dprintf(fd,"Shroot: broker pid=%d eligible=%d stopped=%d held=%d borrowed=%d operation=%d recovering=%d\n",
             t->pid,t->eligible,t->stopped,t->held,t->borrowed,t->operation!=NULL,t->recovering);
+        if (t->operation) dprintf(fd,"Shroot: broker operation pid=%d nativePlan=%d\n",
+            t->pid,t->operation->native_plan);
         struct md_entry_channel *c=t->channel;
         if (c) dprintf(fd,"Shroot: channel pid=%d state=%u enabled=%u caller=%u awake=%u sleeping=%u native=%u\n",
             t->pid,atomic_load(&c->state),atomic_load(&c->enabled),atomic_load(&c->caller),

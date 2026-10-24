@@ -339,6 +339,35 @@ static void repair_events(void) {
     thread_index[caller.pid%THREAD_BUCKETS]=NULL;
     puts("PASS supervisor repair deferral: every owner, nested mapping, exact replay and unrelated progress");
 }
+static void unused_retirement(void *context,int error) { (void)context; (void)error; assert(0); }
+static void repair_retirement(void) {
+    int previous=fd_ready;
+    fd_ready=eventfd(0,EFD_NONBLOCK|EFD_CLOEXEC); assert(fd_ready>=0);
+    for (unsigned stage=MEMORY_WRITERS;stage<=MEMORY_WORKER;++stage) {
+        struct thread actor={.pid=123,.phase=OBSERVING,.memory_action=MEMORY_KERNEL};
+        struct task_action retirement={.retirement={.task=456,.complete=unused_retirement}};
+        struct memory_execution *memory=calloc(1,sizeof(*memory)); assert(memory);
+        *memory=(struct memory_execution){.actor=&actor,.stage=stage,
+            .status=(SIGTRAP|0x80)<<8|0x7f,.usage={.ru_stime.tv_usec=789}};
+        memory_execution=memory; loan_retirements=&retirement;
+        memory_barrier=md_task_quiesce_new(no_trace); assert(memory_barrier);
+        assert(!md_task_quiesce_add(memory_barrier,actor.pid,1,0));
+        assert(!memory_yield_retirement(memory)); /* An unrelated cleanup cannot cancel this repair. */
+        assert(!md_task_quiesce_add(memory_barrier,456,stage==MEMORY_WORKER,0));
+        memory->stage=MEMORY_VALIDATE; assert(!memory_yield_retirement(memory));
+        memory->stage=stage;
+        assert(memory_yield_retirement(memory) && !memory_execution);
+        assert(loan_retirements==&retirement && actor.phase==OBSERVING && actor.memory_action==MEMORY_KERNEL);
+        assert(!quiescence_busy(NULL));
+        int status=0; struct rusage usage={0};
+        assert(md_task_quiesce_take(memory_barrier,&status,&usage)==actor.pid);
+        assert(status==((SIGTRAP|0x80)<<8|0x7f) && usage.ru_stime.tv_usec==789);
+        assert(!md_task_quiesce_take(memory_barrier,&status,&usage));
+        md_task_quiesce_destroy(memory_barrier); memory_barrier=NULL; loan_retirements=NULL;
+    }
+    close(fd_ready); fd_ready=previous;
+    puts("PASS memory repair yields unmodified mapping to exact FD retirement, retains exit/accounting and never replays mprotect");
+}
 static void event_accounting(void) {
     struct rusage usage,zero={0}; int status;
     for (unsigned round=0;round<3;++round) {
@@ -490,7 +519,7 @@ static void provider_wait_boundaries(void) {
 }
 int main(void) {
     alarm(30);
-    barrier_admission(); readiness_admission_order(); entry_fence_ownership(); control_deadlines(); terminal_buffer_completion(); buffered_io_pressure(); captured_writes(); repair_events(); event_accounting();
+    barrier_admission(); readiness_admission_order(); entry_fence_ownership(); control_deadlines(); terminal_buffer_completion(); buffered_io_pressure(); captured_writes(); repair_events(); repair_retirement(); event_accounting();
     for (unsigned mode=0;mode<4;++mode) {
         completed_open(mode,SIGUSR1); completed_open(mode,SIGRTMAX);
     }
