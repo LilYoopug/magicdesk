@@ -387,8 +387,8 @@ final class SettingsView {
                 ConsolePreferences.fontSizeSp(mActivity)));
         for (final IntegrationPackage integration : IntegrationPackage.values()) {
             final String saved = integration.configured(mActivity);
-            mIntegrationPackages.get(integration).setText(saved.equals(integration.selected()) ? saved
-                    : mActivity.getString(R.string.settings_integration_restart_pending, saved));
+            mIntegrationPackages.get(integration).setText(integration.restartRequired(mActivity)
+                    ? mActivity.getString(R.string.settings_integration_restart_pending, saved) : saved);
         }
         mDesktopSettingsAvailable = settings != null
                 && RuntimeCapabilities.allowsDesktop(android.os.Build.VERSION.SDK_INT);

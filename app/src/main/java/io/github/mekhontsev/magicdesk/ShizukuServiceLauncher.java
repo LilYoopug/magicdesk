@@ -119,14 +119,17 @@ final class ShizukuServiceLauncher implements ShellServiceLauncher {
     }
 
     @Override public void openManager(Context context) {
-        final Intent intent = context.getPackageManager().getLaunchIntentForPackage(IntegrationPackage.SHIZUKU.selected());
+        final String selected = IntegrationPackage.SHIZUKU.selected();
+        final Intent intent = context.getPackageManager().getLaunchIntentForPackage(selected);
         if (intent != null) {
             context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-        } else if (IntegrationPackage.SHIZUKU.defaultPackage.equals(IntegrationPackage.SHIZUKU.selected())) {
+        } else if ("moe.shizuku.privileged.api".equals(selected)) {
             context.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://shizuku.rikka.app/download/")));
+        } else if ("com.hamondev.shevery".equals(selected)) {
+            context.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/HmnDev-Tech/shevery/releases/latest")));
         } else {
             android.widget.Toast.makeText(context, context.getString(R.string.settings_integration_missing_manager,
-                    IntegrationPackage.SHIZUKU.selected()), android.widget.Toast.LENGTH_LONG).show();
+                    selected), android.widget.Toast.LENGTH_LONG).show();
         }
     }
 }

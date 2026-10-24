@@ -483,7 +483,7 @@ public final class SettingsActivity extends Activity
                 .create();
         dialog.setOnShowListener(ignored -> {
             dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(view ->
-                    input.setText(integration.defaultPackage));
+                    input.setText(integration.defaultPackages));
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
                 try {
                     if (!integration.save(this, input.getText().toString())) {
@@ -494,7 +494,7 @@ public final class SettingsActivity extends Activity
                     input.setError(getString(R.string.settings_integration_package_invalid));
                     return;
                 }
-                // These preferences do not reconcile the running shell or terminal services.
+                // The next process resolves the package list; running services retain their recipient.
                 render();
                 dialog.dismiss();
             });

@@ -38,7 +38,7 @@ final class DesktopAutomationStateReader {
             final String configured = integration.configured(mContext);
             result.put(integration.key, new JSONObject().put("active", integration.selected())
                     .put("configured", configured)
-                    .put("restartRequired", !configured.equals(integration.selected())));
+                    .put("restartRequired", integration.restartRequired(mContext)));
         }
         return result;
     }

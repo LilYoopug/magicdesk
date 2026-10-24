@@ -122,7 +122,7 @@ final class IntegrationStatusDialogs {
     static void appendPackage(Activity activity, StringBuilder message, IntegrationPackage integration) {
         message.append('\n').append(activity.getString(R.string.control_integration_package, integration.selected()));
         final String configured = integration.configured(activity);
-        if (!configured.equals(integration.selected())) message.append('\n').append(activity.getString(
+        if (integration.restartRequired(activity)) message.append('\n').append(activity.getString(
                 R.string.settings_integration_restart_pending, configured));
     }
 
