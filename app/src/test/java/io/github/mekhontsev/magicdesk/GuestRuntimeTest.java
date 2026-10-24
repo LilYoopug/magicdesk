@@ -211,4 +211,25 @@ public class GuestRuntimeTest {
             assertEquals(expected, List.of(arguments));
         }
     }
+
+    @Test public void graphicalFilePreparationLoadsGuestLoginEnvironment() throws Exception {
+        assumeFalse(System.getProperty("os.name").startsWith("Windows"));
+        Path tools = temporary.newFolder().toPath();
+        Path stub = Files.writeString(tools.resolve("shroot"), "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
+        assertTrue(stub.toFile().setExecutable(true));
+        var plan = GuestGraphicalConnection.plan(new GuestEnvironment("/store", "/root", ""),
+                "/root", "application", GraphicalProtocol.WAYLAND);
+        var builder = new ProcessBuilder("sh", "-c",
+                GuestGraphicalConnection.invocation(plan, GraphicalProtocol.WAYLAND, true));
+        builder.environment().put("PATH", tools + ":" + System.getenv("PATH"));
+        builder.environment().put("MAGICDESK_GRAPHICS_ENDPOINT", "endpoint");
+        builder.environment().put("MAGICDESK_GUEST_LIBRARIES", "/host/helpers");
+        builder.environment().put("MAGICDESK_GUEST_FILES_SOCKET", "files-socket");
+        builder.environment().put("MAGICDESK_GUEST_FILES_TOKEN", "files-token");
+        var process = builder.start();
+        String output = new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        assertEquals(0, process.waitFor());
+        assertTrue(output.contains("--\n/bin/sh\n-lc\nmkdir -p /tmp/magicdesk-helpers\n"));
+        assertTrue(output.contains("--bind-ro\n/host/helpers\n/tmp/magicdesk-helpers\n"));
+    }
 }

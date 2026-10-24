@@ -71,7 +71,7 @@ not just a completed Mesa build or successful device enumeration.
 | manjaro | P/N | N/N | P/N | P/N | N/N |
 | void | P/N | N/N | P/N | P/N | I/N |
 | armtix | P/N | P/N | P/N | P/N | N/N |
-| nixos | I/N | I/N | N/N | N/N | N/N |
+| nixos | P/N | I/N | P/N | P/N | P/N |
 | steamos | P/N | I/N | F/N | I/N | I/N |
 
 Package lifecycle means install, update/reinstall, verification and removal,
@@ -105,7 +105,7 @@ All runs use default lazy entry; Base remains untested in this batch.
 | manjaro | P / P / P | `f7be656fa9da4364915e575d3af7b30f` | `28c08a0520b148459d0052b90d569b69` |
 | void | P / N / NA (runit) | `c9d13ce4051c47eb8157aecc1a0f29b2` | `d7281d10f2024a239cd902720e544e31` |
 | armtix | P / N / NA (runit) | `30d38d4aec124fc1835aa5e5995d0365` (*) | `2473bd1c2149472daa21744e1cbdca78` |
-| nixos | N / N / N | Recipe generation not yet booted; initial-image probes below | N |
+| nixos | P / N / N | Recipe generation: `dc870a2ce87042b7b8a9b04be968c8da` under `build/nixos-boot-final-20261024/` | N |
 | steamos | F / N / N | `fa6234c4dadc46878677e15ed535fb97` | `0aebd5e239ad43f6b1f1a62cbf5e8249` |
 
 Fedora and openSUSE required their separately packaged networkd, installed in
@@ -140,9 +140,29 @@ The recipe prepares private API mounts for activation and builders together.
 The current installer uses command-local `sandbox=false` and
 `filter-syscalls=false` for its trusted Nix build, without changing the installed
 Nix sandbox policy. Its job default is four cores and one concurrent derivation.
-GUI/Turnip completion, recipe-generation boot and full package lifecycle remain
-unverified, so the recipe and package cells are incomplete. The boot results
-below belong to the initial image, not the pending Plasma generation.
+The Plasma/Turnip recipe completed on 2026-10-24, including stock activation of
+`/nix/store/g83p188wxrar0nj3c9bsvhp3g3siv70l-nixos-system-nixos-lxc-26.05.12530.c1ff116587e6`.
+The installer log is `/data/local/tmp/md-nixos-resume-fast-20261024.log` on the
+device. The installed configuration retains `sandbox = true`, four cores and
+one concurrent derivation.
+
+This generation's default-target boot, journal/D-Bus/logind IO and restart,
+and shutdown pass with the preconfigured recipe network and current native
+build: `build/nixos-boot-final-20261024/oci-services-dc870a2ce87042b7b8a9b04be968c8da.json`.
+Systemd 260.5 reports `running`, zero failed units and no failed shutdown unmounts.
+This boot uses the native helpers built for the installed APK, staged by the
+fixture; it does not certify the untested full package lifecycle or `switch`.
+
+Both Plasma catalog entries launch on HDMI through the installed APK
+`3a597e4898f89cf8cfb535754b45adfa2040455896d097dba3a2bb2d5a7b3a4d`.
+The launcher smoke receipt is `build/installer-graphics-nixos-recipe.json`;
+its early splash captures alone are not desktop-readiness evidence. Follow-up
+`build/nixos-final-x11.json` and `build/nixos-final-wayland.json`, with matching
+PNGs, record the loaded panel and desktop and KWin 6.6.6 OpenGL composition
+through Zink/Turnip on Adreno 840, Mesa 26.2.3. Konsole opens through Ctrl+Alt+T;
+X11 keyboard input executes `pwd`. Close/reopen retires the owned guest launches.
+The broader desktop, audio and application acceptance remains incomplete.
+The separate boot results below belong to the initial image.
 
 | Scenario | Shroot / Base | Evidence |
 | --- | --- | --- |
@@ -169,10 +189,11 @@ wildcard UDP port 68 also requests an Android listener, subject to host
 privileged-port policy; private
 guest networking does not require that publication. Guest-owned resolvconf and
 a launch-owned read-only DNS mount must not manage the same file.
-Full `nixos-rebuild switch`, desktop/graphics, containers and boot of the recipe
-generation remain unverified. Initial-image boot retains warnings for unavailable
-BPF/cgroup firewalling and missing `accept_source_route`/`promote_secondaries`
-default sysctls.
+Full `nixos-rebuild switch`, package lifecycle, containers and the wider desktop
+matrix remain unverified. Initial-image boot retains warnings for unavailable
+BPF/cgroup firewalling. The recipe-generation boot also reports missing
+`accept_source_route`/`promote_secondaries` default sysctls and duplicate packaged
+D-Bus service names; these do not fail a unit in this run.
 Logical ramfs is disk-backed compatibility, not memory-only/non-swappable
 storage; `/run/keys` therefore has no such secret-storage guarantee.
 
@@ -297,7 +318,7 @@ Gamepads need real buttons, axes and reconnect. Steam login is not gameplay.
 | manjaro | N/N | N/N | N/N | N/N | N/N | N/N | N/N |
 | void | I/N | N/N | N/N | P/N | N/N | N/N | N/N |
 | armtix | I/N | N/N | N/N | P/N | N/N | N/N | N/N |
-| nixos | N/N | N/N | N/N | N/N | N/N | N/N | N/N |
+| nixos | I/N | N/N | N/N | N/N | N/N | N/N | N/N |
 | steamos | I/N | N/N | N/N | H/N | H/N | H/N | F/N |
 
 Preserve separate application/package versions in the receipt.

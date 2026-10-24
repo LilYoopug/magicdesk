@@ -118,6 +118,10 @@ touch /dev/console
 mount --bind "/run/md-host-dev/${console#/dev/}" /dev/console
 mount -t devpts -o newinstance,ptmxmode=0666,mode=0620 devpts /dev/pts
 ln -s pts/ptmx /dev/ptmx
+ln -s /proc/self/fd /dev/fd
+ln -s /proc/self/fd/0 /dev/stdin
+ln -s /proc/self/fd/1 /dev/stdout
+ln -s /proc/self/fd/2 /dev/stderr
 umount -l /run/md-host-dev
 rmdir /run/md-host-dev
 '''

@@ -63,6 +63,8 @@ md_session_exit() {
         printf 'MagicDesk: runtime cleanup failed: %s\n' "$XDG_RUNTIME_DIR" >&2
         [ "$md_status" -ne 0 ] || md_status=1
     fi
+    # Login-shell logout hooks belong to the distribution, not our strict script.
+    set +eu
     exit "$md_status"
 }
 trap md_session_exit EXIT

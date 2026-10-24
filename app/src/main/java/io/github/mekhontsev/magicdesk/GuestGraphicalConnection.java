@@ -22,7 +22,7 @@ final class GuestGraphicalConnection {
         String source = protocol == GraphicalProtocol.WAYLAND ? ShellCommandLine.quote(WAYLAND_PATH)
                 : "\"/tmp/.X11-unix/X${DISPLAY#:}\"";
         String prepare = files ? quoted(new GuestLaunchPlan(plan.environment(), plan.directory(),
-                List.of("/bin/sh", "-c", "mkdir -p /tmp/magicdesk-helpers")).arguments()) + "; " : "";
+                List.of("/bin/sh", "-lc", "mkdir -p /tmp/magicdesk-helpers")).arguments()) + "; " : "";
         String fileOptions = files ? " --bind-ro \"${MAGICDESK_GUEST_LIBRARIES:?Missing helpers}\" /tmp/magicdesk-helpers"
                 + " --env \"MAGICDESK_GUEST_FILES_SOCKET=$MAGICDESK_GUEST_FILES_SOCKET\""
                 + " --env \"MAGICDESK_GUEST_FILES_TOKEN=$MAGICDESK_GUEST_FILES_TOKEN\"" : "";

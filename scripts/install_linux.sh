@@ -18,11 +18,11 @@ defaults to automatic Turnip detection and a Wayland Plasma desktop.
 
   --distro ID   Debian 13 (default), Ubuntu 24.04, Alpine 3.23, Fedora 44,
                 Arch Linux ARM, openSUSE Tumbleweed, openKylin 3.0, Deepin 25,
-                Manjaro ARM, Void (glibc), Armtix (runit), or SteamOS ARM64
+                Manjaro ARM, Void (glibc), Armtix (runit), NixOS 26.05, or SteamOS ARM64
   --name NAME   Independent environment name (default: distribution name)
   --image REF   Alternative OCI reference for the SAME distribution/version
   --downloads DIR  Verified archive/wheel cache (default: $HOME/downloads)
-  --gui MODE    none, apps (default), xfce, weston, plasma (Debian 13/SteamOS),
+  --gui MODE    none, apps (default), xfce, weston, plasma (Debian 13/SteamOS/NixOS),
                 gnome (Fedora devkit), keep
                 apps: Mousepad, Thunar, Xfce Terminal; xfce: X11 desktop;
                 weston: Wayland desktop; plasma: X11 and nested Wayland desktops;
@@ -32,7 +32,7 @@ defaults to automatic Turnip detection and a Wayland Plasma desktop.
   --gpu auto    Try Turnip when KGSL is accessible, otherwise use software
   --gpu software  Use the distribution's software renderer
   --gpu turnip  Build private Mesa/Zink/Turnip for a supported Adreno KGSL GPU
-  --jobs N      Mesa/KWin/Weston compiler jobs, 1-8 (default: 2)
+  --jobs N      Compiler jobs (Mesa/KWin/Weston and Nix), 1-8 (default: 4)
   --locale L    UTF-8 locale, e.g. ru_RU.UTF-8, or keep (default)
   --timezone Z  IANA zone, system (Android zone), or keep (default)
   --create-user USER  Create an optional guest account, with a locked password
@@ -48,12 +48,14 @@ defaults to automatic Turnip detection and a Wayland Plasma desktop.
   --resume      Continue in --name NAME; detect distribution, preserve GUI by default
   --list        Show available distribution/profile combinations
   --print-system-setup  Print the guest setup script without running it
+  --print-nixos-setup  Print the NixOS setup script without running it
+  --print-nixos-module  Print the generated NixOS module
   --print-graphics-setup  Print the guest graphics setup script without running it
   --print-weston-setup  Print the guest Weston compatibility recipe
   --print-mesa-patch  Print the embedded patch without running the installer
   --print-flatpak-gl-helper  Print the embedded Flatpak GL publisher
   --print-snap-gpu-helper  Print the embedded Snap GPU publisher
-  --print-kwin-patch [6.3.6|6.2.5]  Print the matching embedded KWin patch
+  --print-kwin-patch [6.6.6|6.3.6|6.2.5]  Print the matching embedded KWin patch
   --print-recovery-reader  Print the embedded SteamOS image converter
 
 Turnip builds inside Linux, needs several GB of free space and can take a while.
@@ -71,6 +73,10 @@ SteamOS retains its supplied applications, fonts and system drivers. The default
 --gui plasma --gpu auto adds a nested desktop and a private graphics profile.
 It needs about 35 GB free during conversion, not a booted recovery/VR session.
 Its packages are updated from the image's configured repositories before first use.
+NixOS generates /etc/nixos/magicdesk.nix and selects a system generation with
+nixos-rebuild boot. Edit configuration.nix for your own settings; --resume
+retains it. Plasma is the default desktop. Packages use Nix attributes, for example --package ripgrep.
+Graphical sessions run independently; selecting a generation does not boot its system services.
 HELP
     printf '\nRequires MagicDesk %s or newer (versionCode %s).\n' \
         "$MIN_MAGICDESK_VERSION_NAME" "$MIN_MAGICDESK_VERSION_CODE"
@@ -89,6 +95,7 @@ configurations() {
         'manjaro       rolling     Manjaro ARM official rootfs               none/apps/xfce/weston' \
         'void          rolling     Void official glibc rootfs                none/apps/xfce/weston' \
         'armtix        rolling     Armtix official runit rootfs              none/apps/xfce/weston' \
+        'nixos         26.05       NixOS official LXC rootfs                 plasma/none/apps/xfce/weston' \
         'steamos       0.3.0       Valve Steam Frame recovery                plasma/keep (supplied applications)'
     printf '%s\n' 'GUI profiles include Android audio and gamepad client libraries.' \
         'GNOME devkit requires a Linux system bus.'
@@ -823,7 +830,884 @@ Explicit worker counts and normal parallel scheduling are retained after startup
 PATCH
 }
 
+kwin_patch_6_6() {
+    cat <<'PATCH'
+--- a/src/backends/wayland/CMakeLists.txt
++++ b/src/backends/wayland/CMakeLists.txt
+@@ -1,4 +1,5 @@
+ target_sources(kwin PRIVATE
++    dmaheapgraphicsbufferallocator.cpp
+     color_manager.cpp
+     wayland_backend.cpp
+     wayland_display.cpp
+--- a/src/backends/wayland/dmaheapgraphicsbufferallocator.cpp
++++ b/src/backends/wayland/dmaheapgraphicsbufferallocator.cpp
+@@ -0,0 +1,78 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++#include "dmaheapgraphicsbufferallocator.h"
++#include "core/graphicsbuffer.h"
++#include "utils/drm_format_helper.h"
++
++#include <drm_fourcc.h>
++#include <fcntl.h>
++#include <limits>
++#include <linux/dma-heap.h>
++#include <sys/ioctl.h>
++
++namespace KWin::Wayland
++{
++
++class DmaHeapGraphicsBuffer : public GraphicsBuffer
++{
++public:
++    explicit DmaHeapGraphicsBuffer(DmaBufAttributes &&attributes)
++        : m_attributes(std::move(attributes))
++    {
++    }
++
++    QSize size() const override { return {m_attributes.width, m_attributes.height}; }
++    bool hasAlphaChannel() const override { return alphaChannelFromDrmFormat(m_attributes.format); }
++    const DmaBufAttributes *dmabufAttributes() const override { return &m_attributes; }
++
++private:
++    DmaBufAttributes m_attributes;
++};
++
++DmaHeapGraphicsBufferAllocator::DmaHeapGraphicsBufferAllocator()
++    : m_heap(open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC))
++{
++}
++
++bool DmaHeapGraphicsBufferAllocator::isValid() const
++{
++    return m_heap.isValid();
++}
++
++GraphicsBuffer *DmaHeapGraphicsBufferAllocator::allocate(const GraphicsBufferOptions &options)
++{
++    if (!isValid() || options.software || options.size.isEmpty()
++        || !options.modifiers.contains(DRM_FORMAT_MOD_LINEAR)) {
++        return nullptr;
++    }
++    switch (options.format) {
++    case DRM_FORMAT_XRGB8888:
++    case DRM_FORMAT_ARGB8888:
++    case DRM_FORMAT_XBGR8888:
++    case DRM_FORMAT_ABGR8888:
++        break;
++    default:
++        return nullptr;
++    }
++    const uint64_t stride = (uint64_t(options.size.width()) * 4 + 255) & ~uint64_t(255);
++    const uint64_t length = stride * options.size.height();
++    if (stride > std::numeric_limits<uint32_t>::max() || length > std::numeric_limits<int32_t>::max()) {
++        return nullptr;
++    }
++    dma_heap_allocation_data allocation{};
++    allocation.len = length;
++    allocation.fd_flags = O_RDWR | O_CLOEXEC;
++    if (ioctl(m_heap.get(), DMA_HEAP_IOCTL_ALLOC, &allocation) < 0) {
++        return nullptr;
++    }
++    DmaBufAttributes attributes;
++    attributes.width = options.size.width();
++    attributes.height = options.size.height();
++    attributes.format = options.format;
++    attributes.modifier = DRM_FORMAT_MOD_LINEAR;
++    attributes.planeCount = 1;
++    attributes.fd[0] = FileDescriptor(allocation.fd);
++    attributes.pitch[0] = stride;
++    return new DmaHeapGraphicsBuffer(std::move(attributes));
++}
++
++}
+--- a/src/backends/wayland/dmaheapgraphicsbufferallocator.h
++++ b/src/backends/wayland/dmaheapgraphicsbufferallocator.h
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++#pragma once
++
++#include "core/graphicsbufferallocator.h"
++#include "utils/filedescriptor.h"
++
++namespace KWin::Wayland
++{
++
++class DmaHeapGraphicsBufferAllocator : public GraphicsBufferAllocator
++{
++public:
++    DmaHeapGraphicsBufferAllocator();
++    bool isValid() const;
++    GraphicsBuffer *allocate(const GraphicsBufferOptions &options) override;
++
++private:
++    FileDescriptor m_heap;
++};
++
++}
+--- a/src/backends/wayland/wayland_backend.cpp
++++ b/src/backends/wayland/wayland_backend.cpp
+@@ -437,7 +437,7 @@
+         return false;
+     }
+
+-    if (WaylandClient::LinuxDmabufV1 *dmabuf = m_display->linuxDmabuf()) {
++    if (WaylandClient::LinuxDmabufV1 *dmabuf = m_display->linuxDmabuf(); dmabuf && !dmabuf->mainDevice().isEmpty()) {
+         m_drmDevice = DrmDevice::open(dmabuf->mainDevice());
+         if (!m_drmDevice) {
+             qCWarning(KWIN_WAYLAND_BACKEND) << "Failed to open drm render node" << dmabuf->mainDevice();
+@@ -586,7 +586,7 @@
+ QList<CompositingType> WaylandBackend::supportedCompositors() const
+ {
+     QList<CompositingType> ret;
+-    if (m_display->linuxDmabuf() && m_drmDevice) {
++    if (m_display->linuxDmabuf() && !m_display->linuxDmabuf()->formats().isEmpty()) {
+         ret.append(OpenGLCompositing);
+     }
+     ret.append(QPainterCompositing);
+--- a/src/backends/wayland/wayland_display.cpp
++++ b/src/backends/wayland/wayland_display.cpp
+@@ -406,8 +406,8 @@
+         display->m_xdgDecorationManager = std::make_unique<KWayland::Client::XdgDecorationManager>();
+         display->m_xdgDecorationManager->setup(static_cast<zxdg_decoration_manager_v1 *>(wl_registry_bind(registry, name, &zxdg_decoration_manager_v1_interface, std::min(version, 1u))));
+     } else if (strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0) {
+-        if (version < 4) {
+-            qWarning("zwp_linux_dmabuf_v1 v4 or newer is needed");
++        if (version < 3) {
++            qWarning("zwp_linux_dmabuf_v1 v3 or newer is needed");
+             return;
+         }
+         display->m_linuxDmabuf = std::make_unique<WaylandClient::LinuxDmabufV1>(registry, name, std::min(version, 4u));
+--- a/src/backends/wayland/wayland_egl_backend.cpp
++++ b/src/backends/wayland/wayland_egl_backend.cpp
+@@ -9,6 +9,7 @@
+ */
+
+ #include "wayland_egl_backend.h"
++#include "dmaheapgraphicsbufferallocator.h"
+ #include "core/drmdevice.h"
+ #include "core/gbmgraphicsbufferallocator.h"
+ #include "opengl/eglswapchain.h"
+@@ -73,7 +74,7 @@
+             if (it == formatTable.constEnd()) {
+                 continue;
+             }
+-            m_swapchain = EglSwapchain::create(m_backend->drmDevice()->allocator(), m_backend->openglContext(), nativeSize, it.key(), it.value());
++            m_swapchain = EglSwapchain::create(m_backend->graphicsBufferAllocator(), m_backend->openglContext(), nativeSize, it.key(), it.value());
+             if (m_swapchain) {
+                 break;
+             }
+@@ -85,7 +86,7 @@
+     }
+
+     m_buffer = m_swapchain->acquire();
+-    if (!m_buffer) {
++    if (!m_buffer || !m_backend->acquireBuffer(m_buffer->buffer())) {
+         return std::nullopt;
+     }
+
+@@ -105,6 +106,9 @@
+     // Flush rendering commands to the dmabuf.
+     glFlush();
+     EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
++    if (!m_backend->releaseBuffer(m_buffer->buffer(), releaseFence.fileDescriptor())) {
++        return false;
++    }
+
+     setBuffer(m_backend->backend()->importBuffer(m_buffer->buffer()), damagedDeviceRegion);
+     m_swapchain->release(m_buffer, releaseFence.takeFileDescriptor());
+@@ -169,7 +173,7 @@
+             if (it == formatTable.constEnd()) {
+                 continue;
+             }
+-            m_swapchain = EglSwapchain::create(m_backend->drmDevice()->allocator(), m_backend->openglContext(), bufferSize, it.key(), it.value());
++            m_swapchain = EglSwapchain::create(m_backend->graphicsBufferAllocator(), m_backend->openglContext(), bufferSize, it.key(), it.value());
+             if (m_swapchain) {
+                 break;
+             }
+@@ -180,7 +184,7 @@
+     }
+
+     m_buffer = m_swapchain->acquire();
+-    if (!m_buffer) {
++    if (!m_buffer || !m_backend->acquireBuffer(m_buffer->buffer())) {
+         return std::nullopt;
+     }
+
+@@ -201,12 +205,15 @@
+     // Flush rendering commands to the dmabuf.
+     glFlush();
+
++    EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
++    if (!m_backend->releaseBuffer(m_buffer->buffer(), releaseFence.fileDescriptor())) {
++        return false;
++    }
+     wl_buffer *buffer = m_backend->backend()->importBuffer(m_buffer->buffer());
+     Q_ASSERT(buffer);
+
+     static_cast<WaylandOutput *>(m_output.get())->cursor()->update(buffer, m_buffer->buffer()->size() / m_output->scale(), (hotspot() / m_output->scale()).toPoint());
+
+-    EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
+     m_swapchain->release(m_buffer, releaseFence.takeFileDescriptor());
+     return true;
+ }
+@@ -248,6 +255,21 @@
+ DrmDevice *WaylandEglBackend::drmDevice() const
+ {
+     return m_backend->drmDevice();
++}
++
++GraphicsBufferAllocator *WaylandEglBackend::graphicsBufferAllocator() const
++{
++    return m_allocator ? m_allocator.get() : EglBackend::graphicsBufferAllocator();
++}
++
++bool WaylandEglBackend::acquireBuffer(GraphicsBuffer *buffer)
++{
++    return eglDisplayObject()->acquireDmaBuf(buffer, true);
++}
++
++bool WaylandEglBackend::releaseBuffer(GraphicsBuffer *buffer, const FileDescriptor &fence)
++{
++    return eglDisplayObject()->releaseDmaBuf(buffer, fence, true);
+ }
+
+ void WaylandEglBackend::cleanupSurfaces()
+@@ -279,14 +301,19 @@
+     initClientExtensions();
+
+     if (!m_backend->sceneEglDisplayObject()) {
+-        for (const QByteArray &extension : {QByteArrayLiteral("EGL_EXT_platform_base"), QByteArrayLiteral("EGL_KHR_platform_gbm")}) {
++        const auto platform = drmDevice() ? QByteArrayLiteral("EGL_KHR_platform_gbm") : QByteArrayLiteral("EGL_KHR_platform_wayland");
++        for (const QByteArray &extension : {QByteArrayLiteral("EGL_EXT_platform_base"), platform}) {
+             if (!hasClientExtension(extension)) {
+                 qCWarning(KWIN_WAYLAND_BACKEND) << extension << "client extension is not supported by the platform";
+                 return false;
+             }
+         }
+
+-        m_backend->setEglDisplay(EglDisplay::create(eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, m_backend->drmDevice()->gbmDevice(), nullptr)));
++        if (drmDevice()) {
++            m_backend->setEglDisplay(EglDisplay::create(eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, drmDevice()->gbmDevice(), nullptr)));
++        } else {
++            m_backend->setEglDisplay(EglDisplay::create(eglGetPlatformDisplayEXT(EGL_PLATFORM_WAYLAND_KHR, m_backend->display()->nativeDisplay(), nullptr)));
++        }
+     }
+
+     const auto display = m_backend->sceneEglDisplayObject();
+@@ -294,6 +321,22 @@
+         return false;
+     }
+     setEglDisplay(display);
++    if (!drmDevice()) {
++        for (const auto &extension : {QByteArrayLiteral("EGL_EXT_image_dma_buf_import_modifiers"),
++                                     QByteArrayLiteral("EGL_ANDROID_native_fence_sync"),
++                                     QByteArrayLiteral("EGL_KHR_wait_sync")}) {
++            if (!display->hasExtension(extension)) {
++                qCWarning(KWIN_WAYLAND_BACKEND) << "DMA heap rendering requires" << extension;
++                return false;
++            }
++        }
++        auto allocator = std::make_unique<DmaHeapGraphicsBufferAllocator>();
++        if (!allocator->isValid()) {
++            return false;
++        }
++        m_allocator = std::move(allocator);
++        display->setDmaBufSyncRequired(true);
++    }
+     return true;
+ }
+
+@@ -308,6 +351,20 @@
+         return;
+     }
+
++    if (m_allocator) {
++        // Validate allocation, EGL import and both synchronization directions before
++        // advertising GPU composition or DMA-BUF to nested clients.
++        const auto formats = m_backend->display()->linuxDmabuf()->formats();
++        auto probe = EglSwapchain::create(m_allocator.get(), openglContext(), QSize(64, 64),
++                                          DRM_FORMAT_XRGB8888, formats.value(DRM_FORMAT_XRGB8888));
++        auto slot = probe ? probe->acquire() : nullptr;
++        EGLNativeFence fence{eglDisplayObject()};
++        if (!slot || !acquireBuffer(slot->buffer()) || !releaseBuffer(slot->buffer(), fence.fileDescriptor())) {
++            setFailed("DMA heap buffer import or synchronization is unavailable");
++            return;
++        }
++    }
++
+     initWayland();
+ }
+
+--- a/src/backends/wayland/wayland_egl_backend.h
++++ b/src/backends/wayland/wayland_egl_backend.h
+@@ -98,6 +98,9 @@
+
+     WaylandBackend *backend() const;
+     DrmDevice *drmDevice() const override;
++    GraphicsBufferAllocator *graphicsBufferAllocator() const override;
++    bool acquireBuffer(GraphicsBuffer *buffer);
++    bool releaseBuffer(GraphicsBuffer *buffer, const FileDescriptor &fence);
+
+     void init() override;
+     QList<OutputLayer *> compatibleOutputLayers(BackendOutput *output) override;
+@@ -109,6 +112,7 @@
+     void cleanupSurfaces() override;
+
+     WaylandBackend *m_backend;
++    std::unique_ptr<GraphicsBufferAllocator> m_allocator;
+ };
+
+ } // namespace Wayland
+--- a/src/compositor.cpp
++++ b/src/compositor.cpp
+@@ -131,9 +131,11 @@
+     QVariantHash gpuInformation;
+     gpuInformation[QStringLiteral("api_type")] = QStringLiteral("OpenGL");
+     gpuInformation[QStringLiteral("name")] = QString::fromUtf8(glPlatform->glRendererString());
+-    if (const auto pciInfo = backend->drmDevice()->pciDeviceInfo()) {
+-        gpuInformation[QStringLiteral("id")] = QString::number(pciInfo->device_id, 16);
+-        gpuInformation[QStringLiteral("vendor_id")] = QString::number(pciInfo->vendor_id, 16);
++    if (const auto device = backend->drmDevice()) {
++        if (const auto pciInfo = device->pciDeviceInfo()) {
++            gpuInformation[QStringLiteral("id")] = QString::number(pciInfo->device_id, 16);
++            gpuInformation[QStringLiteral("vendor_id")] = QString::number(pciInfo->vendor_id, 16);
++        }
+     }
+     if (glPlatform->driverVersion().isValid()) {
+         gpuInformation[QStringLiteral("version")] = glPlatform->driverVersion().toString();
+@@ -193,7 +195,7 @@
+     return true;
+ }
+
+-void Compositor::createRenderer()
++bool Compositor::createRenderer()
+ {
+     // If compositing has been restarted, try to use the last used compositing type.
+     const QList<CompositingType> availableCompositors = kwinApp()->outputBackend()->supportedCompositors();
+@@ -234,9 +236,16 @@
+             break;
+         } else if (qEnvironmentVariableIsSet("KWIN_COMPOSE")) {
+             qCCritical(KWIN_CORE) << "Could not fulfill the requested compositing mode in KWIN_COMPOSE:" << type << ". Exiting.";
+-            qApp->quit();
+-        }
+-    }
++            break;
++        }
++    }
++    if (m_backend) {
++        return true;
++    }
++    qCCritical(KWIN_CORE) << "The used windowing system requires compositing";
++    // Startup may run before exec(); queue the failure for the event loop.
++    QMetaObject::invokeMethod(qApp, [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
++    return false;
+ }
+
+ void Compositor::createScene()
+@@ -261,16 +270,8 @@
+     Q_EMIT aboutToToggleCompositing();
+     m_state = State::Starting;
+
+-    if (!m_backend) {
+-        createRenderer();
+-    }
+-
+-    if (!m_backend) {
++    if (!m_backend && !createRenderer()) {
+         m_state = State::Off;
+-
+-        qCCritical(KWIN_CORE) << "The used windowing system requires compositing";
+-        qCCritical(KWIN_CORE) << "We are going to quit KWin now as it is broken";
+-        qApp->quit();
+         return;
+     }
+
+--- a/src/compositor.h
++++ b/src/compositor.h
+@@ -75,7 +75,7 @@
+         return m_backend.get();
+     }
+
+-    void createRenderer();
++    bool createRenderer();
+
+ Q_SIGNALS:
+     void compositingToggled(bool active);
+--- a/src/main_wayland.cpp
++++ b/src/main_wayland.cpp
+@@ -146,7 +146,9 @@
+     createTabletModeManager();
+
+     auto compositor = Compositor::create();
+-    compositor->createRenderer();
++    if (!compositor->createRenderer()) {
++        return;
++    }
+     createWorkspace();
+     createPlugins();
+
+--- a/src/opengl/eglbackend.cpp
++++ b/src/opengl/eglbackend.cpp
+@@ -129,6 +129,12 @@
+ {
+     m_display = display;
+     m_extensions = m_display->extensions();
++}
++
++GraphicsBufferAllocator *EglBackend::graphicsBufferAllocator() const
++{
++    const auto device = drmDevice();
++    return device ? device->allocator() : nullptr;
+ }
+
+ void EglBackend::initWayland()
+@@ -231,6 +237,19 @@
+         LinuxDmaBufV1ClientBufferIntegration *dmabuf = waylandServer()->linuxDmabuf();
+         dmabuf->setRenderBackend(this);
+         dmabuf->setSupportedFormatsWithModifiers(m_tranches);
++    } else if (m_display->dmaBufSyncRequired()) {
++        QHash<uint32_t, QList<uint64_t>> formats;
++        const auto supported = m_display->allSupportedDrmFormats();
++        for (auto it = supported.constBegin(); it != supported.constEnd(); ++it) {
++            if (!it->nonExternalOnlyModifiers.isEmpty()) {
++                formats.insert(it.key(), it->nonExternalOnlyModifiers);
++            }
++        }
++        if (!formats.isEmpty()) {
++            auto *dmabuf = waylandServer()->linuxDmabuf(false);
++            dmabuf->setRenderBackend(this);
++            dmabuf->setSupportedFormatsWithModifiers(formats);
++        }
+     }
+     waylandServer()->setRenderBackend(this);
+ }
+--- a/src/opengl/eglbackend.h
++++ b/src/opengl/eglbackend.h
+@@ -24,6 +24,7 @@
+ class GLTexture;
+ class EglContext;
+ class EglDisplay;
++class GraphicsBufferAllocator;
+
+ struct DmaBufAttributes;
+
+@@ -39,6 +40,7 @@
+     EglContext *openglContext() const;
+     std::shared_ptr<EglContext> openglContextRef() const;
+     EglDisplay *eglDisplayObject() const;
++    virtual GraphicsBufferAllocator *graphicsBufferAllocator() const;
+
+     /**
+      * @brief Whether the creation of the Backend failed.
+--- a/src/opengl/egldisplay.cpp
++++ b/src/opengl/egldisplay.cpp
+@@ -7,6 +7,9 @@
+     SPDX-License-Identifier: GPL-2.0-or-later
+ */
+ #include "egldisplay.h"
++#include "eglnativefence.h"
++#include <linux/dma-buf.h>
++#include <sys/ioctl.h>
+ #include "core/drmdevice.h"
+ #include "core/graphicsbuffer.h"
+ #include "opengl/eglutils_p.h"
+@@ -23,6 +26,54 @@
+
+ namespace KWin
+ {
++
++void EglDisplay::setDmaBufSyncRequired(bool required)
++{
++    m_dmaBufSyncRequired = required;
++}
++
++bool EglDisplay::dmaBufSyncRequired() const
++{
++    return m_dmaBufSyncRequired;
++}
++
++bool EglDisplay::acquireDmaBuf(GraphicsBuffer *buffer, bool write)
++{
++    const auto attributes = buffer->dmabufAttributes();
++    if (!m_dmaBufSyncRequired || !attributes) {
++        return true;
++    }
++    for (int plane = 0; plane < attributes->planeCount; ++plane) {
++        dma_buf_export_sync_file sync{.flags = uint32_t(write ? DMA_BUF_SYNC_RW : DMA_BUF_SYNC_READ), .fd = -1};
++        if (ioctl(attributes->fd[plane].get(), DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &sync) < 0) {
++            return false;
++        }
++        // This is a GPU dependency; it does not block the compositor thread.
++        auto fence = EGLNativeFence::importFence(this, FileDescriptor(sync.fd));
++        if (!fence.waitSync()) {
++            return false;
++        }
++    }
++    return true;
++}
++
++bool EglDisplay::releaseDmaBuf(GraphicsBuffer *buffer, const FileDescriptor &fence, bool write)
++{
++    const auto attributes = buffer->dmabufAttributes();
++    if (!m_dmaBufSyncRequired || !attributes) {
++        return true;
++    }
++    if (!fence.isValid()) {
++        return false;
++    }
++    for (int plane = 0; plane < attributes->planeCount; ++plane) {
++        dma_buf_import_sync_file sync{.flags = uint32_t(write ? DMA_BUF_SYNC_WRITE : DMA_BUF_SYNC_READ), .fd = fence.get()};
++        if (ioctl(attributes->fd[plane].get(), DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &sync) < 0) {
++            return false;
++        }
++    }
++    return true;
++}
+
+ bool EglDisplay::shouldUseOpenGLES()
+ {
+--- a/src/opengl/egldisplay.h
++++ b/src/opengl/egldisplay.h
+@@ -22,6 +22,8 @@
+
+ struct DmaBufAttributes;
+ class GLTexture;
++class GraphicsBuffer;
++class FileDescriptor;
+
+ class KWIN_EXPORT EglDisplay
+ {
+@@ -45,6 +47,10 @@
+
+     bool supportsBufferAge() const;
+     bool supportsNativeFence() const;
++    void setDmaBufSyncRequired(bool required);
++    bool dmaBufSyncRequired() const;
++    bool acquireDmaBuf(GraphicsBuffer *buffer, bool write);
++    bool releaseDmaBuf(GraphicsBuffer *buffer, const FileDescriptor &fence, bool write);
+
+     QHash<uint32_t, QList<uint64_t>> nonExternalOnlySupportedDrmFormats() const;
+     QHash<uint32_t, DrmFormatInfo> allSupportedDrmFormats() const;
+@@ -72,6 +78,7 @@
+     const bool m_supportsBufferAge;
+     const bool m_supportsNativeFence;
+     QHash<uint32_t, DrmFormatInfo> m_importFormats;
++    bool m_dmaBufSyncRequired = false;
+
+     struct
+     {
+--- a/src/plugins/qpa/eglplatformcontext.cpp
++++ b/src/plugins/qpa/eglplatformcontext.cpp
+@@ -15,6 +15,7 @@
+ #include "offscreensurface.h"
+ #include "opengl/eglcontext.h"
+ #include "opengl/egldisplay.h"
++#include "opengl/eglnativefence.h"
+ #include "opengl/eglutils_p.h"
+ #include "opengl/glutils.h"
+ #include "swapchain.h"
+@@ -85,7 +86,7 @@
+         }
+
+         GraphicsBuffer *buffer = swapchain->acquire();
+-        if (!buffer) {
++        if (!buffer || !m_eglDisplay->acquireDmaBuf(buffer, true)) {
+             return false;
+         }
+
+@@ -159,6 +160,13 @@
+
+         glFlush(); // We need to flush pending rendering commands manually
+
++        if (m_eglDisplay->dmaBufSyncRequired()) {
++            EGLNativeFence fence{m_eglDisplay};
++            if (!m_eglDisplay->releaseDmaBuf(m_current->buffer, fence.fileDescriptor(), true)) {
++                qFatal("Could not publish internal window DMA-BUF completion");
++            }
++        }
++
+         internalWindow->present(InternalWindowFrame{
+             .buffer = m_current->buffer,
+             .bufferDamage = Rect(QPoint(0, 0), m_current->buffer->size()),
+--- a/src/plugins/qpa/window.cpp
++++ b/src/plugins/qpa/window.cpp
+@@ -12,10 +12,10 @@
+ #include "utils/drm_format_helper.h"
+
+ #include "compositor.h"
+-#include "core/drmdevice.h"
+ #include "core/renderbackend.h"
+ #include "core/shmgraphicsbufferallocator.h"
+ #include "internalwindow.h"
++#include "opengl/eglbackend.h"
+ #include "swapchain.h"
+ #include "window.h"
+
+@@ -57,7 +57,11 @@
+             static ShmGraphicsBufferAllocator shmAllocator;
+             allocator = &shmAllocator;
+         } else {
+-            allocator = Compositor::self()->backend()->drmDevice()->allocator();
++            const auto backend = qobject_cast<EglBackend *>(Compositor::self()->backend());
++            allocator = backend ? backend->graphicsBufferAllocator() : nullptr;
++        }
++        if (!allocator) {
++            return nullptr;
+         }
+
+         for (auto it = formats.begin(); it != formats.end(); it++) {
+--- a/src/plugins/screencast/screencaststream.cpp
++++ b/src/plugins/screencast/screencaststream.cpp
+@@ -874,7 +874,7 @@
+ std::optional<ScreenCastDmaBufTextureParams> ScreenCastStream::testCreateDmaBuf(const QSize &size, quint32 format, const QList<uint64_t> &modifiers)
+ {
+     EglBackend *backend = qobject_cast<EglBackend *>(Compositor::self()->backend());
+-    if (!backend) {
++    if (!backend || !backend->drmDevice()) {
+         return std::nullopt;
+     }
+
+--- a/src/scene/itemrenderer_opengl.cpp
++++ b/src/scene/itemrenderer_opengl.cpp
+@@ -11,6 +11,7 @@
+ #include "core/renderviewport.h"
+ #include "core/syncobjtimeline.h"
+ #include "effect/effect.h"
++#include "opengl/egldisplay.h"
+ #include "opengl/eglnativefence.h"
+ #include "scene/decorationitem.h"
+ #include "scene/imageitem.h"
+@@ -53,6 +54,13 @@
+
+     if (m_eglDisplay) {
+         EGLNativeFence fence(m_eglDisplay);
++        for (auto *buffer : m_dmaBufReads) {
++            if (!m_eglDisplay->releaseDmaBuf(buffer, fence.fileDescriptor(), false)) {
++                qFatal("Could not publish DMA-BUF read completion");
++            }
++            buffer->unref();
++        }
++        m_dmaBufReads.clear();
+         if (fence.isValid()) {
+             for (const auto &releasePoint : m_releasePoints) {
+                 releasePoint->addReleaseFence(fence.fileDescriptor());
+@@ -229,6 +237,7 @@
+                     .colorDescription = item->colorDescription(),
+                     .renderingIntent = item->renderingIntent(),
+                     .bufferReleasePoint = surfaceItem->bufferReleasePoint(),
++                    .buffer = surfaceItem->buffer(),
+                     .paintHole = hole,
+                     .hasFloatingPointColor = texture->isFloatingPoint(),
+                 });
+@@ -423,6 +432,15 @@
+             setBlendEnabled(true);
+         } else {
+             glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
++            if (m_eglDisplay && m_eglDisplay->dmaBufSyncRequired() && renderNode.buffer
++                && renderNode.buffer->dmabufAttributes() && !m_dmaBufReads.contains(renderNode.buffer)) {
++                if (!m_eglDisplay->acquireDmaBuf(renderNode.buffer, false)) {
++                    qCWarning(KWIN_OPENGL) << "Could not acquire client DMA-BUF for reading";
++                    continue;
++                }
++                renderNode.buffer->ref();
++                m_dmaBufReads.insert(renderNode.buffer);
++            }
+             setBlendEnabled(renderNode.hasAlpha || renderNode.opacity < 1.0);
+         }
+
+--- a/src/scene/itemrenderer_opengl.h
++++ b/src/scene/itemrenderer_opengl.h
+@@ -33,6 +33,7 @@
+         std::shared_ptr<ColorDescription> colorDescription;
+         RenderingIntent renderingIntent;
+         std::shared_ptr<SyncReleasePoint> bufferReleasePoint;
++        GraphicsBuffer *buffer = nullptr;
+         QVector4D box;
+         QVector4D borderRadius;
+         int borderThickness = 0;
+@@ -81,6 +82,7 @@
+     bool m_blendingEnabled = false;
+     EglDisplay *const m_eglDisplay;
+     std::unordered_set<std::shared_ptr<SyncReleasePoint>> m_releasePoints;
++    std::unordered_set<GraphicsBuffer *> m_dmaBufReads;
+
+     struct
+     {
+--- a/src/wayland-client/linuxdmabuf.cpp
++++ b/src/wayland-client/linuxdmabuf.cpp
+@@ -172,7 +172,9 @@
+     };
+     zwp_linux_dmabuf_v1_add_listener(m_dmabuf, &dmabufListener, this);
+
+-    m_defaultFeedback = std::make_unique<LinuxDmabufFeedbackV1>(zwp_linux_dmabuf_v1_get_default_feedback(m_dmabuf));
++    if (version >= 4) {
++        m_defaultFeedback = std::make_unique<LinuxDmabufFeedbackV1>(zwp_linux_dmabuf_v1_get_default_feedback(m_dmabuf));
++    }
+ }
+
+ LinuxDmabufV1::~LinuxDmabufV1()
+@@ -187,12 +189,12 @@
+
+ QByteArray LinuxDmabufV1::mainDevice() const
+ {
+-    return m_defaultFeedback->devicePath();
++    return m_defaultFeedback ? m_defaultFeedback->devicePath() : QByteArray();
+ }
+
+ QHash<uint32_t, QList<uint64_t>> LinuxDmabufV1::formats() const
+ {
+-    return m_defaultFeedback->formats();
++    return m_defaultFeedback ? m_defaultFeedback->formats() : m_formats;
+ }
+
+ void LinuxDmabufV1::format(void *data, struct zwp_linux_dmabuf_v1 *zwp_linux_dmabuf_v1, uint32_t format)
+@@ -202,7 +204,12 @@
+
+ void LinuxDmabufV1::modifier(void *data, struct zwp_linux_dmabuf_v1 *zwp_linux_dmabuf_v1, uint32_t format, uint32_t modifier_hi, uint32_t modifier_lo)
+ {
+-    // Not sent in v4 and onward.
++    auto *self = static_cast<LinuxDmabufV1 *>(data);
++    const uint64_t modifier = (uint64_t(modifier_hi) << 32) | modifier_lo;
++    auto &modifiers = self->m_formats[format];
++    if (!modifiers.contains(modifier)) {
++        modifiers.append(modifier);
++    }
+ }
+
+ wl_buffer *LinuxDmabufV1::importBuffer(GraphicsBuffer *graphicsBuffer) const
+@@ -229,6 +236,9 @@
+
+ std::unique_ptr<LinuxDmabufFeedbackV1> LinuxDmabufV1::getSurfaceFeedback(wl_surface *surface) const
+ {
++    if (!m_defaultFeedback) {
++        return nullptr;
++    }
+     return std::make_unique<LinuxDmabufFeedbackV1>(zwp_linux_dmabuf_v1_get_surface_feedback(m_dmabuf, surface));
+ }
+ }
+--- a/src/wayland-client/linuxdmabuf.h
++++ b/src/wayland-client/linuxdmabuf.h
+@@ -93,6 +93,7 @@
+
+     zwp_linux_dmabuf_v1 *m_dmabuf;
+     std::unique_ptr<LinuxDmabufFeedbackV1> m_defaultFeedback;
++    QHash<uint32_t, QList<uint64_t>> m_formats;
+ };
+
+ }
+--- a/src/wayland/linuxdmabufv1clientbuffer.cpp
++++ b/src/wayland/linuxdmabufv1clientbuffer.cpp
+@@ -27,9 +27,10 @@
+ {
+ static const int s_version = 5;
+
+-LinuxDmaBufV1ClientBufferIntegrationPrivate::LinuxDmaBufV1ClientBufferIntegrationPrivate(LinuxDmaBufV1ClientBufferIntegration *q, Display *display)
+-    : QtWaylandServer::zwp_linux_dmabuf_v1(*display, s_version)
++LinuxDmaBufV1ClientBufferIntegrationPrivate::LinuxDmaBufV1ClientBufferIntegrationPrivate(LinuxDmaBufV1ClientBufferIntegration *q, Display *display, bool deviceFeedback)
++    : QtWaylandServer::zwp_linux_dmabuf_v1(*display, deviceFeedback ? s_version : 3)
+     , q(q)
++    , deviceFeedback(deviceFeedback)
+     , defaultFeedback(new LinuxDmaBufV1Feedback(this))
+ {
+ }
+@@ -295,9 +296,9 @@
+     return true;
+ }
+
+-LinuxDmaBufV1ClientBufferIntegration::LinuxDmaBufV1ClientBufferIntegration(Display *display)
++LinuxDmaBufV1ClientBufferIntegration::LinuxDmaBufV1ClientBufferIntegration(Display *display, bool deviceFeedback)
+     : QObject(display)
+-    , d(new LinuxDmaBufV1ClientBufferIntegrationPrivate(this, display))
++    , d(new LinuxDmaBufV1ClientBufferIntegrationPrivate(this, display, deviceFeedback))
+ {
+ }
+
+@@ -332,6 +333,12 @@
+         d->table = std::make_unique<LinuxDmaBufV1FormatTable>(set);
+         d->defaultFeedback->setTranches(tranches);
+     }
++}
++
++void LinuxDmaBufV1ClientBufferIntegration::setSupportedFormatsWithModifiers(const QHash<uint32_t, QList<uint64_t>> &formats)
++{
++    Q_ASSERT(!d->deviceFeedback);
++    d->supportedModifiers = formats;
+ }
+
+ void LinuxDmaBufV1ClientBuffer::buffer_destroy_resource(wl_resource *resource)
+--- a/src/wayland/linuxdmabufv1clientbuffer.h
++++ b/src/wayland/linuxdmabufv1clientbuffer.h
+@@ -66,13 +66,14 @@
+     Q_OBJECT
+
+ public:
+-    explicit LinuxDmaBufV1ClientBufferIntegration(Display *display);
++    explicit LinuxDmaBufV1ClientBufferIntegration(Display *display, bool deviceFeedback = true);
+     ~LinuxDmaBufV1ClientBufferIntegration() override;
+
+     RenderBackend *renderBackend() const;
+     void setRenderBackend(RenderBackend *renderBackend);
+
+     void setSupportedFormatsWithModifiers(const QList<LinuxDmaBufV1Feedback::Tranche> &tranches);
++    void setSupportedFormatsWithModifiers(const QHash<uint32_t, QList<uint64_t>> &formats);
+
+ private:
+     friend class LinuxDmaBufV1ClientBufferIntegrationPrivate;
+--- a/src/wayland/linuxdmabufv1clientbuffer_p.h
++++ b/src/wayland/linuxdmabufv1clientbuffer_p.h
+@@ -31,9 +31,10 @@
+ class LinuxDmaBufV1ClientBufferIntegrationPrivate : public QtWaylandServer::zwp_linux_dmabuf_v1
+ {
+ public:
+-    LinuxDmaBufV1ClientBufferIntegrationPrivate(LinuxDmaBufV1ClientBufferIntegration *q, Display *display);
++    LinuxDmaBufV1ClientBufferIntegrationPrivate(LinuxDmaBufV1ClientBufferIntegration *q, Display *display, bool deviceFeedback);
+
+     LinuxDmaBufV1ClientBufferIntegration *q;
++    const bool deviceFeedback;
+     std::unique_ptr<LinuxDmaBufV1Feedback> defaultFeedback;
+     std::unique_ptr<LinuxDmaBufV1FormatTable> table;
+     dev_t mainDevice;
+--- a/src/wayland_server.cpp
++++ b/src/wayland_server.cpp
+@@ -547,10 +547,10 @@
+     return m_drm;
+ }
+
+-LinuxDmaBufV1ClientBufferIntegration *WaylandServer::linuxDmabuf()
++LinuxDmaBufV1ClientBufferIntegration *WaylandServer::linuxDmabuf(bool deviceFeedback)
+ {
+     if (!m_linuxDmabuf) {
+-        m_linuxDmabuf = new LinuxDmaBufV1ClientBufferIntegration(m_display);
++        m_linuxDmabuf = new LinuxDmaBufV1ClientBufferIntegration(m_display, deviceFeedback);
+     }
+     return m_linuxDmabuf;
+ }
+@@ -857,7 +857,7 @@
+
+ void WaylandServer::setRenderBackend(RenderBackend *backend)
+ {
+-    if (backend->drmDevice()->supportsSyncObjTimelines()) {
++    if (const auto device = backend->drmDevice(); device && device->supportsSyncObjTimelines()) {
+         // ensure the DRM_IOCTL_SYNCOBJ_EVENTFD ioctl is supported
+         const auto linuxVersion = linuxKernelVersion();
+         if (linuxVersion.majorVersion() < 6 && linuxVersion.minorVersion() < 6) {
+--- a/src/wayland_server.h
++++ b/src/wayland_server.h
+@@ -137,7 +137,7 @@
+     bool isKeyboardShortcutsInhibited() const;
+
+     DrmClientBufferIntegration *drm();
+-    LinuxDmaBufV1ClientBufferIntegration *linuxDmabuf();
++    LinuxDmaBufV1ClientBufferIntegration *linuxDmabuf(bool deviceFeedback = true);
+
+     InputMethodV1Interface *inputMethod() const
+     {
+PATCH
+}
+
 kwin_patch() {
+    if [ "${1:-}" = 6.6.6 ]; then kwin_patch_6_6; return; fi
     case "${1:-6.3.6}" in 6.2.5|6.3.6) ;; *) return 1 ;; esac
     cat <<'PATCH'
 KWin: nested DMA-BUF v3/EGL rendering without a DRM device.
@@ -2154,6 +3038,10 @@ mesa_options() {
 MESA_OPTIONS
 }
 
+mesa_source() {
+    printf '%s\n' 'version=26.2.3' 'archive_sha=1628058a8d2c0615975de5a15ab7bbb9638c50000b5bed9456ff423ea034a81f'
+}
+
 flatpak_gl_helper() {
     cat <<'FLATPAK_GL_PY'
 #!/usr/bin/env python3
@@ -2815,8 +3703,9 @@ umask 022
 gpu=$1
 jobs=$2
 recipe=$3
-version=26.2.3
-archive_sha=1628058a8d2c0615975de5a15ab7bbb9638c50000b5bed9456ff423ea034a81f
+GPU_HEAD
+    mesa_source
+    cat <<'GPU_HEAD'
 mkdir -p /var/lib/magicdesk /etc/profile.d
 exec 9>/var/lib/magicdesk/installer.lock
 flock -n 9 || { echo 'Another graphics setup is running in this environment.' >&2; exit 1; }
@@ -3328,7 +4217,7 @@ case "$desktop" in
         export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=Weston XDG_SESSION_DESKTOP=weston
         export XDG_CONFIG_DIRS="${XDG_CONFIG_DIRS:-/etc/xdg}:/etc/magicdesk/session"
         # Package upgrades can retire the compatibility build without rebuilding.
-        case "$(/usr/bin/weston --version)" in
+        case "$(weston --version)" in
             'weston 13.0.'[0-3])
                 [ -r /etc/magicdesk/weston.sh ] || {
                     echo 'Complete Weston compatibility setup before launching this desktop.' >&2; exit 1;
@@ -3615,6 +4504,406 @@ try:
 except (OSError, ValueError, KeyError, TypeError) as error:
     sys.exit('magicdesk-steam-game: ' + str(error))
 STEAM_GAME
+}
+
+nixos_module() {
+    cat <<'NIXOS_MODULE'
+{ config, lib, pkgs, ... }:
+let
+  settings = builtins.fromJSON (builtins.readFile ./magicdesk-settings.json);
+  selected = name: builtins.elem name settings.desktops;
+  graphical = settings.desktops != [];
+  turnip = settings.gpu == "turnip";
+  files = ./magicdesk-files;
+  tools = pkgs.runCommand "magicdesk-session-tools" {
+    nativeBuildInputs = [ pkgs.bash pkgs.python3 ];
+  } ''
+    mkdir -p $out/bin
+    cp ${files}/magicdesk-desktop-session ${files}/magicdesk-audio-session $out/bin/
+    chmod +x $out/bin/*
+    substituteInPlace $out/bin/magicdesk-audio-session \
+      --replace-fail /usr/share/pipewire ${pkgs.pipewire}/share/pipewire \
+      --replace-fail /usr/share/wireplumber ${pkgs.wireplumber}/share/wireplumber
+    patchShebangs $out/bin
+  '';
+  mesa = if turnip then pkgs.callPackage ./magicdesk-mesa.nix {} else pkgs.mesa;
+  kwin = assert pkgs.kdePackages.kwin.version == "6.6.6";
+    pkgs.kdePackages.kwin.overrideAttrs (old: {
+      postPatch = (old.postPatch or "") + ''
+        patch --batch --forward --fuzz=0 -p1 < ${files}/kwin.patch
+      '';
+      preConfigure = (old.preConfigure or "") + ''
+        cmakeFlagsArray+=("-DCMAKE_AUTOGEN_PARALLEL=$NIX_BUILD_CORES")
+      '';
+    });
+  app = backend: name: title: command: icon: pkgs.makeDesktopItem {
+    name = "magicdesk-${name}-${backend}";
+    desktopName = "${title} (${backend})";
+    exec = "env GDK_BACKEND=${backend} ${command}";
+    inherit icon;
+    categories = [ "Utility" ];
+    extraConfig."X-MagicDesk-Graphics" = backend;
+  };
+  desktop = name: title: backend: icon: pkgs.makeDesktopItem {
+    name = "magicdesk-${name}";
+    desktopName = "NixOS - ${title}";
+    exec = "${tools}/bin/magicdesk-desktop-session ${name}";
+    inherit icon;
+    categories = [ "System" ];
+    extraConfig = {
+      X-MagicDesk-Graphics = backend;
+      X-MagicDesk-GraphicsMode = "desktop";
+    };
+  };
+  backends = if settings.protocol == "both" then [ "x11" "wayland" ] else [ settings.protocol ];
+  applications = lib.concatMap (backend: [
+    (app backend "mousepad" "Mousepad" "${pkgs.mousepad}/bin/mousepad --disable-server %F" "org.xfce.mousepad")
+    (app backend "thunar" "Thunar" "${pkgs.thunar}/bin/thunar %F" "org.xfce.thunar")
+    (app backend "terminal" "Xfce Terminal" "${pkgs.xfce4-terminal}/bin/xfce4-terminal --disable-server" "org.xfce.terminal")
+  ]) backends;
+in {
+  # The launcher supplies the network. No DHCP server exists on that uplink.
+  boot.isContainer = true;
+  networking.useDHCP = lib.mkOverride 900 false;
+  networking.resolvconf.enable = lib.mkOverride 900 false;
+  services.openssh.enable = lib.mkOverride 900 false;
+  system.stateVersion = lib.mkDefault "26.05";
+  nix.settings = { max-jobs = 1; cores = settings.jobs; sandbox = true; };
+  environment.systemPackages = with pkgs; [ bashInteractive coreutils util-linux curl cacert git python3 iproute2 ]
+    ++ map (name: lib.attrByPath (lib.splitString "." name)
+      (throw "Unknown Nix package attribute: ${name}") pkgs) settings.packages
+    ++ lib.optionals graphical ([ tools mousepad thunar xfce4-terminal dbus
+      pipewire wireplumber pulseaudio pavucontrol alsa-plugins SDL2 systemd libdecor xkeyboard-config
+      hicolor-icon-theme adwaita-icon-theme vulkan-tools mesa-demos ] ++ applications)
+    ++ lib.optionals (selected "xfce") [ xfce4-session xfce4-panel xfce4-settings xfce4-appfinder xfdesktop xfwm4 xfce4-pulseaudio-plugin
+      (desktop "xfce" "Xfce Desktop" "x11" "org.xfce.xfdesktop") ]
+    ++ lib.optionals (selected "weston") [ weston xwayland
+      (desktop "weston" "Weston Desktop" "wayland" "computer") ]
+    ++ lib.optionals (selected "plasma") [ kdePackages.plasma-pa
+      (desktop "plasma-x11" "Plasma Desktop (x11)" "x11" "kde")
+      (desktop "plasma-wayland" "Plasma Desktop (wayland)" "wayland" "kde") ];
+  services.desktopManager.plasma6.enable = selected "plasma";
+  # The minimal LXC profile disables desktop integration by default.
+  xdg.autostart.enable = lib.mkOverride 900 graphical;
+  xdg.icons.enable = lib.mkOverride 900 graphical;
+  xdg.mime.enable = lib.mkOverride 900 graphical;
+  xdg.sounds.enable = lib.mkOverride 900 graphical;
+  # Android owns firmware and CPU power management, not this container.
+  services.fwupd.enable = lib.mkOverride 900 false;
+  services.power-profiles-daemon.enable = lib.mkOverride 900 false;
+  users.users = lib.genAttrs settings.users (_: {
+    isNormalUser = lib.mkDefault true;
+    initialHashedPassword = lib.mkDefault "!";
+  });
+  i18n.defaultLocale = lib.mkIf (settings.locale != "keep") settings.locale;
+  time.timeZone = lib.mkIf (settings.timezone != "keep") settings.timezone;
+  fonts.packages = lib.optionals (settings.fonts != "keep") [ pkgs.dejavu_fonts ]
+    ++ lib.optionals (settings.fonts == "cjk") [ pkgs.noto-fonts-cjk-sans ];
+  programs.dconf.enable = lib.mkIf graphical true;
+  services.dbus.enable = lib.mkIf graphical true;
+  hardware.graphics = lib.mkIf graphical { enable = true; package = mesa; };
+  environment.extraInit = lib.mkIf graphical ''
+    . /etc/profile.d/magicdesk-applications.sh
+    . /etc/profile.d/magicdesk-graphics.sh
+  '';
+  environment.etc = lib.mkIf graphical ({
+    "profile.d/magicdesk-applications.sh".text = ''
+      export DISABLE_RTKIT=1
+      export ALSA_PLUGIN_DIR=${pkgs.alsa-plugins}/lib/alsa-lib
+    '';
+    "asound.conf".text = ''
+      pcm.!default { type pulse }
+      ctl.!default { type pulse }
+    '';
+    "profile.d/magicdesk-graphics.sh".text = ''
+      export LIBGL_DRIVERS_PATH=${mesa}/lib/dri
+      export __EGL_VENDOR_LIBRARY_FILENAMES=${mesa}/share/glvnd/egl_vendor.d/50_mesa.json
+      export LD_LIBRARY_PATH=${lib.makeLibraryPath [ pkgs.libglvnd pkgs.vulkan-loader mesa ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+    '' + (if turnip then ''
+      unset LIBGL_ALWAYS_SOFTWARE
+      export MAGICDESK_MESA_PREFIX=${mesa} GALLIUM_DRIVER=zink MESA_LOADER_DRIVER_OVERRIDE=zink LIBGL_KOPPER_DRI2=true
+      export VK_DRIVER_FILES=${mesa}/share/vulkan/icd.d/freedreno_icd.aarch64.json
+    '' else ''
+      export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
+    '');
+    "magicdesk/root-session/autostart/xfce-polkit.desktop".text = ''
+      [Desktop Entry]
+      Type=Application
+      Name=XFCE PolKit
+      Hidden=true
+    '';
+    "magicdesk/session/weston/weston.ini".text = ''
+      [autolaunch]
+      path=${pkgs.writeShellScript "magicdesk-desktop-ready" "exec ${tools}/bin/magicdesk-desktop-session --ready"}
+    '';
+  } // lib.optionalAttrs (turnip && selected "plasma") {
+    "magicdesk/plasma-kwin.sh".text = ''
+      kwin_prefix=${kwin}
+    '';
+  } // lib.optionalAttrs turnip {
+    "shroot/render-node".text = "turnip\n";
+    "magicdesk/mesa-prefix".text = "${mesa}\n";
+  });
+  # Stable XDG entry points for discovery without evaluating a login shell.
+  system.activationScripts.magicdesk = lib.mkIf graphical {
+    deps = [ "etc" ];
+    text = ''
+      mkdir -p /usr/share/X11 /usr/local/bin
+      for name in applications icons pixmaps; do
+        ln -sfn /nix/var/nix/profiles/system/sw/share/$name /usr/share/$name
+      done
+      ln -sfn ${pkgs.xkeyboard-config}/share/X11/xkb /usr/share/X11/xkb
+      ln -sfn ${tools}/bin/magicdesk-desktop-session /usr/local/bin/magicdesk-desktop-session
+      ln -sfn ${tools}/bin/magicdesk-audio-session /usr/local/bin/magicdesk-audio-session
+      install -d -o root -g root -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
+    '';
+  };
+}
+NIXOS_MODULE
+}
+
+nixos_environment() {
+    cat <<'NIXOS_INITIAL'
+set -eu
+umask 022
+export HOME=/root NIX_REMOTE=local
+# A fresh LXC image has no active system/profile yet. Select its one closure;
+# subsequent runs always use the selected system generation.
+system=/nix/var/nix/profiles/system
+if [ ! -x "$system/sw/bin/nix-store" ]; then
+    system=
+    for candidate in /nix/store/*-nixos-system-*; do
+        [ -x "$candidate/sw/bin/nix-store" ] || continue
+        [ -z "$system" ] || { echo 'Ambiguous initial NixOS system closure.' >&2; exit 1; }
+        system=$candidate
+    done
+    [ -n "$system" ] || { echo 'NixOS system closure is missing.' >&2; exit 1; }
+fi
+export PATH="$system/sw/bin:/usr/local/bin:/bin"
+export NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos:nixos-config=/etc/nixos/configuration.nix
+# Activation and builders share guest-owned API mounts for this setup. Keep
+# Android device endpoints, but never change the host devpts permissions.
+unshare --mount "$system/sw/bin/bash" -s -- "$system" "$@" <<'NIXOS_ENVIRONMENT'
+set -eu
+system=$1
+shift
+mkdir -p /run /tmp /var/tmp
+devices=$(mktemp -d /tmp/magicdesk-dev.XXXXXXXX)
+mount --rbind /dev "$devices"
+mount -t tmpfs -o mode=755 tmpfs /dev
+for node in null zero full random urandom tty fuse kgsl-3d0 dma_heap dri; do
+    if [ -d "$devices/$node" ]; then mkdir -p "/dev/$node"
+    elif [ -e "$devices/$node" ]; then touch "/dev/$node"
+    else continue
+    fi
+    mount --bind "$devices/$node" "/dev/$node"
+done
+umount -l "$devices"
+rmdir "$devices"
+mkdir -p /dev/shm /dev/pts
+mount -t devpts -o newinstance,ptmxmode=0666,mode=0620 devpts /dev/pts
+ln -s pts/ptmx /dev/ptmx
+ln -s /proc/self/fd /dev/fd
+ln -s /proc/self/fd/0 /dev/stdin
+ln -s /proc/self/fd/1 /dev/stdout
+ln -s /proc/self/fd/2 /dev/stderr
+mount -t tmpfs -o mode=1777 tmpfs /dev/shm
+mount -t proc proc /proc
+NIXOS_INITIAL
+}
+
+nixos_environment_end() {
+    cat <<'NIXOS_END'
+NIXOS_ENVIRONMENT
+# Activation's /run is temporary. Later non-booted launches must resolve the
+# successfully activated generation, not the initial image's runtime link.
+current=/nix/var/nix/profiles/system
+[ -e "$current" ] || current=$system
+ln -sfn "$(readlink -f "$current")" /run/current-system
+NIXOS_END
+}
+
+nixos_bootstrap() {
+    # The official LXC archive has neither /bin/sh nor /etc/passwd until its
+    # first activation. A configured generation never needs the pinned shell.
+    if admin_exec "$name" -- /bin/sh -c ':' >/dev/null 2>&1; then return; fi
+    {
+        printf '%s\n' 'set -eu' '. /etc/os-release' '[ "$ID" = nixos ] && [ "$VERSION_ID" = 26.05 ]'
+        nixos_environment
+        printf '%s\n' 'exec "$system/activate"'
+        nixos_environment_end
+    } | shroot exec "$name" --user 0:0 --env HOME=/root -- \
+        /nix/store/0m1nl6fyb2zn779if6aaswmbwmmdnlwr-bash-interactive-5.3p9/bin/bash -s
+}
+
+nixos_setup() {
+    nixos_environment
+    cat <<'NIXOS_SETUP'
+mkdir -p /var/lib/magicdesk /etc/nixos /run /tmp /var/tmp
+exec 9>/var/lib/magicdesk/installer.lock
+flock -n 9 || { echo 'Another environment setup is running.' >&2; exit 1; }
+if [ -f /nix-path-registration ]; then
+    echo 'Registering the Nix store...'
+    nix-store --load-db < /nix-path-registration
+    rm /nix-path-registration
+fi
+if [ ! -e /nix/var/nix/profiles/system ]; then
+    nix-env -p /nix/var/nix/profiles/system --set "$system"
+fi
+ln -sfn "$(readlink -f /nix/var/nix/profiles/system)" /run/current-system
+echo 'Activating the initial NixOS configuration...'
+/run/current-system/activate
+if [ ! -e /nix/var/nix/profiles/per-user/root/channels/nixos ]; then
+    # Use the source shipped with the verified image, not today's channel head.
+    nix-env -p /nix/var/nix/profiles/per-user/root/channels --set \
+        /nix/store/vbxnw5yg270kybxiv79n39ad1p7bm74c-nixos-26.05.12530.c1ff116587e6
+    nix-channel --add https://channels.nixos.org/nixos-26.05 nixos
+fi
+gui=$1; protocol=$2; locale_name=$3; zone=$4; new_user=$5; fonts=$6; cache=$7; extras=$8; gpu=$9
+shift 9
+jobs=$1
+if [ "$gpu" = auto ]; then
+    gpu=software
+    if [ -c /dev/kgsl-3d0 ] && [ -r /dev/kgsl-3d0 ] && [ -w /dev/kgsl-3d0 ]; then gpu=turnip; fi
+fi
+if [ "$gpu" = turnip ]; then
+    [ -c /dev/kgsl-3d0 ] && [ -r /dev/kgsl-3d0 ] && [ -w /dev/kgsl-3d0 ] || {
+        echo 'Turnip requires access to /dev/kgsl-3d0; the system generation is unchanged.' >&2; exit 1;
+    }
+fi
+cd /etc/nixos
+# CLI values were validated before import; package names are attributes, not code.
+package_list=
+for package in $extras; do package_list="$package_list \"$package\""; done
+user_list=
+[ -z "$new_user" ] || user_list="\"$new_user\""
+desktop_list=
+case "$gui" in none|keep) ;; *) desktop_list="\"$gui\"" ;; esac
+nix-instantiate --eval --strict --json --expr "
+let defaults = { desktops = []; users = []; packages = []; locale = \"keep\"; timezone = \"keep\"; fonts = \"keep\"; gpu = \"software\"; };
+    old = defaults // (if builtins.pathExists ./magicdesk-settings.json then builtins.fromJSON (builtins.readFile ./magicdesk-settings.json) else {});
+    unique = items: builtins.foldl' (result: item: if builtins.elem item result then result else result ++ [item]) [] items;
+in old // {
+    desktops = unique (old.desktops ++ [$desktop_list]);
+    users = unique (old.users ++ [$user_list]);
+    packages = unique (old.packages ++ [$package_list]);
+    locale = if \"$locale_name\" == \"keep\" then old.locale else \"$locale_name\";
+    timezone = if \"$zone\" == \"keep\" then old.timezone else \"$zone\";
+    fonts = if \"$fonts\" == \"keep\" then old.fonts else \"$fonts\";
+    gpu = if \"$gpu\" == \"keep\" then old.gpu else \"$gpu\";
+    protocol = \"$protocol\"; jobs = $jobs;
+}" > magicdesk-settings.json.new
+mv magicdesk-settings.json.new magicdesk-settings.json
+mkdir -p magicdesk-files
+cat > magicdesk.nix.new <<'NIXOS_MODULE'
+NIXOS_SETUP
+    nixos_module
+    cat <<'NIXOS_SETUP'
+NIXOS_MODULE
+mv magicdesk.nix.new magicdesk.nix
+cat > magicdesk-files/magicdesk-desktop-session <<'NIXOS_DESKTOP'
+NIXOS_SETUP
+    desktop_session
+    cat <<'NIXOS_SETUP'
+NIXOS_DESKTOP
+cat > magicdesk-files/magicdesk-audio-session <<'NIXOS_AUDIO'
+NIXOS_SETUP
+    audio_session
+    cat <<'NIXOS_SETUP'
+NIXOS_AUDIO
+cat > magicdesk-files/mesa-options <<'NIXOS_MESA_OPTIONS'
+NIXOS_SETUP
+    mesa_options
+    cat <<'NIXOS_SETUP'
+NIXOS_MESA_OPTIONS
+cat > magicdesk-files/mesa.patch <<'NIXOS_MESA_PATCH'
+NIXOS_SETUP
+    mesa_patch
+    cat <<'NIXOS_SETUP'
+NIXOS_MESA_PATCH
+NIXOS_SETUP
+    cat <<'NIXOS_SETUP'
+cat > magicdesk-files/kwin.patch <<'NIXOS_KWIN_PATCH'
+NIXOS_SETUP
+    kwin_patch 6.6.6
+    cat <<'NIXOS_SETUP'
+NIXOS_KWIN_PATCH
+NIXOS_SETUP
+    mesa_source
+    cat <<'NIXOS_SETUP'
+printf '{ version = "%s"; sha256 = "%s"; }\n' "$version" "$archive_sha" > magicdesk-files/mesa-source.nix
+cat > magicdesk-mesa.nix <<'NIXOS_MESA'
+{ lib, stdenv, fetchurl, meson, ninja, pkg-config, bison, flex, python3,
+  libdrm, expat, zstd, zlib, elfutils, wayland, wayland-protocols, wayland-scanner,
+  libglvnd, vulkan-headers, glslang, libx11, libxext, libxfixes, libxxf86vm,
+  libxrandr, libxshmfence, libxcb }:
+let source = import ./magicdesk-files/mesa-source.nix;
+in stdenv.mkDerivation {
+  pname = "magicdesk-mesa";
+  inherit (source) version;
+  src = fetchurl { url = "https://archive.mesa3d.org/mesa-${source.version}.tar.xz"; inherit (source) sha256; };
+  patches = [ ./magicdesk-files/mesa.patch ];
+  patchFlags = [ "-p1" "--fuzz=0" ];
+  postPatch = ''
+    patchShebangs --build .
+  '';
+  nativeBuildInputs = [ meson ninja pkg-config bison flex wayland-scanner
+    (python3.withPackages (p: [ p.mako p.pyyaml p.ply p.packaging ])) ];
+  buildInputs = [ libdrm expat zstd zlib elfutils wayland wayland-protocols libglvnd
+    vulkan-headers glslang libx11 libxext libxfixes libxxf86vm libxrandr libxshmfence libxcb ];
+  mesonFlags = lib.filter (value: value != "")
+    (lib.splitString "\n" (builtins.readFile ./magicdesk-files/mesa-options));
+  postInstall = ''
+    python3 - "$out" <<'PY'
+import json
+from pathlib import Path
+import sys
+prefix = Path(sys.argv[1])
+path = prefix / 'share/glvnd/egl_vendor.d/50_mesa.json'
+data = json.loads(path.read_text())
+data['ICD']['library_path'] = str(prefix / 'lib/libEGL_mesa.so.0')
+path.write_text(json.dumps(data) + '\n')
+PY
+  '';
+}
+NIXOS_MESA
+if [ ! -e configuration.nix ] && [ ! -L configuration.nix ]; then
+    # LXC exports contain a system closure, not a user's rebuild configuration.
+    printf '%s\n' '{ ... }: {' \
+        '  imports = [ <nixpkgs/nixos/modules/virtualisation/lxc-container.nix> ./magicdesk.nix ];' \
+        '}' > configuration.nix
+fi
+if ! grep -Fq './magicdesk.nix' configuration.nix; then
+    # Also accept the minimal upstream LXC configuration. Never guess at an
+    # arbitrary user's Nix expression or replace their configuration wholesale.
+    stock='  imports = [ <nixpkgs/nixos/modules/virtualisation/lxc-container.nix> ];'
+    grep -Fxq "$stock" configuration.nix || {
+        echo 'Add ./magicdesk.nix to the imports in /etc/nixos/configuration.nix, then resume.' >&2; exit 1;
+    }
+    sed '\|^  imports = \[ <nixpkgs/nixos/modules/virtualisation/lxc-container.nix> \];$|c\  imports = [ <nixpkgs/nixos/modules/virtualisation/lxc-container.nix> ./magicdesk.nix ];' \
+        configuration.nix > configuration.nix.new
+    mv configuration.nix.new configuration.nix
+fi
+echo 'Building the NixOS system generation (packages and selected graphics)...'
+# Installers do not own PID1. boot selects the next generation without trying
+# to switch services in an unrelated Shroot launch; activation prepares files.
+# Only this trusted installer build opts out. The installed Nix configuration
+# retains sandboxing; activation and later user builds do not inherit overrides.
+nixos-rebuild boot --no-reexec --max-jobs 1 --cores "$jobs" \
+    --option sandbox false --option filter-syscalls false
+echo 'Activating the installed NixOS generation...'
+/nix/var/nix/profiles/system/activate
+ln -sfn "$(readlink -f /nix/var/nix/profiles/system)" /run/current-system
+export PATH=/run/current-system/sw/bin:/usr/local/bin:/bin
+test -x /sbin/init
+nix-store --check-validity "$(readlink -f /nix/var/nix/profiles/system)"
+if [ "$cache" = clean ]; then
+    # Nix outputs and generations are not a disposable package download cache.
+    echo 'Nix retains its store and generations; use nix-collect-garbage explicitly when appropriate.'
+fi
+echo 'NixOS generation prepared. Configuration: /etc/nixos/configuration.nix'
+NIXOS_SETUP
+    nixos_environment_end
 }
 
 system_setup() {
@@ -4463,6 +5752,10 @@ recipe_defaults() {
             source=https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/aarch64/alpine-minirootfs-3.23.6-aarch64.tar.gz
             source_sha=b17a57958e29735ff0e6e64254d958e65903687a70ca30cc430b33a965ad49d7
             source_kind=rootfs; version=3.23 ;;
+        nixos)
+            source=https://hydra.nixos.org/build/350465271/download/1/nixos-image-lxc-26.05.12530.c1ff116587e6-aarch64-linux.tar.xz
+            source_sha=333b1d718db3d99147ca2b5fb6d533b4aabaac98420d48e9a5369799433352ae
+            source_kind=rootfs; version=26.05 ;;
         fedora) source=registry.fedoraproject.org/fedora:44; version=44 ;;
         arch)
             # Official mirror with working TLS; archive authenticated with upstream's build key.
@@ -4522,6 +5815,8 @@ if [ "$#" = 1 ] && [ "$1" = --print-mesa-patch ]; then mesa_patch; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-flatpak-gl-helper ]; then flatpak_gl_helper; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-snap-gpu-helper ]; then snap_gpu_helper; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-system-setup ]; then system_setup; exit 0; fi
+if [ "$#" = 1 ] && [ "$1" = --print-nixos-setup ]; then nixos_setup; exit 0; fi
+if [ "$#" = 1 ] && [ "$1" = --print-nixos-module ]; then nixos_module; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-graphics-setup ]; then graphics_setup; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-weston-setup ]; then weston_setup; exit 0; fi
 if [ "$#" = 1 ] && [ "$1" = --print-desktop-session ]; then desktop_session; exit 0; fi
@@ -4529,7 +5824,7 @@ if [ "$#" = 1 ] && [ "$1" = --print-audio-session ]; then audio_session; exit 0;
 if [ "$#" = 1 ] && [ "$1" = --print-steam-game ]; then steam_game; exit 0; fi
 if [ "$#" -ge 1 ] && [ "$1" = --print-kwin-patch ]; then
     [ "$#" -le 2 ] || fail 'Expected one KWin version.'
-    kwin_patch "${2:-6.3.6}" || fail 'KWin version must be 6.3.6 or 6.2.5.'
+    kwin_patch "${2:-6.3.6}" || fail 'KWin version must be 6.6.6, 6.3.6 or 6.2.5.'
     exit 0
 fi
 if [ "$#" = 1 ] && [ "$1" = --print-recovery-reader ]; then recovery_reader; exit 0; fi
@@ -4539,7 +5834,8 @@ image=
 gui=
 protocol=both
 gpu=
-jobs=2
+jobs=4
+jobs_selected=no
 locale_name=
 zone=
 new_user=
@@ -4557,7 +5853,7 @@ while [ "$#" -gt 0 ]; do
             [ "$#" -ge 2 ] && [ -n "$2" ] || fail "Missing value for $1"
             case "$1" in
                 --distro) distro=$2 ;; --name) name=$2 ;; --image) image=$2 ;; --gui) gui=$2 ;;
-                --protocol) protocol=$2 ;; --gpu) gpu=$2 ;; --jobs) jobs=$2 ;; --locale) locale_name=$2 ;;
+                --protocol) protocol=$2 ;; --gpu) gpu=$2 ;; --jobs) jobs=$2; jobs_selected=yes ;; --locale) locale_name=$2 ;;
                 --timezone) zone=$2 ;; --create-user) new_user=$2 ;; --fonts) fonts=$2 ;;
                 --cache) cache=$2 ;;
                 --package) extras="${extras:+$extras }$2" ;; --dns) dns=$2 ;;
@@ -4592,16 +5888,16 @@ if [ "$yes" = no ]; then
     fi
     if [ -z "$gui" ]; then
         default_gui=apps; [ "$resume" = no ] || default_gui=keep
-        [ "$distro" != steamos ] || default_gui=plasma
-        ask 'GUI: none/apps/xfce/weston/plasma (Debian/SteamOS)/gnome (Fedora devkit)/keep' "$default_gui"; gui=$answer
+        case "$distro" in steamos) default_gui=plasma ;; nixos) [ "$resume" = yes ] || default_gui=plasma ;; esac
+        ask 'GUI: none/apps/xfce/weston/plasma (Debian/SteamOS/NixOS)/gnome (Fedora devkit)/keep' "$default_gui"; gui=$answer
     fi
     if [ -z "$gpu" ]; then
         default_gpu=keep
         if [ "$distro" = steamos ] && [ "$resume" = no ]; then default_gpu=auto; fi
         ask 'Graphics: keep/software/auto/turnip (Adreno KGSL; builds Mesa)' "$default_gpu"; gpu=$answer
     fi
-    if { [ "$gpu" = turnip ] || [ "$gpu" = auto ] || [ "$gui" = plasma ] || [ "$gui" = weston ]; } && [ "$jobs" = 2 ]; then
-        ask 'Compiler jobs for Mesa/KWin/Weston (1-8)' 2; jobs=$answer
+    if { [ "$gpu" = turnip ] || [ "$gpu" = auto ] || [ "$gui" = plasma ] || [ "$gui" = weston ]; } && [ "$jobs_selected" = no ]; then
+        ask 'Compiler jobs for Mesa/KWin/Weston (1-8)' "$jobs"; jobs=$answer
     fi
     if [ -z "$locale_name" ]; then ask 'Locale, e.g. ru_RU.UTF-8; keep leaves it unchanged' keep; locale_name=$answer; fi
     if [ -z "$zone" ]; then ask 'Timezone: system, IANA zone, or keep' keep; zone=$answer; fi
@@ -4630,6 +5926,8 @@ if [ "$resume" = yes ]; then
     gui=${gui:-keep}; fonts=${fonts:-keep}
 elif [ "$distro" = steamos ]; then
     gui=${gui:-plasma}; gpu=${gpu:-auto}; fonts=${fonts:-keep}
+elif [ "$distro" = nixos ]; then
+    gui=${gui:-plasma}; fonts=${fonts:-basic}
 else gui=${gui:-apps}; fonts=${fonts:-basic}; fi
 gpu=${gpu:-keep}
 locale_name=${locale_name:-keep}
@@ -4663,6 +5961,7 @@ fi
 
 # Read-only validation precedes every existing-environment mutation.
 if [ "$resume" = yes ]; then
+    [ "$distro" != nixos ] || nixos_bootstrap
     detected=$(admin_exec "$name" -- /bin/sh -c '. /etc/os-release; printf "%s\n" "$ID"')
     detected=$(distribution_id "$detected")
     [ -z "$distro" ] || [ "$distro" = "$detected" ] || fail 'Selected distribution does not match the existing environment.'
@@ -4678,7 +5977,7 @@ if [ "$distro" = steamos ]; then
 fi
 if [ -n "$image" ]; then source_kind=oci; else image=$source; fi
 [ "$gui" != gnome ] || [ "$distro" = fedora ] || fail 'The GNOME devkit recipe currently requires Fedora 44. Use apps, Xfce or Weston on other distributions.'
-[ "$gui" != plasma ] || [ "$distro" = debian ] || [ "$distro" = steamos ] || fail 'The Plasma recipe requires Debian 13 or SteamOS 0.3.0.'
+[ "$gui" != plasma ] || [ "$distro" = debian ] || [ "$distro" = steamos ] || [ "$distro" = nixos ] || fail 'The Plasma recipe requires Debian 13, SteamOS 0.3.0 or NixOS 26.05.'
 [ "$gui" != none ] || [ "$gpu" = keep ] || fail 'Choose a GUI profile before installing graphics; use --gui keep for an existing GUI.'
 [ "$resume" = yes ] || check_dns
 
@@ -4744,6 +6043,10 @@ if [ "$resume" = no ]; then
         stage='applying selected DNS to the new environment'
         shroot dns "$name" "$dns" --replace
     fi
+    if [ "$distro" = nixos ]; then
+        stage='activating the official NixOS image'
+        nixos_bootstrap
+    fi
 fi
 stage='validating the selected environment'
 admin_exec "$name" -- /bin/sh -c '
@@ -4759,6 +6062,7 @@ admin_exec "$name" -- /bin/sh -c '
         arch|manjaro|armtix) [ "$(uname -m)" = aarch64 ] ;;
         void) [ "$(xbps-uhelper arch)" = aarch64 ] ;;
         steamos) [ "$VERSION_ID" = "$2" ] && [ "$(uname -m)" = aarch64 ] ;;
+        nixos) [ "$VERSION_ID" = "$2" ] && [ -d /nix/store ] ;;
     esac || { echo "Unexpected distribution version or architecture; setup was not applied." >&2; exit 1; }
 ' sh "$distro" "$version"
 ready=yes
@@ -4783,9 +6087,15 @@ setup_build() {
     unset setup_phase
 }
 stage='installing packages and guest settings'
+install_guest_settings() {
+    if [ "$distro" = nixos ]; then
+        nixos_setup | setup_exec "$gui" "$protocol" "$locale_name" "$zone" "$new_user" "$fonts" "$cache" "$extras" "$gpu" "$jobs"
+    else
+        system_setup | setup_exec "$gui" "$protocol" "$locale_name" "$zone" "$new_user" "$fonts" "$cache" "$extras"
+    fi
+}
 while :; do
-    if system_setup | setup_exec \
-            "$gui" "$protocol" "$locale_name" "$zone" "$new_user" "$fonts" "$cache" "$extras"; then
+    if install_guest_settings; then
         break
     else
         setup_status=$?
@@ -4841,15 +6151,15 @@ if [ "$distro" = steamos ]; then
     '
 fi
 
-if [ "$gpu" != keep ]; then
+if [ "$distro" != nixos ] && [ "$gpu" != keep ]; then
     setup_build "$gpu graphics profile" graphics_setup "$gpu" "$jobs"
 fi
 
-if [ "$gui" = plasma ] || [ "$gpu" != keep ]; then
+if [ "$distro" != nixos ] && { [ "$gui" = plasma ] || [ "$gpu" != keep ]; }; then
     setup_build 'nested Plasma compositor' plasma_setup "$jobs"
 fi
 
-if [ "$gui" = weston ] || [ "$gui" = keep ]; then
+if [ "$distro" != nixos ] && { [ "$gui" = weston ] || [ "$gui" = keep ]; }; then
     setup_build 'Weston compatibility' weston_setup "$jobs"
 fi
 

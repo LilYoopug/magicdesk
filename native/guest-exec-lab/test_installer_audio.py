@@ -11,7 +11,7 @@ import tomllib
 CHECK = r'''
 set -eu
 test -n "$MAGICDESK_AUDIO_PULSE"
-exec timeout 45 dbus-run-session -- magicdesk-audio-session /bin/bash -c '
+exec timeout 45 dbus-run-session -- magicdesk-audio-session bash -c '
 set -eu
 test "$MAGICDESK_AUDIO_SESSION" = active
 test "$PULSE_SERVER" != "unix:$MAGICDESK_AUDIO_PULSE"
@@ -60,6 +60,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--names', nargs='+', required=True)
     parser.add_argument('--library', help='Same shell-owned library as the installer fixture')
+    parser.add_argument('--user', default='mdtester', help='Existing guest account')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     spec = importlib.util.spec_from_file_location('transport', repo / 'scripts/mcp-client.py')
@@ -73,7 +74,7 @@ def main():
     try:
         for name in args.names:
             operation = client.call('guest.start', {**({'library': args.library} if args.library else {}), 'arguments': [
-                'exec', name, '--user', 'mdtester', '--env', 'LC_ALL=C', '--', '/bin/sh', '-c', CHECK]})
+                'exec', name, '--user', args.user, '--env', 'LC_ALL=C', '--', '/bin/sh', '-lc', CHECK]})
             report['checks'].append({'name': name, 'operation': operation})
             deadline = time.monotonic() + 90
             while operation['state'] == 'running':

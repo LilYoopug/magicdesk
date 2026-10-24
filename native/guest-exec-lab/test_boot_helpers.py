@@ -14,6 +14,7 @@ import urllib.error
 from init_fixture import installed_boot, start_service, enable_runit_service, RUNIT_START
 from installed_desktop import wait_controller
 from test_os_boot import check_runit_boot
+from test_nixos_boot import boot_script
 from test_snap import PREPARE as SNAP_PREPARE
 
 sys.path.insert(0, str(Path(__file__).with_name('fixtures')))
@@ -22,6 +23,17 @@ from systemd_ready import wait_systemd
 
 
 class BootHelpers(unittest.TestCase):
+    def test_nixos_boot_keeps_activation_and_selected_network_policy(self):
+        for dhcp in (False, True):
+            with self.subTest(dhcp=dhcp):
+                boot = boot_script('/nix/store/system', '/nix/store/python/bin/python3', '/mnt/fixture', dhcp)
+                self.assertLess(boot.index('/nix/store/system/activate'), boot.index('exec /sbin/init'))
+                self.assertIn('systemctl is-system-running --wait', boot)
+                self.assertIn('PASS boot service IO and restart', boot)
+                self.assertEqual('umount /run/netns/md-nixos-client' in boot, dhcp)
+                self.assertEqual('systemctl restart dhcpcd.service' in boot, dhcp)
+                subprocess.run(['sh', '-n'], input=boot, text=True, check=True)
+
     def test_snap_prepares_existing_base_mounts(self):
         self.assertIn('systemctl start dbus.socket snapd.mounts.target snapd.socket\n'
                       'systemctl start snapd.service\nsnap version\n', SNAP_PREPARE)
@@ -45,6 +57,9 @@ class BootHelpers(unittest.TestCase):
                     self.assertNotIn('weston', boot)
                     self.assertIn('mount --rbind /dev /run/md-host-dev', boot)
                     self.assertIn('umount -l /run/md-host-dev', boot)
+                    for name, target in [('fd', '/proc/self/fd'), ('stdin', '/proc/self/fd/0'),
+                                         ('stdout', '/proc/self/fd/1'), ('stderr', '/proc/self/fd/2')]:
+                        self.assertIn(f'ln -s {target} /dev/{name}', boot)
                     if init == 'systemd' and user is not None:
                         self.assertIn('systemctl start dbus.service ', driver)
                         self.assertNotIn('systemctl start dbus.socket', driver)

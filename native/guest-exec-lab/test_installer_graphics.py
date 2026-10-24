@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch installer-owned catalog entries on an isolated display, without Desktop."""
+"""Launch installer catalog entries without Desktop, on a private or selected display."""
 import argparse
 import base64
 import importlib.util
@@ -15,6 +15,7 @@ def main():
     parser.add_argument('--names', nargs='+', required=True)
     parser.add_argument('--entry', help='Optional desktop-file basename filter')
     parser.add_argument('--lease', help='Retain an existing phone awake lease')
+    parser.add_argument('--display', type=int, help='Use this connected non-phone display instead of creating one')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     spec = importlib.util.spec_from_file_location('transport', repo / 'scripts/mcp-client.py')
@@ -24,6 +25,7 @@ def main():
     client = transport.Client(config['url'], config['http_headers']['Authorization'].removeprefix('Bearer '), timeout=180)
     report = {'checks': [], 'passed': False}
     display = lease = None
+    owned_display = False
     sessions = []
     destination = repo / 'build' / ('installer-graphics-' + '-'.join(args.names) + '.json')
 
@@ -55,9 +57,17 @@ def main():
         state = client.call('get_state')
         assert state['shell']['uid'] == 2000 and not state['workspaces'] and not state['graphics'], state
         report['app'] = state['app']
-        display = client.call('create_display', {'type': 'virtual', 'width': 1200, 'height': 800, 'densityDpi': 160})
+        if args.display is None:
+            display = client.call('create_display', {'type': 'virtual', 'width': 1200, 'height': 800, 'densityDpi': 160})
+            owned_display = True
+        else:
+            displays = client.call('list_displays')['displays']
+            display = next((d for d in displays if d['id'] == args.display), None)
+            assert display and not display['defaultDisplay'] and display['state'] == 2, displays
+        report['display'] = display
         lease = client.call('device.keep_awake', {'durationMillis': 1800000,
-                            **({'leaseId': args.lease} if args.lease else {'displayId': display['id']})})['leaseId']
+                            **({'leaseId': args.lease} if args.lease else
+                               {'displayId': display['id'] if owned_display else 0})})['leaseId']
         entries = []
         for name in args.names:
             catalog = client.call('list_desktop_entries', {'source': 'guest', 'query': '(' + name + ')', 'limit': 256})
@@ -85,10 +95,13 @@ def main():
                                   if w['mapped'] and not w['parentWindowId'])
                 hosts = wait('graphics_host_attached', sessionId=session, windowId=window)['matchingHosts']
                 assert len(hosts) == 1 and not hosts[0]['managed'], hosts
+                assert hosts[0]['displayId'] == display['id'], hosts
                 wait('app_ready', taskId=hosts[0]['taskId'], displayId=display['id'])
 
                 def rendered():
                     snapshot = next(s for s in client.call('graphics.list')['sessions'] if s['sessionId'] == session)
+                    assert not snapshot.get('error'), snapshot['error']
+                    assert all(h['displayId'] == display['id'] for h in snapshot['hosts']), snapshot
                     if not any(h.get('content') and h['content']['width'] > 0 for h in snapshot['hosts']):
                         return None
                     capture = client.call_result('capture_screenshot', {'taskId': hosts[0]['taskId']})
@@ -110,6 +123,13 @@ def main():
                 check['error'] = str(error)
                 check['graphics'] = client.call('graphics.list')
             finally:
+                if session is None:
+                    # A callback timeout does not cancel an accepted launcher.
+                    # Retire only the session published for this exact entry.
+                    pending = [s['sessionId'] for s in client.call('graphics.list')['sessions']
+                               if s['sessionId'] not in previous and s['name'] == entry['name']]
+                    for pending_session in pending:
+                        stop(pending_session)
                 if session:
                     stop(session)
                     sessions.remove(session)
@@ -124,7 +144,7 @@ def main():
             stop(session)
         if lease and not args.lease:
             client.call('device.release_awake', {'leaseId': lease})
-        if display:
+        if display and owned_display:
             client.call('remove_display', {'displayId': display['id'], 'uniqueId': display['uniqueId']})
         destination.write_text(json.dumps(report, indent=2) + '\n')
         print(destination, flush=True)

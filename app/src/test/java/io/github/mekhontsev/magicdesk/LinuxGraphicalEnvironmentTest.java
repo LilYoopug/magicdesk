@@ -64,6 +64,32 @@ public final class LinuxGraphicalEnvironmentTest {
         mountedCleanup(0, 0, true, false, true);
     }
 
+    @Test public void loginLogoutHooksDoNotInheritSessionStrictOptions() throws Exception {
+        assumeFalse(System.getProperty("os.name").startsWith("Windows"));
+        String shell = System.getenv("PREFIX") == null ? "/bin/bash" : System.getenv("PREFIX") + "/bin/bash";
+        org.junit.Assume.assumeTrue(Files.isExecutable(Path.of(shell)));
+        Path root = temporary.getRoot().toPath();
+        Path bin = Files.createDirectory(root.resolve("bin"));
+        Path runtime = root.resolve("runtime");
+        script(bin, "mktemp", shell, "mkdir \"$MD_DIRECTORY\"; printf '%s\\n' \"$MD_DIRECTORY\"\n");
+        script(bin, "dbus-run-session", shell, "shift; exec \"$@\"\n");
+        Files.writeString(root.resolve(".bash_logout"),
+                "test -n \"$MD_LOGOUT_UNSET\"\nprintf 'logout complete\\n'\n");
+        for (int status : List.of(0, 23)) {
+            ProcessBuilder builder = new ProcessBuilder(shell, "--noprofile", "--login", "-c", sessionScript(),
+                    "magicdesk-session", "wayland", shell, "-c", "exit " + status).redirectErrorStream(true);
+            builder.environment().put("HOME", root.toString());
+            builder.environment().put("PATH", bin + ":" + System.getenv("PATH"));
+            builder.environment().put("MD_DIRECTORY", runtime.toString());
+            builder.environment().remove("MD_LOGOUT_UNSET");
+            var result = BoundedProcessRunner.run(builder.start(), 5000, 16384);
+            assertEquals(result.output, status, result.exitCode);
+            assertTrue(result.output, result.output.contains("logout complete"));
+            assertFalse(result.output, result.output.contains("unbound variable"));
+            assertFalse(Files.exists(runtime));
+        }
+    }
+
     private void mountedCleanup(int applicationExit, int helperExit, boolean retain,
             boolean legacy) throws Exception {
         mountedCleanup(applicationExit, helperExit, retain, legacy, false);

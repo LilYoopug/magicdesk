@@ -21,6 +21,10 @@ def main():
     parser.add_argument("--protocol", choices=["x11", "wayland"], default="wayland")
     parser.add_argument("--frames", type=int, default=600, help="Bounded rendering workload, not a readiness delay")
     parser.add_argument("--trace", help="Optional native fault observer")
+    parser.add_argument("--display", type=int, help="Borrow this connected non-phone display")
+    parser.add_argument("--icd", default="/opt/md-gpu/turnip.json", help="Guest Turnip ICD manifest")
+    parser.add_argument("--home", default="/home/shell", help="Guest home directory")
+    parser.add_argument("--user", default="", help="Guest account or numeric identity")
     args = parser.parse_args()
     if not 1 <= args.frames <= 1000000:
         parser.error("--frames must be between 1 and 1000000")
@@ -38,6 +42,7 @@ def main():
               "passed": False, "app": before["app"]}
     console = client.call("console.open", {"directory": "/data/local/tmp"})["sessionId"]
     display = session = None
+    owned_display = False
     log = args.runtime + "/gpu-" + tag + ".log"
     receipt = log + ".exit"
 
@@ -56,9 +61,17 @@ def main():
         if not args.installed:
             command("ln -sf libmagicdesk_guest_run.so " + shlex.quote(args.runtime + "/shroot"))
         runner = "shroot" if args.installed else args.runtime + "/libmagicdesk_guest_run.so"
-        report["preflight"] = command(shlex.join([runner, "--store", args.store, "--",
-            "/bin/sh", "-ec", "command -v vulkaninfo; command -v vkcube; test -r /opt/md-gpu/turnip.json"]))
-        display = client.call("create_display", {"type": "virtual", "width": 1000, "height": 700, "densityDpi": 160})
+        report["preflight"] = command(shlex.join([runner, "--store", args.store,
+            *(["--user", args.user] if args.user else []), "--", "/bin/sh", "-lec",
+            "command -v vulkaninfo; command -v vkcube; test -r " + shlex.quote(args.icd)]))
+        if args.display is None:
+            display = client.call("create_display", {"type": "virtual", "width": 1000, "height": 700, "densityDpi": 160})
+            owned_display = True
+        else:
+            displays = client.call("list_displays")["displays"]
+            display = next((d for d in displays if d["id"] == args.display), None)
+            assert display and not display["defaultDisplay"] and display["state"] == 2, displays
+        report["display"] = display
         session = client.call("graphics.start", {"protocol": args.protocol, "backend": "shell", "connection": "routed",
             "name": "Guest Vulkan " + tag, "keyboardDirectory": args.keyboard_directory})["sessionId"]
         ready = wait("graphics_ready", sessionId=session)["session"]
@@ -68,16 +81,22 @@ def main():
             client.call("graphics.open_window", {"sessionId": session, "windowId": 0,
                 "placement": "display", "displayId": display["id"], "uniqueId": display["uniqueId"]})
             root_host = wait("graphics_host_attached", sessionId=session, windowId=0)["matchingHosts"][0]
+        from graphical_recipe import compile_recipe
+        report["recipeSources"] = compile_recipe(args.build / "recipe-classes")
         recipe = subprocess.check_output(["java", "-cp", str(args.build / "recipe-classes"),
-            "io.github.mekhontsev.magicdesk.GraphicalRecipe", "routed", args.protocol, args.store, "/home/shell",
-            "export VK_DRIVER_FILES=/opt/md-gpu/turnip.json; vulkaninfo --summary; "
+            "io.github.mekhontsev.magicdesk.GraphicalRecipe", "routed", args.protocol, args.store, args.home,
+            "export VK_DRIVER_FILES=" + shlex.quote(args.icd) + "; vulkaninfo --summary; "
             # XCB vkcube has no ICCCM identity; a normal WM publishes its WM_STATE.
             + ("env LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=softpipe xfwm4 --compositor=off & "
                "timeout 20 md-x11-desktop manager || exit $?; " if args.protocol == "x11" else "") +
             "exec vkcube --wsi " + ("xcb" if args.protocol == "x11" else "wayland")
-            + " --c " + str(args.frames) + " --width 640 --height 480"], text=True)
+            + " --c " + str(args.frames) + " --width 640 --height 480", args.user], text=True)
+        recipe_file = args.build / ("gpu-" + tag + ".sh")
+        recipe_file.write_text(recipe + "\n")
+        remote_recipe = args.runtime + "/" + recipe_file.name
+        report["recipeUpload"] = transport.upload(client, recipe_file, remote_recipe)
         launch = ("{ timeout 90 " + ("" if args.installed else "env PATH=" + shlex.quote(args.runtime + ":/system/bin"))
-            + " " + (shlex.quote(args.trace) + " " if args.trace else "") + "/system/bin/sh -c " + shlex.quote(recipe)
+            + " " + (shlex.quote(args.trace) + " " if args.trace else "") + "/system/bin/sh " + shlex.quote(remote_recipe)
             + "; r=$?; printf '%s\\n' \"$r\" > " + shlex.quote(receipt)
             + "; } > " + shlex.quote(log) + " 2>&1")
         client.call("graphics.execute", {"sessionId": session, "command": launch})
@@ -90,6 +109,7 @@ def main():
                 "placement": "display", "displayId": display["id"], "uniqueId": display["uniqueId"]})
             host = wait("graphics_host_attached", sessionId=session, windowId=window)["matchingHosts"][0]
         assert not host["managed"]
+        assert host["displayId"] == display["id"], host
         wait("app_ready", taskId=host["taskId"], displayId=display["id"])
         for frame in range(2):
             capture = client.call_result("capture_screenshot", {"taskId": host["taskId"]})
@@ -125,7 +145,7 @@ def main():
                 wait("graphics_session_absent", sessionId=session)
             except Exception as error:
                 errors.append(str(error))
-        if display:
+        if display and owned_display:
             try:
                 client.call("remove_display", {"displayId": display["id"], "uniqueId": display["uniqueId"]})
                 wait("display_absent", displayId=display["id"])

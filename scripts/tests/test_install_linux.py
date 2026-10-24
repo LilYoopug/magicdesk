@@ -91,6 +91,11 @@ if Path(sys.argv[0]).name == "magicdesk":
 if stage == "list":
     print(os.environ.get("TEST_ENVIRONMENTS", ""))
 if stage in ("exec", "login"):
+    if args[-3:] == ['/bin/sh', '-c', ':'] and os.environ.get('TEST_NIXOS_UNACTIVATED'):
+        sys.exit(1)
+    if stage == 'exec' and args[-2].endswith('-bash-interactive-5.3p9/bin/bash'):
+        Path(os.environ['TEST_PAYLOAD'] + '.bootstrap').write_text(sys.stdin.read())
+        sys.exit(0)
     if args[1] == "unpack":
         if args[-1] == "/mnt":
             Path(os.environ["TEST_PAYLOAD"] + ".reader").write_text(sys.stdin.read())
@@ -438,7 +443,8 @@ if os.environ.get("TEST_FAIL") == stage and "MAGICDESK_BUILD_PHASE=dependencies"
         self.assertEqual(1, result.returncode, result.stderr)
         self.assertIn("magicdesk is unavailable", result.stderr)
         for option in ("--help", "--list", "--print-mesa-patch", "--print-kwin-patch",
-                       "--print-system-setup", "--print-graphics-setup", "--print-weston-setup",
+                       "--print-system-setup", "--print-nixos-setup", "--print-nixos-module",
+                       "--print-graphics-setup", "--print-weston-setup",
                        "--print-recovery-reader", "--print-desktop-session", "--print-audio-session", "--print-steam-game"):
             with self.subTest(option=option):
                 result = self.run_script(option, TEST_UID="10001", TEST_VERSION_STATUS="3")
@@ -1483,7 +1489,7 @@ packages ninja meson pkgconf
         self.assertTrue(Path(str(self.payload) + '.gpu').is_file())
 
     def test_kwin_patch_versions_share_fence_contract(self):
-        for version in ('6.2.5', '6.3.6'):
+        for version in ('6.2.5', '6.3.6', '6.6.6'):
             result = self.run_script('--print-kwin-patch', version, TEST_UID='10001')
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn('DMA_BUF_IOCTL_EXPORT_SYNC_FILE', result.stdout)
@@ -1609,6 +1615,21 @@ packages ninja meson pkgconf
             self.assertEqual(jobs, self.calls()[-1][-2])
         self.assertRegex(fingerprints[0], r"^[0-9a-f]{64}$")
         self.assertEqual(*fingerprints)
+
+    def test_compiler_jobs_default_to_four_for_all_distributions(self):
+        for distro in ('debian', 'ubuntu', 'alpine', 'arch', 'steamos', 'fedora',
+                       'opensuse', 'void', 'armtix', 'openkylin', 'deepin', 'manjaro', 'nixos'):
+            with self.subTest(distro=distro):
+                self.log.unlink(missing_ok=True)
+                result = self.run_script('--yes', '--resume', '--name', 'work',
+                                         '--gpu', 'turnip', TEST_DISTRO=distro)
+                self.assertEqual(0, result.returncode, result.stderr)
+                if distro == 'nixos':
+                    self.assertEqual('4', self.system_setup_call()[-1])
+                else:
+                    builds = [c for c in self.calls() if 'MAGICDESK_BUILD_PHASE=build' in c]
+                    self.assertTrue(builds)
+                    self.assertTrue(all(c[-2] == '4' for c in builds), builds)
 
     def test_kwin_build_failure_preserves_environment_and_reports_resume(self):
         result = self.run_script("--yes", "--name", "plasma", "--resume", "--gui", "plasma",
@@ -1755,6 +1776,109 @@ packages ninja meson pkgconf
                     self.assertIn('/mnt/rootfs.tar.gz', converter)
                     self.assertEqual([['remove', 'unpack'], ['prune']], calls[-2:])
                 self.assertFalse(list(self.directory.glob('magicdesk-import-*')))
+
+    def test_nixos_pinned_rootfs_uses_declarative_setup_once(self):
+        result = self.run_script('--yes', '--distro', 'nixos', '--gui', 'xfce',
+                                 '--gpu', 'turnip', '--jobs', '3', '--package', 'ripgrep')
+        self.assertEqual(0, result.returncode, result.stderr)
+        download = next(c for c in self.calls() if c[0] == 'download')
+        self.assertIn('https://hydra.nixos.org/build/350465271/download/1/', download[1])
+        self.assertEqual('333b1d718db3d99147ca2b5fb6d533b4aabaac98420d48e9a5369799433352ae', download[-1])
+        setup = [c for c in self.calls() if c[0] == 'login' and '-s' in c]
+        self.assertEqual(1, len(setup))
+        self.assertEqual(['xfce', 'both', 'keep', 'keep', '', 'basic', 'keep', 'ripgrep', 'turnip', '3'], setup[0][-10:])
+        script = self.payload.read_text()
+        self.assertIn('nix-store --load-db < /nix-path-registration', script)
+        self.assertIn('nixos-rebuild boot --no-reexec', script)
+        self.assertIn('--option sandbox false --option filter-syscalls false', script)
+        self.assertEqual(1, script.count('--option sandbox false'))
+        self.assertIn('sandbox = true;', script)
+        self.assertNotIn('export NIX_CONFIG=', script)
+        self.assertIn('patchShebangs --build .', script)
+        self.assertEqual(1, script.count('unshare --mount'))
+        self.assertIn('"$system/sw/bin/bash" -s -- "$system" "$@"', script)
+        pts = script.index('mount -t devpts -o newinstance,ptmxmode=0666,mode=0620 devpts /dev/pts')
+        activate = script.index('\n/run/current-system/activate\n')
+        rebuild = script.index('nixos-rebuild boot --no-reexec')
+        self.assertLess(pts, activate)
+        self.assertLess(activate, rebuild)
+        self.assertLess(rebuild, script.index('\n/nix/var/nix/profiles/system/activate\n'))
+        self.assertLess(rebuild, script.index('\nNIXOS_ENVIRONMENT\n'))
+        self.assertGreater(script.index('current=/nix/var/nix/profiles/system'),
+                           script.index('\nNIXOS_ENVIRONMENT\n'))
+        self.assertTrue(script.rstrip().endswith('ln -sfn "$(readlink -f "$current")" /run/current-system'))
+        self.assertNotIn('apt-get', script)
+        self.assertEqual(0, subprocess.run(['sh', '-n', str(self.payload)]).returncode)
+        self.assertIn(self.run_script('--print-mesa-patch').stdout.strip(), script)
+        self.assertIn(self.run_script('--print-desktop-session').stdout.strip(), script)
+        self.assertIn(self.run_script('--print-audio-session').stdout.strip(), script)
+
+    def test_nixos_resume_retains_configuration_and_does_not_run_fhs_builders(self):
+        result = self.run_script('--yes', '--resume', '--name', 'existing', TEST_DISTRO='nixos')
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertFalse(any(c[0] in ('install', 'download', 'dns') for c in self.calls()))
+        setups = [c for c in self.calls() if c[0] == 'login' and '-s' in c]
+        self.assertEqual(1, len(setups))
+        self.assertEqual('keep', setups[0][-10])
+        script = self.payload.read_text()
+        self.assertIn('old.desktops ++', script)
+        self.assertIn('old.packages ++', script)
+        self.assertIn('old.users ++', script)
+        self.assertIn('grep -Fxq "$stock" configuration.nix', script)
+        self.assertIn('Add ./magicdesk.nix to the imports', script)
+        self.assertNotIn('cat > configuration.nix', script)
+        self.assertNotIn('nix-collect-garbage -', script)
+
+    def test_nixos_module_uses_native_generations_and_shared_helpers(self):
+        module = self.run_script('--print-nixos-module').stdout
+        self.assertIn('boot.isContainer = true;', module)
+        self.assertIn('sandbox = true;', module)
+        self.assertIn('settings.packages', module)
+        self.assertIn('settings.users', module)
+        self.assertIn('hardware.graphics', module)
+        self.assertIn('lib.makeLibraryPath [ pkgs.libglvnd pkgs.vulkan-loader mesa ]', module)
+        for option in ('autostart', 'icons', 'mime', 'sounds'):
+            self.assertIn(f'xdg.{option}.enable = lib.mkOverride 900 graphical;', module)
+        self.assertIn('X-MagicDesk-GraphicsMode = "desktop";', module)
+        self.assertIn('/nix/var/nix/profiles/system/sw/share/$name', module)
+        self.assertIn('. /etc/profile.d/magicdesk-graphics.sh', module)
+        self.assertNotIn('mkForce', module)
+
+    def test_nixos_defaults_to_the_complete_plasma_module(self):
+        result = self.run_script('--yes', '--distro', 'nixos')
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn('GUI=plasma', result.stdout)
+        module = self.run_script('--print-nixos-module').stdout
+        self.assertIn('services.desktopManager.plasma6.enable = selected "plasma";', module)
+        self.assertIn('(desktop "plasma-x11"', module)
+        self.assertIn('(desktop "plasma-wayland"', module)
+        self.assertNotIn('environment.plasma6.excludePackages', module)
+        self.assertIn('pkgs.kdePackages.kwin.overrideAttrs', module)
+        self.assertIn('kwin_prefix=${kwin}', module)
+        self.assertIn('patch --batch --forward --fuzz=0 -p1 < ${files}/kwin.patch', module)
+        self.assertIn('cmakeFlagsArray+=("-DCMAKE_AUTOGEN_PARALLEL=$NIX_BUILD_CORES")', module)
+        self.assertNotIn('patchFlags =', module)
+        self.assertIn('cat > magicdesk-files/kwin.patch', self.payload.read_text())
+        self.assertFalse(Path(str(self.payload) + '.kwin').exists())
+
+    def test_nixos_unactivated_image_uses_stock_activation_in_private_mounts(self):
+        result = self.run_script('--yes', '--distro', 'nixos', '--resume', '--name', 'fresh',
+                                 TEST_DISTRO='nixos', TEST_NIXOS_UNACTIVATED='1')
+        self.assertEqual(0, result.returncode, result.stderr)
+        bootstrap = Path(str(self.payload) + '.bootstrap').read_text()
+        self.assertIn('[ "$ID" = nixos ] && [ "$VERSION_ID" = 26.05 ]', bootstrap)
+        self.assertIn('unshare --mount', bootstrap)
+        self.assertIn('mount -t proc proc /proc', bootstrap)
+        self.assertIn('mount -t devpts -o newinstance,ptmxmode=0666,mode=0620 devpts /dev/pts', bootstrap)
+        self.assertIn('ln -s pts/ptmx /dev/ptmx', bootstrap)
+        self.assertIn('exec "$system/activate"', bootstrap)
+        self.assertLess(bootstrap.index('exec "$system/activate"'),
+                        bootstrap.index('\nNIXOS_ENVIRONMENT\n'))
+        self.assertTrue(bootstrap.rstrip().endswith('ln -sfn "$(readlink -f "$current")" /run/current-system'))
+        self.assertNotIn('|| true', bootstrap)
+        self.assertNotIn('cat > /etc/passwd', bootstrap)
+        self.assertNotIn('ln -s /nix/store', bootstrap)
+        self.assertEqual(0, subprocess.run(['sh', '-n'], input=bootstrap, text=True).returncode)
 
     def test_rootfs_converter_preserves_uncompressed_tar_bytes(self):
         result = self.run_script('--yes', '--distro', 'void', '--downloads', str(self.directory / 'downloads'))
@@ -2402,18 +2526,27 @@ packages ninja meson pkgconf
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
     def test_steamos_main_jobs_apply_to_mesa_and_kwin(self):
-        output = self.questions(b'steamos\n\n\nturnip\n4\nkeep\nkeep\nn\ny\n',
+        output = self.questions(b'steamos\n\n\nturnip\n\nkeep\nkeep\nn\ny\n',
                                 TEST_DISTRO='steamos')
-        self.assertEqual(1, output.count('Compiler jobs for Mesa/KWin/Weston (1-8) [2]'))
+        self.assertEqual(1, output.count('Compiler jobs for Mesa/KWin/Weston (1-8) [4]'))
         self.assertIn('Compiler jobs for Mesa/KWin/Weston: 4', output)
         builds = [c for c in self.calls() if 'MAGICDESK_BUILD_PHASE=build' in c]
         self.assertEqual(2, len(builds))
         self.assertTrue(all(c[-2] == '4' for c in builds))
 
-    def questions(self, answers, expected_exit=0, **environment):
+    @unittest.skipUnless(hasattr(os, 'openpty'), 'PTY required')
+    def test_explicit_jobs_are_not_asked_again(self):
+        output = self.questions(b'steamos\n\n\nturnip\nkeep\nkeep\nn\ny\n',
+                                args=('--jobs', '2'), TEST_DISTRO='steamos')
+        self.assertNotIn('Compiler jobs for Mesa/KWin/Weston (1-8)', output)
+        builds = [c for c in self.calls() if 'MAGICDESK_BUILD_PHASE=build' in c]
+        self.assertEqual(2, len(builds))
+        self.assertTrue(all(c[-2] == '2' for c in builds))
+
+    def questions(self, answers, expected_exit=0, args=(), **environment):
         master, slave = os.openpty()
         self.addCleanup(os.close, master)
-        process = subprocess.Popen(["sh", str(SCRIPT)], stdin=slave, stdout=slave, stderr=slave,
+        process = subprocess.Popen(["sh", str(SCRIPT), *args], stdin=slave, stdout=slave, stderr=slave,
                                    env=dict(self.environment, **environment))
         os.close(slave)
         def cleanup():
