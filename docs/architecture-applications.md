@@ -541,6 +541,8 @@ root requirement, new daemon, or automatic privilege escalation is introduced.
 
 ## Desktop Surface And Widgets
 
+### Desktop Grid And Widget Hosts
+
 `DesktopGridLayout` is a real `ViewGroup`, not a bitmap or remote task
 container. Every shortcut, file, and `AppWidgetHostView` remains an ordinary
 Android view with native accessibility and input behavior. Placements use
@@ -577,6 +579,8 @@ Provider clicks remain native; widget movement is entered
 explicitly from the context menu so drag handling cannot steal controls or
 scroll gestures from the provider. Binding and optional configuration use the
 system widget activities without privileged widget APIs.
+
+### File Browsing And Storage
 
 The fixed Desktop surface and the general Files task use separate typed AIDL
 contracts instead of interpolating filenames into shell commands.
@@ -638,6 +642,8 @@ the affected partial result intact instead of risking unrelated data. The list
 is discarded when the operation completes; it is not a persistent index.
 If cross-filesystem move cleanup fails after a complete copy, the destination
 is retained rather than risking loss of both copies.
+
+### File Operation Lifetime
 
 `FileOperationCenter` owns copy, move, and delete at MagicDesk process scope.
 Its `FileOperationState` binds callbacks to the originating request, including
@@ -712,6 +718,8 @@ The shortcut filter consumes desktop commands without forwarding text. Files
 and desktop files/folders use double-click to open by default, with one shared
 optional single-click mode in Settings.
 
+### Navigation And Directory Pages
+
 Files windows are separate Android tasks with independent navigation and
 selection state. `FileOperationClipboard` holds process-local shell paths and
 an explicit `COPY` or `MOVE` intent; it is not a text clipboard and is never
@@ -779,6 +787,8 @@ polling interval or guessed delay; manual refresh remains available when a
 filesystem cannot be observed. Both the callback and the posted reload retain
 the observer's generation; closing it invalidates already queued events, so
 an old directory cannot supersede a new navigation request.
+
+### Content Exchange
 
 Files opened or dragged into another application are exposed through the
 non-exported `ShellFileProvider` and a process-local capability URI. The registry
@@ -871,6 +881,8 @@ shell and Termux. `CommandStream` owns its transport: a privileged-service pipe
 for shell, or an authenticated loopback relay bootstrapped through the selected
 Termux endpoint. Both drain stdout/stderr continuously and close their owned
 process session on cancellation; no PTY is allocated for background commands.
+
+### Launch Dispatch
 
 The Android [external-command API](run-command.md) is a separate authorized
 adapter to these services. `RunCommandService` requires an Android dangerous

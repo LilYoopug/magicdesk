@@ -184,21 +184,27 @@ their own toolkit settings manager; Android focus/topology is unchanged.
 
 ## Privileged Service Runtime
 
-`IntegrationPackage` captures the configured Shizuku manager and Termux package
-names once at application startup. Settings can save new names or reset to the
-original packages. These bootstrap preferences live in app-private storage and
+### Startup Selection
+
+`IntegrationPackage` reads ordered, semicolon-separated Shizuku manager and
+Termux package lists once at application startup. It selects the first installed
+package in each list. Settings can save a new list or restore its defaults.
+These bootstrap preferences live in app-private storage and
 are readable before the privileged service connects, independently of shell-backed Desktop state.
 Changes take effect in the next process, without reconciling active services or
 terminals. **Exit MagicDesk** always ends the process after normal Desktop and
 shared-service cleanup; reopening applies all saved startup settings. It does
 not depend on which setting changed. UI, automation and command providers share
 this selection. Diagnostics
-exposes both active and configured values. There is no catalog of forks or
-automatic fallback to a different installed application.
+exposes the selected package and configured list. Selection is not persisted
+separately and does not change while the process is running. There is no runtime
+failover when the selected provider is stopped or denies authorization.
 
 The Shizuku manager package selects discovery and manager UI, not the Binder
 endpoint. A compatible authorized server can be ready without that manager
 installed. The normal API/UserService and UID checks remain authoritative.
+
+### Identity And Runtime Access
 
 `ShellBackend` selects the process-start transport, independently from the
 `RuntimeLimits` access ceiling (Root, Shell or App only). Limits also independently
@@ -222,6 +228,8 @@ verifies the expected PID, UID, nonce and APK build. `ShellServiceProcess` links
 the command service to the app's Binder lifetime; only an update worker can
 survive replacement. No root broker remains to execute application operations
 in a restricted session. See [Privilege boundaries](privilege-modes.md).
+
+### Connection And Helper Lifetime
 
 `ShellServiceConnection` owns a single binding attempt and publishes its actual
 verified UID, not the launcher's UID. An initialization failure cannot publish
@@ -251,6 +259,8 @@ periodic keepalives. `PhoneDisplayGuard` retains its one-second heartbeat only
 for fail-open display restoration if ownership is lost. Application working-state
 renewal belongs to the shared background-work owner described below.
 
+### Background Work
+
 `ShellBackgroundWork` owns explicit `IBackgroundWorkLease` lifetimes independently
 of HOME, Desktop and virtual-display allocation. Automation leases have a service-
 enforced deadline; the phone-power guard uses a Binder-owned lifetime. A CPU wake
@@ -270,6 +280,8 @@ There is no periodic task query. `PlatformBackgroundWork` supplies optional firm
 hints; the Android baseline adds none. Nubia's focused component renews its transient
 working state once per second through `RuntimeDelays.WORKING_STATE_REFRESH`, only
 while claims exist. Deadline callbacks are lifetime timers, not readiness waits.
+
+### PTY Transports And Shell
 
 Every retained Console session owns a lifecycle-bound `TerminalTransport`, one
 native PTY relay, and one interactive shell. `ShellPtyHandle` hosts
@@ -333,6 +345,8 @@ for every owned member to stop executing before reporting successful cleanup;
 delivery of SIGKILL or exit of the leader alone is not that acknowledgement.
 Independently sessionized processes, including tmux servers, remain outside
 this ownership boundary.
+
+### Console Sessions And Input
 
 `ConsoleTerminalSession` owns transport and terminal state independently of a window.
 The registry releases sessions on explicit termination, shell EOF or runtime exit.
@@ -421,6 +435,8 @@ channel and per-session notifications, with a user-initiated Activity entry
 returning through `ToolApplications`. `TerminalShellIntegration` supplies owned
 startup hooks without modifying user dotfiles. See [terminal integration](terminal-integration.md).
 
+### Console Presentation
+
 `ConsolePreferences` stores new-window font defaults in app-private preferences;
 the View owns its current sp size and the Activity saves that window value.
 Pinch and Ctrl+wheel are local presentation actions, never terminal mouse input.
@@ -449,6 +465,8 @@ The native relay has a small framed control protocol for input, resize, and
 working-directory requests. The Binder transport exposes raw output from its
 owned descriptor; the loopback transport frames output and metadata so one
 authenticated socket remains the complete ownership boundary.
+
+### Clipboard And Content
 
 `AndroidClipboardGateway` is the only direct `ClipboardManager` boundary.
 Console selection and terminal copy/paste callbacks, compatibility reports,
@@ -509,6 +527,8 @@ while the incoming grant is alive; accepted plain text becomes a UTF-8 desktop
 file. It does not retain incoming payloads, watch the clipboard, or start an
 idle service.
 
+### Foreground Processes And Tmux
+
 `TerminalTransport` also has an optional foreground-process capability. The
 Termux relay resolves the PTY foreground process group with `tcgetpgrp()` and
 reports a bounded executable name from its own `/proc` security domain. Console
@@ -556,6 +576,8 @@ process death cannot match a later request. `DesktopExecSessionTracker` records
 each execution separately, including repeated launches of the same command;
 late start acknowledgements cannot reopen a completed diagnostic session.
 
+### Command Environment
+
 `ShellExecutionEnvironment` defines the common execution profile used by the
 PTY relay, marker-delimited MCP shells, background shell Desktop Entries, and
 one-shot shell commands. It removes inherited Termux process variables and
@@ -583,6 +605,8 @@ shares connection bounds and redirect validation with `GuestOciRegistry`, whose
 HTTPS-only endpoint policy, registry authentication and content-addressed cache
 remain OCI-owned. Downloads run under the caller's UID without app initialization,
 Desktop, Termux, MCP or guest-runtime capabilities.
+
+### Framework Calls
 
 `TaskStackListener` does not reliably report changes to app-requested system-bar
 visibility, native freeform bounds, or organizer-child ordering. The centralized

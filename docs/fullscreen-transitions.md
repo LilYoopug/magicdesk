@@ -60,6 +60,8 @@ that would cover the desktop or disable the taskbar.
 
 ## Fullscreen Transactions
 
+### Planes And Launch Boundaries
+
 Each retained fullscreen plane also owns an empty, non-focusable separator
 Task in the standard workspace. `FrameworkRootTaskApi` creates that persistent
 root without registering a task organizer or taking surfaces away from WMShell.
@@ -98,6 +100,8 @@ explicit failure; UI callers do not bypass fullscreen ownership through a raw
 `TaskRepository` fallback. Developer-only raw automation remains separate from
 the semantic gateway.
 
+### Native Caption Transitions
+
 Native caption actions can leave a desktop-owned task fullscreen in the
 standard workspace before any MagicDesk command acquires an ordering plane.
 The existing mode-change observer passes this event to the plane owner. Native
@@ -127,6 +131,8 @@ the per-plane exit, while a task without one returns to freeform in place
 through the existing WMShell `CHANGE` transaction. Both paths confirm the
 requested freeform bounds. A failed plane exit never falls through to the
 in-place path, and an unrelated phone task is not claimed by restoration.
+
+### Caption Insets And Restore
 
 RedMagic external desktop windowing can retain a native caption inset after a task
 changes from freeform to fullscreen. The task and application window already
@@ -186,6 +192,8 @@ in-session caption repair remains separate; delayed callbacks cannot touch a
 released task or one whose live mode is no longer fullscreen. The empty planes
 are relinquished after the commit. No application is restarted, focused in turn,
 or moved through another display.
+
+### Immersive Requests And Placement
 
 When an application initiates immersive mode itself, the long-lived shell task
 observer retains its freeform bounds and does not recreate the Activity. The
@@ -253,6 +261,8 @@ launch after the framework has already changed the caller's configuration.
 The root-level chrome area avoids that sibling list. Its effective native
 priority requires the area's own `MULTI_WINDOW` mode; setting only its flag
 while it inherits fullscreen is insufficient.
+
+### Surface Ordering And Activation
 
 `ShellDesktopSurfaceOrder` owns only fullscreen-plane surfaces inside the
 standard workspace. Chrome retains no organizer leash and requires no manual
@@ -348,6 +358,8 @@ composition; newly established planes retain their launch boundary. Selection
 policy lives in `ShellWindowTransitionExecutor` for ordinary and mixed
 workspaces. The system transition replaces the freeform sync submission; it is
 not a second focus/raise after applying the same WCT.
+
+### Commit Observation
 
 The native phase ends at `FrameworkWindowCommitBarrier`, using Android 15+'s
 `IWindowManager.syncInputTransactions(true)` before returning to the topology

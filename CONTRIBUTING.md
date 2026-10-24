@@ -4,6 +4,15 @@ MagicDesk uses Gradle as its project definition. Open the repository root in
 Android Studio, IntelliJ IDEA, or another Gradle-aware editor; do not open the
 `app` directory as a standalone project.
 
+- [Branches And Releases](#branches-and-releases)
+- [Compatibility Direction](#compatibility-direction)
+- [Build Environment](#build-environment)
+- [Verification](#verification)
+- [Adding Platform Support](#adding-platform-support)
+- [Translations](#translations)
+- [Licensing](#licensing)
+- [Repository Hygiene](#repository-hygiene)
+
 ## Branches And Releases
 
 The repository uses two permanent branches:

@@ -5,6 +5,13 @@ and optional managed Desktop. The core uses Android services; focused firmware
 and SoC adapters extend individual capabilities. It is intended for contributors,
 reviewers and users diagnosing compatibility problems.
 
+- [Runtime Layers](#runtime-layers)
+- [Design Principles](#design-principles)
+- [Modules](#modules)
+- [Main Application Boundaries](#main-application-boundaries)
+- [Implementation Constraints](#implementation-constraints)
+- [Build And Release Boundaries](#build-and-release-boundaries)
+
 ## Runtime Layers
 
 `MagicDeskApplication` initializes shared runtime state only in the primary app

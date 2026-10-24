@@ -115,116 +115,73 @@ the supervised launch, and do not disable descendant ownership to pass a test.
 
 ### Ubuntu Firefox Snap
 
-The earlier Ubuntu recipe acceptance used a prepared libc, stock
-systemd/snapd, a Weston Wayland session and Zink/Turnip on Adreno 840. Weston
-renders; the stock user manager, session bus and root-owned document portal
-start. Firefox 158.0, Snap revision 9056, renders a local test page, accepts
-keyboard input and pointer clicks, downloads a known file and reads the same
-bytes back through the portal file chooser. Its support report confirms Wayland
-and effective content sandbox level 6. Application seccomp remains installed.
+Use an installed Ubuntu recipe environment, stock systemd/snapd, its ordinary
+user session and the recipe's Weston/Turnip profile. Stock libc is sufficient.
+The [distribution matrix](validation-matrix.md) owns current pass/fail status;
+[Ubuntu evidence](distribution-evidence.md#ubuntu) records exact builds, cold-start
+measurements, GUI runs, refresh and portal cleanup. Earlier successful runs are
+not acceptance of every later runtime or distribution.
 
-The original GPU failure came from inherited host EGL/Vulkan paths absent in
-Snap's mount namespace. `magicdesk-snap-gpu` now publishes the prepared driver
-through `mesa-2404:kernel-gpu-2404`; Firefox retains its official `gpu-2404`
-connection. The prototype passed Vulkan/Turnip enumeration and Wayland EGL;
-the recipe helper then passed ABI admission, package installation, repeated
-preparation without rebuilding, and Firefox WebGL2 green pixel readback.
-The WebGL renderer string is privacy-masked by Firefox; glxtest identifies
-Zink/Adreno 840. The shared Mesa patch now distinguishes hardware non-DRM
-devices from software devices using Gallium capabilities and physical UUIDs.
-Firefox's support report confirms `WebRender`, one accelerated window and
-content sandbox level 6 without forcing blocklist/sandbox preferences. Its
-DRM-dependent native compositor and video decoding remain unavailable.
+#### Session And GPU Preparation
 
-Preparation runs inside the booted guest after the graphics recipe:
+Use the real user manager's bus (`/run/user/UID/bus`) and import the compositor
+environment into activation services. An unrelated `dbus-run-session` bus cannot
+activate an already-running systemd user manager. In a focused control-target
+boot, start `snapd.mounts.target`, `snapd.socket` and `snapd.service` first.
+Starting one application unit alone can leave its base/content snaps absent;
+normal OS boot supplies those dependencies. Do not substitute custom binds or
+modified snap-confine arguments.
+
+The recipe's `magicdesk-snap-gpu` publishes the existing compatible private Mesa
+through the standard content connection; it does not build a second Mesa.
+Manual preparation inside the same booted guest is:
 
 ```sh
-magicdesk-snap-gpu --jobs 2
+magicdesk-snap-gpu --jobs 4
 ```
 
-`fixtures/egl-device.c`, compiled with `-lEGL -lGLESv2`, checks actual green
-pixel readback, device enumeration, stable handles across terminate/reinitialize
-and explicit rejection of unsupported DRM-node queries. Run it as
-`egl-device hardware wayland`, `egl-device hardware x11` and
-`egl-device hardware surfaceless` with the prepared Turnip profile, then repeat
-with `software` and softpipe selected. All six cases, plus X11 hardware with
-`LIBGL_KOPPER_DISABLE=1`, passed on Ubuntu/Adreno 840. The same shared patch was
-also built in the existing SteamOS installation: all six platform/renderer
-combinations passed three initialization/render/termination cycles each. Other
-recipe toolchains still need device build coverage; the installer test verifies
-identical GPU payloads for all twelve distribution choices.
-SteamOS Plasma was restarted through its ordinary installed launcher; KWin's
-live support report confirms Wayland backend, active OpenGL 4.6 compositing and
-Mesa 26.2.3 Zink/Turnip on Adreno 840. Konsole accepts keyboard commands in that
-session. This tests the existing installation, not a separate SteamOS image.
+See [Snap GPU preparation](../../docs/graphics.md#snap-gpu-drivers) for ABI checks
+and connection ownership. The shared Mesa patch and publisher serve every recipe;
+an SDK-specific experiment is not an automatic installer step.
 
-See [Snap GPU preparation](../../docs/graphics.md#snap-gpu-drivers) for
-prerequisites and ABI limits. The full GPU GUI cycle passes keyboard/pointer
-input, download, portal file selection, byte comparison and normal browser exit.
-The Weston 13.0.4 cycle also ended through guest `systemctl poweroff`, with
-supervisor exit zero; systemd had no failed units before shutdown. A subsequent
-focused real-init shutdown test covers the formerly failing host bind, 32 tmpfs
-mounts, preserved `/run/udev` and snapd-generator success.
-Deferred native births now retain their store connection across cache eviction;
-the runtime bind stays available until its consumers exit. The test also rejects
-device-submount remount warnings: metadata-only `/dev/full` pins no longer use
-Android's denied socket descriptor receipt. Native device data-access denial
-remains unchanged. Kernel-module warnings are not evidence of strict Snap
-confinement; exit zero alone does not certify a warning-free shutdown.
-
-The earlier Weston 13.0.0 crash is reproducible by opening Firefox's hamburger
-popup, then launching `weston-terminal` while that popup owns focus. GDB stops in
-`desktop-shell.so` through `weston_desktop_surface_foreach_child`: the callback
-dereferences shell data absent on a popup. Official 13.0.4 skips children without
-desktop user data. The recipe builds that maintenance release only for older
-13.0.x packages. The same popup/focus sequence passed under GDB and again after
-detach, followed by the complete GUI/exit workflow above.
-
-The separate GDB hang came from native-only poll fallback waiting with the
-adapter's signal shield, including SIGCHLD. The shared native continuation now
-restores the caller mask before waiting. The old runtime fails both the targeted
-signal regression and the real 41-thread GDB fork workflow; the corrected runtime
-passes them, plus attachment, active IO, SHM, JIT and strace-detach cases. See
-[guest debugging](../shroot/debugging.md) for ownership and coverage.
-
-Use the real user manager's bus (`/run/user/UID/bus`) for this scenario, and
-import the compositor environment into its activation services. An unrelated
-`dbus-run-session` bus cannot activate an already-running systemd user manager.
-In a focused control-target boot, start `snapd.mounts.target`, `snapd.socket`
-and `snapd.service` before launching installed snaps. Starting one application
-unit alone mounts its own image, but may leave its base/content snaps absent;
-the normal OS boot supplies those mount dependencies. Do not mask this fixture
-error with custom bind mounts or modified snap-confine arguments.
-The focused init regression is:
+For a focused init/namespace check:
 
 ```sh
 python3 test_snap.py --build BUILD --store STORE --snap firefox \
     --machine-entry --user-session --namespace-only
 ```
 
-With the content snap mounted in the same running guest, check its XKB mappings
-independently of the browser:
+Keep the stock Snap helper timeout. Record discarded-namespace cold startup
+separately from warm launches; a render after setup does not prove adequate
+cold-start margin.
+
+#### Mapping And Graphics Controls
+
+With the content snap mounted in that guest, check XKB mapping visibility:
 
 ```sh
 python3 fixtures/fuse-mapping-probe.py \
     /snap/gnome-46-2404/current/usr/share/X11/xkb/rules/evdev
 ```
 
-The probe checks initial read visibility; native FUSE fixtures separately cover
-shared write/truncate visibility and lifetime. See
-[mapping limits](../shroot/fuse.md#mapping-limits). The GUI run also exposed an
-adapter-internal prlimit call trapped by Firefox's SIGSYS handler. Poll limit
-validation now belongs to supervisor buffer admission; `test_epoll_runtime.py`
-checks this with and without PR_SET_DUMPABLE, preserves application SIGSYS and
-verifies simultaneous native and virtual readiness.
+This checks initial mapping visibility, not coherent writable shared mmap.
+Native fixtures own [FUSE mapping/lifetime coverage](../shroot/fuse.md#mapping-limits).
+`fixtures/fuse-squashfs.py` separately checks executable naming and a sibling
+library resolved through `$ORIGIN`.
 
-`fixtures/sandbox-browser-gui.py` retains a fresh profile and receipt/report files
-for the interactive workflow. Inside that already prepared Wayland/user-bus
-session, with the fixture directory bound into the guest:
+`fixtures/egl-device.c`, linked with `-lEGL -lGLESv2`, checks real green pixels,
+device enumeration, repeated initialization and rejected DRM-node queries.
+Run `egl-device hardware wayland`, `hardware x11` and `hardware surfaceless`,
+then repeat with `software` and softpipe. Retain the X11 control with
+`LIBGL_KOPPER_DISABLE=1`. These controls distinguish the driver from browser
+policy; they do not replace application acceptance.
+
+#### Interactive Browser Acceptance
+
+Inside the prepared Wayland/user-bus session, with the fixtures bound into the guest:
 
 ```sh
 python3 fixtures/sandbox-browser-gui.py --output /tmp/snap-gui-results
-# Other packaged-browser combinations use the same assertions:
 python3 fixtures/sandbox-browser-gui.py --browser chromium --package snap \
     --output /tmp/chromium-snap-gui --require-webgl
 python3 fixtures/sandbox-browser-gui.py --browser firefox --package flatpak \
@@ -232,34 +189,21 @@ python3 fixtures/sandbox-browser-gui.py --browser firefox --package flatpak \
 ```
 
 Type `shroot`, click the button, download the test file, and choose the printed
-download path through Browse. Close the browser normally. A successful report
-requires all four receipts, exact downloaded bytes and exit status zero.
-`--require-webgl` additionally requires the known WebGL pixel, but not a
-particular hardware renderer; inspect the returned renderer separately. The
-ordinary GUI report retains failed WebGL observations without claiming GPU
-success. No browser sandbox preference or command-line bypass is applied.
+download path through Browse. Close normally. Acceptance requires all receipts,
+exact bytes and exit status zero, followed by a same-profile relaunch. Verify
+document export/read/write/revocation and portal shutdown/FUSE mount cleanup
+separately; a chooser can succeed through a toolkit fallback without document grants.
 
-The shared workflow passes for SteamOS Flatpak Firefox under Plasma Wayland
-and Ubuntu Snap Chromium under Weston, both as the installed ordinary user.
-Each run verifies input, download, chooser upload, exact file contents, the
-WebGL pixel and normal exit. Firefox's support report confirms hardware
-WebRender. Without the optional discovery node, Chromium reports
-ANGLE/Zink/Turnip on Adreno 840 for WebGL but uses software window composition.
-With Shroot's [GBM discovery node](#gbm-discovery), the unchanged Chromium Snap
-also reports hardware composition. A WebGL pass alone is not a composition pass.
-Chromium's sandbox page reports namespace and seccomp-BPF/TSYNC support;
-renderer status also retains no_new_privs and seccomp filters. These checks
-do not establish kernel-equivalent isolation. Stock snapd detects absent
-AppArmor support and reports partial confinement, without a recipe-specific
-AppArmor disable switch.
+`--require-webgl` requires the known pixel, not a particular hardware renderer.
+Inspect Firefox's support report for hardware WebRender and content sandbox
+level; its renderer name may be privacy-masked. For Chromium, inspect hardware
+composition separately from ANGLE/Zink WebGL. The
+[GBM discovery node](#gbm-discovery) enables the supported composition path
+without a separate browser build or sandbox-bypass arguments.
 
-The Chromium launch regression required common file-capability admission and
-process-inspection credentials, not a snap-confine exception. Its reexec from
-FUSE also exposed lost executable naming: `/proc/self/exe` must retain the
-selected image's logical path so the loader can resolve `$ORIGIN/libffmpeg.so`.
-`fixtures/fuse-squashfs.py` checks this with a small executable and sibling
-library, independently of Chromium. See
-[image admission](../shroot/interception.md#image-admission-and-logical-credentials).
+Retain application seccomp/NoNewPrivs and normal sandbox preferences. Stock
+snapd detects absent AppArmor and reports partial confinement; the recipe does
+not force AppArmor off. Passing these checks is not kernel-equivalent isolation.
 
 ### Executable Private Memory
 
@@ -660,6 +604,10 @@ its distribution supplies `vulkan-tools`. Do not replace Android libraries.
 ICD, changing Android pixels, 600 frames and zero exit. X11 is a separate
 `--protocol x11` run with Xfce's window manager: the unmodified XCB cube does not
 publish an ICCCM name/class, and the manager supplies its `WM_STATE`.
+Use `--display ID` for a connected HDMI output instead of creating a virtual
+display; the fixture never removes a borrowed output. `--icd`, `--home` and
+`--user` select the installed guest driver and account, including Nix store
+paths. The preflight and rendered client both load the guest login environment.
 A software compositor or successful `vulkaninfo` alone
 does not establish guest GPU rendering. `--trace` accepts the optional static
 `md-trace-fault` observer. The production supervisor already owns ptrace for its
@@ -900,13 +848,18 @@ The test uses explicit guest DNS, not Android's encrypted resolver.
 installed audio wrapper, checks its private default sink and volume/mute changes
 during silent playback, then releases its processes. It does not change Android
 volume. Stream activation and property changes are observed through Pulse events.
+`--user ACCOUNT` selects an existing guest account (default `mdtester`); the
+fixture loads its login profile before locating distribution tools.
 
 `test_installer_graphics.py --names TEST_NAME ...` launches the installer's
 catalog entries on an owned virtual display without Desktop. It records actual
 native windows, Android hosts, screenshots and launch failures, then releases
 its sessions and display. `--entry TEXT` filters desktop-file names. An optional
 `--lease ID` retains an existing phone awake lease; otherwise the test owns a
-virtual-display lease. Package installation alone is not a passed graphics test.
+virtual-display lease. `--display ID` borrows a connected, awake non-phone output
+(for example HDMI) instead; it never removes that display, verifies every host
+lands there and uses the phone awake lease. Package installation alone is not a
+passed graphics test.
 
 To check the Debian installer's actual login profile, use
 `test_distribution_app.py BUILD --store HOST_STORE --runtime STAGED_HELPERS

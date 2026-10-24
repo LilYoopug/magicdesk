@@ -9,6 +9,8 @@ Stock namespace clients and credential workflows. Logical namespace success must
 
 ## Namespace Clients
 
+### Init And Proc Visibility
+
 `test_systemd.py --build BUILD --store STORE` runs stock systemd as guest PID 1
 under actual UID 2000. The disposable Debian-like store needs systemd, bash and
 util-linux including `script`; optional `--trace` also needs strace. It creates private namespaces,
@@ -53,6 +55,8 @@ hook and exact PID retirement. Default hardware service status is diagnostic,
 separate from the asserted init/service lifecycle.
 `init_fixture.py` owns the shared private-filesystem/console setup; OpenRC's
 in-guest observer does not import host-side transport dependencies.
+
+### Control Events And Descriptor Lifetime
 
 `test_resources.py BUILD --case control-event` runs source and virtual-interest
 model fixtures as UID 2000. They cover generation coalescing, concurrent
@@ -129,6 +133,8 @@ level: a valid maximally nested application epoll rejects it with ELOOP. This
 is a diagnostic boundary, not a production ownership mechanism. The fixture
 discovers the native depth rather than requiring a particular kernel's limit.
 
+### OpenRC And Namespace Lifecycles
+
 `test_openrc.py --build BUILD --store STORE` needs an Alpine store with openrc
 and util-linux. It runs stock sysinit/boot initialization and dedicated runlevels
 inside private mounts/PIDs, checks dependency order and daemon status/restart,
@@ -189,6 +195,8 @@ with separate `/etc` and `/usr` binds, merged-usr links, proc/dev mounts and
 private tmpfs. Its guest checks realpath and atomic replacement through proc-FD
 paths. The prepared store supplies Bubblewrap and ordinary shell utilities.
 
+### Mount And Device Providers
+
 `test_mount_api.py BUILD STORE` checks descriptor-based mounts with stock
 util-linux consumers. It covers filesystem-context lifetime and authority,
 SCM_RIGHTS, detached IO, recursive mount attributes and all-or-nothing rejection
@@ -223,6 +231,8 @@ warmed FD cleanup. It verifies that return-zero programs do not enforce device
 restrictions and that network hooks/maps/BTF remain unavailable. The store
 needs Python and util-linux, not host BPF permission or a compiler.
 
+### Networking And Container Engines
+
 `test_network_sysctl.py BUILD STORE` checks namespace-owned IPv4 parameters,
 bounded parsing, coordinated port ranges, namespace isolation and writer
 authority. It includes retained FDs across unshare, shared dup offsets, positional
@@ -251,11 +261,13 @@ when attempting to revoke direct native IO. Five-sample loopback direct/filter/
 NAT benchmarks report TCP echo throughput and addressed UDP round trips; run
 without concurrent suites for meaningful timing, not as a fixed performance gate.
 
-`probe_podman_runtime.py BUILD STORE --host-limits --exercise-ports` runs stock
+`probe_podman_runtime.py BUILD STORE --exercise-ports` runs stock
 Podman/crun/conmon/netavark with overlay, bridge/nftables, logical cgroups and
 application seccomp. It checks DNS/HTTP, two named peers, repeated TCP/UDP port
-publication, collisions and cleanup. `--host-limits` explicitly sets nofile/nproc
-to inherited shell ceilings, not a runtime fallback. The store needs these
+publication, collisions and cleanup. Ordinary acceptance uses Shroot's logical
+NOFILE/NPROC limits without container overrides. The optional diagnostic
+`--host-limits` sets them to inherited shell ceilings; that control is not a
+substitute for testing normal defaults. The store needs these
 packages plus Python and nftables. Optional `--trace` records exec, DNS-service
 and removal calls; its tracer drains after network teardown.
 `--cache` reuses only the fixture's disposable image storage.
@@ -272,6 +284,8 @@ Both engine fixtures perform twenty resolver queries per container and record
 their timings. A failed query retains the failure and adds raw A/AAAA diagnostics;
 it is not retried into a passing result. Internet DNS/HTTP requires a working
 external network, separately from local port and peer-exchange checks.
+
+### Proc, Sysfs And Desktop Services
 
 `test_proc_mount_policy.py BUILD STORE` checks omission of unsupported host-kernel
 controls in namespace-mounted proc, consistent lookup/enumeration, ordinary proc
@@ -365,6 +379,13 @@ The runner requires actual UID 2000 and creates its own preserved-ownership imag
 and instance. It checks independent root/non-root launches, chmod/chown/access,
 hardlinks, group copying and EFAULT, nondumpable processes, per-thread raw IDs,
 libc set-ID coordination, fork/exec, auxv and irreversible credential drops.
+Signal checks run without a PID namespace: foreign launch/guardian targets are
+rejected, including pidfds, and kill/tkill/tgkill/queued sends enforce guest IDs.
+A Nix-style `setuid` plus broadcast `SIGKILL` must terminate only the matching
+guest user; harmless permission probes precede it so an unfixed runtime fails
+without broadcasting a destructive host signal. Same-process sends remain valid
+during libc's per-thread set-ID coordination. The `signals` fixture argument
+runs this subset independently of the filesystem checks.
 Access checks include real/effective IDs across the whole path, empty-path
 descriptor/current-directory access, fchdir and inotify registration permissions.
 `--fixture ELF` additionally runs a glibc/musl build of `test_credentials_guest.c`

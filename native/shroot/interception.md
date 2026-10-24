@@ -14,13 +14,16 @@ service changes SELinux policy or acquires root.
 
 ## Execution And State
 
+### Bootstrap And Entry
+
 The bootstrap publishes a private, size-checked ABI containing its gate addresses
 at an explicit readiness stop. The supervisor reads it before resuming the guest;
 exec republishes the same immutable bundle's ABI. No generated address header,
 Java class name or environment-variable switch selects an implementation.
-The bootstrap also publishes an optional [cooperative entry](cooperative-entry.md)
-for source-level callers. It reuses the same worker and execution context;
-unmodified and filtered code retain their original SVC paths.
+The bootstrap also publishes the internal [cooperative entry](cooperative-entry.md)
+used by lazy SVC rewriting in unmodified programs. It reuses the same worker and
+execution context. Unsupported sites and application-filtered execution retain
+Base admission; no source-level libc patch is required.
 The dispatch gate receives policy and the retained typed-descriptor kind in x9
 and moves them to the C argument register in userspace. Descriptor classification
 belongs to the supervisor's ordered OFD capture; the adapter does not ask for
@@ -38,9 +41,11 @@ before NOTIF_RECV. The cold recovery path checks the stopped instruction,
 reenters the original SVC under the existing signal shield, and observes its
 actual exit or task-affine completion. Application filters still run at the
 original PC with all arguments intact. The saved signal, siginfo, registers and
-mask are restored at an owned trap, never in a handler's replacement context.
+mask are restored at an owned checkpoint, never in a handler's replacement context.
 No additional stop, ticket or ioctl is added to uninterrupted metadata reads.
 Directory cursors and mutating operations cannot use this replay path.
+
+### Image Preparation
 
 `command_image` owns ELF/shebang inspection and returns retained program/loader
 descriptors plus a pointer-free recipe. `command` assembles argv in its caller's
@@ -64,6 +69,8 @@ separate from this handoff.
 Same-thread descriptor aliases and the current executable are captured before
 worker admission. Unresolved proc magic links are rejected rather than resolved
 against a supervisor descriptor or the native bootstrap image.
+
+### Native IO And Selectors
 
 Data IO, common memory operations, futexes, clocks and signals pass directly to
 the kernel. `MD_DOMAIN_KERNEL_CALLS` and `MD_DOMAIN_KERNEL_ARGUMENTS` describe
@@ -111,6 +118,8 @@ without a fixed thread-count ceiling. Stack leases and ordering records are reus
 Origin-bearing opens and RPC exchanges allocate their own retained state; ordinary
 data IO does not allocate runtime bookkeeping.
 
+### Stop Ownership And Shared Buffers
+
 Cold stop-owning transactions share one admission check: entry revocation,
 private-memory repair, task-affine injection and guarded mapping cannot borrow
 each other's stopped tasks. The sole nesting exception is retirement of a
@@ -150,6 +159,8 @@ including partial reads. Both terminal IO and ordinary adapter returns use the
 same completion owner for signal/debugger state, registers and scratch-stack
 retirement. This transport is shared by proc files, FUSE and other virtual devices.
 
+### Filesystem Requests
+
 All guest filesystem operations, including opens/reopens and root changes, use this
 transport before admission when their inputs can be captured. The task-local
 path uses signal-neutral control checkpoints to lease, submit and release a slot after copying
@@ -177,6 +188,8 @@ back to RPC after execution. A pure O_PATH lookup can explicitly select rights
 transfer when no stable reopen source exists, before publishing any descriptor.
 Transport framing is checked separately from
 the common typed request and result contracts.
+
+### Stopped-Task Capture
 
 Open, unlink, rename, link and mkdir can capture their request directly while
 the task is ptrace-stopped, using the same scalar decoder, buffer pool, context
@@ -209,6 +222,8 @@ retain task-local admission; an explicitly unexecuted host delegation may also
 fall back. Executed mutations are never replayed. Creation/truncation opens
 enter through TRACE directly, while O_PATH ignores creation flags and remains on
 metadata notification admission. Ordinary data IO keeps its native path.
+
+### FD Result Publication
 
 For O_PATH results the worker transfers a retained source FD and origin to the
 receiving task's supervisor record. The adapter reopens `/proc/PID/fd/N` through
@@ -256,6 +271,8 @@ For a completed open observed at a signal-delivery stop, signal custody transfer
 to the retained queue only after buffer/result admission succeeds. If admission
 fails, the original kernel stop remains the sole delivery owner, including for
 queued realtime signals.
+
+### Typed Provider Reads
 
 Mapped watch reads use the same engine reservation as RPC. The supervisor offers
 the shared reply, then queues commit/rejection on the filesystem worker after the
@@ -312,6 +329,8 @@ Slot reuse clears its header prefix only; unused value pages are not touched by
 ordinary calls. Shared bytes do not contain ownership metadata or trusted pointers.
 Inherited shared bytes are not isolation between mutually hostile guest processes.
 
+### Descriptor Channels
+
 `fd_channel` owns both receive queues of a seqpacket pair in the supervisor.
 A file table acquires its CLOEXEC endpoint lazily via atomic ADDFD_SEND when
 protected input export or a result-rights transfer needs it.
@@ -349,6 +368,8 @@ kernel result belongs directly to the application. There is no temporary proc
 root or result FD to export/close, and no second read of an application pathname
 after it has been validated.
 
+### Result Ordering And Native Seeks
+
 `fd_return` orders result publication by destination table and channel; the
 channel turn also covers independent tables inherited through fork. One packet
 is offered at a time. `fd_delivery` prepares origins against a borrowed receipt
@@ -372,6 +393,8 @@ This needs no data-OFD mirror, transport FD or namespace metadata lookup.
 Directory seeks enter the namespace engine through mapped requests when the
 real description can be captured; no preliminary path anchor substitutes for
 its shared kernel position. Enumeration retains a separate delivery contract.
+
+### Broker Admission And Cancellation
 
 `namespace_broker.c` handles ordinary openat/fsopen/newfstatat/fstat/readlinkat/getdents64 notifications in the
 namespace worker, alongside adapter RPC. The worker alone owns SQLite and the
@@ -402,6 +425,8 @@ file-table/OFD turn spans output copying, notification reply and cursor commit.
 An invalid notification, rejected kernel reply or failed/partial copy cannot
 consume records; only a successful accepted reply advances the retained OFD.
 
+### Task Lifetime And Control
+
 Pidfds are owned by task lifetime, borrowed during request preparation and retired
 on exit or exec. No file-number, cwd, path or metadata cache is involved. Published
 supervisor state excludes restricted domains and adapter continuations from the
@@ -412,8 +437,10 @@ uncaptured inputs and nofollow sources without a stable backing use SCM_RIGHTS.
 Protected or filtered opens and directory seeks retain the task-affine adapter
 and its no-replay contract.
 Filesystem transports order descriptor capture and publication with native
-table mutations. RPC control uses an immutable bootstrap BRK entry point,
-not a new syscall subject to an application's seccomp syscall allowlist.
+table mutations. Adapter control uses immutable bootstrap SVC checkpoints owned
+by `task_checkpoint`, not service BRKs or application SIGTRAP. Selective TRACE
+handles unfiltered markers; restricted service execution uses scoped SYSEMU to
+skip registered markers while real calls retain kernel filter admission.
 Only a ready supervised task uses it. FD payload delivery has a retained kernel
 recvmsg receipt, so receiver death does not require a guest acknowledgement.
 Native adapter chdir/fchdir and a dedicated bootstrap O_PATH capture entry point
@@ -444,6 +471,8 @@ partial copies fail without automatic replay. Cancellation before publication
 leaves the cursor unchanged. Cancellation after publication/advance may have an
 uncertain outcome, like a lost RPC reply. Restricted domains retain their native
 descriptor-read policy, and application seccomp filters still apply.
+
+### Statistics And Raw Gates
 
 `shroot --statistics --store STORE -- PROGRAM` enables aggregate
 syscall/ptrace/stop counters, broker handling/delegation counts, engine operation

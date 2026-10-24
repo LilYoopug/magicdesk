@@ -5,6 +5,12 @@ runners. Production implementation belongs to [native/shroot](../shroot/README.m
 The [user guide](../../docs/shroot.md) describes supported workflows and limits;
 fixtures do not define a separate runtime or installation interface.
 
+- [Choose A Suite](#choose-a-suite)
+- [Evidence Rules](#evidence-rules)
+- [Installer Acceptance](#installer-acceptance)
+- [Named Environment Workflows](#named-environment-workflows)
+- [Prepared Runtime Fixtures](#prepared-runtime-fixtures)
+
 ## Choose A Suite
 
 | Contract | Guide |
@@ -163,6 +169,17 @@ dhcpcd against a fixture server in another guest namespace. It requires a lease,
 renewal, DNS hook options, routes and bidirectional traffic using the leased
 address. `--python PATH --path PATH` selects packaged tools in non-FHS guests
 such as NixOS; it does not substitute the client or change Android networking.
+`test_nixos_boot.py --build BUILD --store STORE --system CLOSURE --python PYTHON`
+boots an idle, disposable NixOS store through its stock activation and
+`/sbin/init`, using the common private init mounts. A private guest DHCP/DNS
+peer supplies a lease to the unmodified dhcpcd unit. Checks cover its non-root
+identity, capabilities, no-new-privileges and seccomp, address/default route,
+stock resolvconf, real libc DNS lookup, UDP traffic, service restart and
+shutdown. `--network preconfigured` instead boots a recipe generation with
+its launch-owned uplink, retaining the common systemd service and shutdown
+assertions without expecting a DHCP unit. `--entry base` repeats the boot without lazy entry. The fixture
+server is not a production DHCP service or an Android uplink test; neither
+Android addresses nor routes, DNS or privileged ports are changed.
 `test_routed_network.py` adds libc interface lookup, IPv4 packet information
 with absent/truncated receive buffers, a datagram queued before sender close,
 and receiver-close/rebind without reusing stale reply mappings.

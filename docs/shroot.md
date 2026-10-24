@@ -66,7 +66,7 @@ stop another launch. Persistent stores outlive those processes.
 | Area | Implemented behavior | Boundary |
 | --- | --- | --- |
 | Filesystems | Guest roots, mount views, DAC/ACL permissions, read-only/no-exec policy, Landlock filesystem rules | Unadapted calls and retained host descriptors are not fully confined |
-| Processes | Nested PID views, proc visibility, translated waits/signals and guest PID 1 lifetime | Not a host kernel PID namespace |
+| Processes | Launch-scoped signals with guest credential checks, nested PID views, proc visibility, translated waits and guest PID 1 lifetime | Not a host kernel PID namespace |
 | Credentials | Guest users, groups, capabilities, drops and namespace ownership | Guest root never grants Android root or kernel capabilities |
 | IPC and terminals | Separate SysV IPC owners, store-scoped pathname sockets, private devpts views | Inherited connections retain authority; explicit abstract Unix sockets share the host namespace |
 | Network | Offline child namespaces or routed IPv4/IPv6, private ports, supported nftables flow filtering and NAT | Native backing ports remain reachable; not a host firewall or full Linux network isolation |
@@ -189,12 +189,13 @@ are command-line options; `--yes` suppresses questions. `--list` is read-only.
 | Manjaro ARM | Official dated Manjaro ARM rootfs | apps, Xfce, Weston |
 | Void (glibc) | Official dated aarch64 rootfs | apps, Xfce, Weston |
 | Armtix (runit) | Official dated Armtix rootfs | apps, Xfce, Weston |
+| NixOS 26.05 | Official ARM64 LXC rootfs | Plasma 6 (default), apps, Xfce, Weston |
 | SteamOS ARM64 0.3.0 | Official Valve Steam Frame recovery archive | supplied applications, Plasma 6 |
 
 `none` installs console tools only. `apps` supplies Mousepad, Thunar and Xfce
 Terminal, XKB data, icons and a session D-Bus setup. `xfce` adds an X11 desktop;
 `weston` adds a nested Wayland desktop with Xwayland. `plasma` adds KDE Plasma 6
-with X11 and Wayland desktop entries on Debian and SteamOS. `gnome` selects Fedora's
+with X11 and Wayland desktop entries on Debian, SteamOS and NixOS. `gnome` selects Fedora's
 development-kit shell, not a systemd/GDM login session. GUI recipes are package
 configurations, not a claim of complete desktop compatibility. Fedora 44's Glycin
 2.1.5 decodes PNG and SVG through stock Bubblewrap with its original seccomp
@@ -339,6 +340,68 @@ to continue watching the same installer. **End session**, app process death and
 APK replacement end that PTY. Afterward, use resume in a new console. A saved
 command history or retained build directory is not a surviving installer process.
 
+#### NixOS
+
+```sh
+sh ~/install_linux.sh --distro nixos --name nixos --gpu turnip --jobs 4
+sh ~/install_linux.sh --name nixos --resume --package ripgrep
+```
+
+The recipe imports a checksum-pinned official NixOS LXC image, registers its
+Nix store and generates `/etc/nixos/magicdesk.nix`. Its first activation uses
+the shell shipped in that image: `/bin/sh` and the account database do not
+exist until NixOS creates them. Activation and the subsequent build share a
+private mount namespace with guest-owned API filesystems, including devpts.
+PTY ownership changes apply to guest metadata, not Android terminals; inherited
+console descriptors remain open. Stock activation runs unchanged, and a failed
+activation stops setup. After success, the selected generation is published for
+subsequent ordinary `shroot login` sessions outside the temporary init mounts.
+The initial channel uses the Nixpkgs source shipped in the verified image.
+A missing `configuration.nix` is created with the LXC and MagicDesk imports;
+it remains the place for your own Nix settings. Installer selections are stored
+in `magicdesk-settings.json` beside
+the module. Resume merges requested packages, accounts and desktops, and
+refreshes installer-owned files without replacing `configuration.nix`. For an
+existing environment with a different configuration, the installer asks you to add
+`./magicdesk.nix` to its imports rather than guessing how to rewrite Nix code.
+
+Package names are Nixpkgs attributes, including dotted names. Installation uses
+`nixos-rebuild boot`, then activates the selected generation's files; it does
+not start PID 1 or switch another running session's services. The trusted
+installer build passes command-local `sandbox=false` and `filter-syscalls=false`
+overrides to avoid build namespace and syscall-filter overhead. The installed
+Nix configuration retains sandboxing for later user builds; activation does not
+inherit these overrides. `--jobs` defaults to four cores per build, with one
+concurrent Nix build. Other distributions' Mesa/KWin/Weston build phases run
+directly in the guest, without an additional build sandbox. The separately
+requested Flatpak SDK build still uses its SDK environment for ABI compatibility.
+Missing dependencies come from the configured Nix caches or are built normally.
+Nix generations and store outputs are not removed by `--cache clean`; manage
+them explicitly with Nix's generation and garbage-collection commands.
+
+The default desktop is KDE Plasma 6, enabled through NixOS's
+`services.desktopManager.plasma6.enable` module with its normal applications,
+themes and integration packages. Xfce and Weston are optional profiles, not
+substitutes for Plasma. MagicDesk provides the graphical output, so the recipe
+does not start a hardware display manager. Firmware updates and CPU power
+management remain Android's responsibility.
+
+Use `--gpu software` to install the packaged desktop without the private Mesa
+and KWin builds. Nix still generates the system configuration and session tools;
+packages absent from its configured binary caches may require normal source
+builds. `--gpu auto` can select Turnip and therefore does not promise this path.
+
+The default module leaves addressing and DNS to Shroot's launch configuration:
+its preconfigured uplink has no DHCP server. These are overridable Nix defaults,
+not disabled runtime capabilities. A deliberately configured guest DHCP network
+can still use NixOS's networking services.
+
+Turnip is a Nix derivation using the same pinned Mesa source, patch and build
+options as the other recipes. Its immutable prefix is in `/nix/store`, not
+`/opt/magicdesk/mesa`. Session helpers, audio and application entries use the
+shared installer implementations. Stable XDG links expose the active system
+generation's applications and icons to MagicDesk's normal application search.
+
 #### SteamOS recovery image
 
 ```sh
@@ -466,7 +529,8 @@ Snap Chromium has hardware composition coverage on Adreno 840 with this path,
 without browser overrides; that does not establish video-decoding support.
 Steam's CEF interface and animated GLX output have coverage in nested Xwayland
 on Adreno 840. `--jobs N` controls compiler parallelism
-(1-8, default 2). Allow several GB of space for sources, build files and libraries.
+(1-8, default 4) across Mesa, KWin and Weston. Allow several GB of space for
+sources, build files and libraries.
 Build work stays in `/var/cache/magicdesk/mesa/` for resuming; completed libraries
 have an immutable recipe-addressed prefix in `/opt/magicdesk/mesa/`.
 
@@ -504,11 +568,16 @@ The lab obtains the identical patch with `sh scripts/install_linux.sh --print-me
 The `plasma` profile adds both `Plasma Desktop (x11)` and
 `Plasma Desktop (wayland)`. With Turnip selected, it additionally builds pinned
 KWin 6.3.6 for Debian 13 or 6.2.5 for SteamOS from a checksum-verified KDE archive.
+NixOS builds KWin 6.6.6 through an override of its pinned Nix package, retaining
+the distribution's dependencies and wrappers; the selected system generation
+references that build without rebuilding Mesa or replacing unrelated KDE packages.
 The shared DMA-BUF adapter and version-specific API changes are embedded
 in the installer (`--print-kwin-patch [VERSION]`). The build is guest-owned,
 not an APK dependency or system compositor replacement. The recipe includes
-Debian's Plasma dependency minimum. Work stays in `/var/cache/magicdesk/kwin/`,
-and complete builds use immutable `/opt/magicdesk/kwin/` prefixes. Only the
+Debian's Plasma dependency minimum. Debian and SteamOS keep work in
+`/var/cache/magicdesk/kwin/` and complete builds in immutable
+`/opt/magicdesk/kwin/` prefixes; NixOS uses Nix-managed build directories and
+store outputs. Only the
 Wayland desktop launcher selects those libraries, plugins and executables.
 An unsuccessful KWin build retains the previous KWin selection. Adding Turnip
 to an installed Plasma desktop also prepares its matching KWin adapter when
@@ -909,10 +978,12 @@ relay into that kernel connection retroactively. Close such connections before
 installing the restrictive policy. Addressed UDP retains its mapping until
 socket closure or relay idle expiry.
 
-This is not full network isolation. Backing ports remain reachable, inherited
-native descriptors retain access. Logical ICMPv6 supports link-local router and
-neighbor discovery, not arbitrary raw-IP internet access. TCP/UDP multicast and
-broadcast, routed `recvmmsg` and unsupported ancillary types fail explicitly.
+This is not full network isolation. Backing ports remain reachable, and inherited
+native descriptors retain access. Logical ICMPv6 supports router/neighbor
+discovery and local echo; raw UDP supports guest DHCP clients. UDP broadcast and
+IPv4/IPv6 multicast use namespace-owned memberships and the shared forwarding
+worker. This is not arbitrary raw-IP internet access or packet-level forwarding.
+Routed `recvmmsg` and unsupported ancillary types fail explicitly.
 Packet information and supported TTL/hop-limit/TOS/traffic-class controls are
 family-aware; device-bound sockets retain logical interface ownership.
 Anonymous nftables counters count logical data transfers
@@ -982,9 +1053,9 @@ For both engines, guest root is still real Android UID 2000. Enabled cgroups
 provide logical membership and permissive settings, not enforced resource or
 device limits.
 
-Libc preparation is independent of daemon setup. See
-[Alpine containers inside SteamOS](#alpine-containers-inside-steamos) for the
-shared-registry workflow and the distinction between selection and acceleration.
+Nested containers use their stock libc, without a registry or preparation step.
+See [Alpine containers inside SteamOS](#alpine-containers-inside-steamos) for an
+example and the distinction between lazy entry and filtered Base admission.
 
 ## Guest Credentials
 

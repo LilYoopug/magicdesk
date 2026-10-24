@@ -5,6 +5,13 @@ Execution preparation creates missing `/dev` and `/dev/shm` directories in the
 writable instance, retaining existing permissions and sealed-image contents.
 Already-open descriptors, mmap and descriptor passing use native data IO.
 
+- [Read-Only Anonymous Views](#read-only-anonymous-views)
+- [System V](#system-v)
+- [Ownership](#ownership)
+- [Operations](#operations)
+- [Embedded X11 Attachments](#embedded-x11-attachments)
+- [Checks](#checks)
+
 ## Read-Only Anonymous Views
 
 Some host policies deny reopening a readable memfd through `/proc/self/fd`.
@@ -110,8 +117,10 @@ shmdt and shmctl IPC_STAT/IPC_SET/IPC_RMID. Permissions use guest credentials;
 CAP_IPC_OWNER bypasses access checks but does not grant host authority or ownership
 changes. Protected memory is copied in the guest task with EFAULT semantics.
 
-The first attachment installs a narrow memory-observation filter for munmap,
-fixed mmap and mremap. Ordinary calls with no intersecting attachment continue
+The common memory-observation filter covers munmap, fixed mmap and mremap;
+attachments do not install another seccomp filter or override private task gates.
+Fork ordering is recorded on the shared address-space owner, including pending
+attachments, rather than on individual threads. Calls with no intersecting attachment continue
 natively; successful replacement/unmapping updates the same attachment owner.
 Partial unmaps retain surviving fragments. shmdt removes those fragments without
 unmapping an unrelated mapping inserted in a hole. Fragment counts do not model
@@ -208,6 +217,8 @@ the next address-space turn verifies both kernel mappings and logical references
 the new image verifies retirement of the old address space's attachments.
 The debugger suite's `gdb-shm` and `strace-shm` run stock tools against actual
 attachments and check that internal helper events do not appear as guest work.
+`test_resources.py --case private-memory` also combines an attachment with
+private-file JIT repair, fork and native unmap in Base and lazy-entry modes.
 
 `test_resources.py --case mapping-task` is a kernel-only feasibility fixture,
 not the production attachment path. A CLONE_VM helper with a private file table

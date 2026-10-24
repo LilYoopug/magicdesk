@@ -4,6 +4,13 @@ This is the current coverage and remaining validation plan, not a log of test
 runs. Build success does not prove firmware behavior. Exact run IDs, results,
 fingerprints and reproduction details belong in compatibility reports.
 
+- [Device Coverage](#device-coverage)
+- [Automated Coverage](#automated-coverage)
+- [Independent-Service Matrix](#independent-service-matrix)
+- [Remaining Desktop Validation](#remaining-desktop-validation)
+- [Appearance Validation](#appearance-validation)
+- [Additional Hardware And Release Coverage](#additional-hardware-and-release-coverage)
+
 ## Device Coverage
 
 | Device | Runtime | Exercised scope |

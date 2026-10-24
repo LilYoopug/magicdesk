@@ -1124,9 +1124,12 @@ be automatically retried after partial or unconfirmed completion. They use the
 for target lifetimes, graphics, terminal-state conflicts and CLI examples.
 
 **Settings > Integrations** selects the Termux and Shizuku manager packages;
-changes apply only at the next MagicDesk process startup. Compatible forks use
-the same command APIs. `get_state.integrationPackages` reports active/configured
-names and pending restart, `shell.managerPackage` names the selected manager,
+each field accepts a semicolon-separated list. At the next MagicDesk process
+startup, the first installed package is selected from left to right. Compatible
+forks use the same command APIs. `get_state.integrationPackages` reports the
+selected package, configured list and pending restart. Restart status compares
+the saved list with the startup list, not with the single selected package.
+`shell.managerPackage` names the selected manager,
 and `termux` reports the resolved command service and any availability error.
 MCP commands use the same selection as the UI, never an independent backend.
 

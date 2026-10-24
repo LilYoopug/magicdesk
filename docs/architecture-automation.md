@@ -11,6 +11,8 @@ Shared command, observation and diagnostic ownership. For the public tool contra
 
 ## Automation boundary
 
+### Actions And Observations
+
 - `DesktopAutomationController` is the typed action boundary for Desktop
   automation. It validates JSON arguments, delegates to shared services and session,
   task, window, capture, and UI controllers, and returns a uniform
@@ -46,6 +48,8 @@ Shared command, observation and diagnostic ownership. For the public tool contra
   Activity and marshals snapshots and semantic actions onto the UI thread.
   Invoking an element delegates to its existing click or long-click listener;
   automation therefore cannot grow a second Start, taskbar, or menu policy.
+### Android UI And Input
+
 - `AndroidUiAutomation` provides independent Android UI automation on API 34+.
   `ShellUiAutomationHandle` owns a Binder lifetime token; `ShellUiAutomation`
   connects one `UiAutomation` lazily under shell identity. The focused
@@ -83,6 +87,8 @@ Shared command, observation and diagnostic ownership. For the public tool contra
   bounded event journal plus final state and task snapshots. It adds no task
   observer and no persistent log. Exact UI waits use journal notifications and
   a bounded recheck for `View` state changes that Android does not publish.
+### MCP And CLI Transports
+
 - `MagicDeskMcpRuntime` is owned by `MagicDeskRuntimeService`. When explicitly
   enabled, it starts a bounded Streamable HTTP server on literal
   `127.0.0.1:8765`, plus an optional independently authenticated listener bound
@@ -132,6 +138,8 @@ Shared command, observation and diagnostic ownership. For the public tool contra
   existing lifetime contracts. The bridge adds no Desktop or shell startup
   prerequisite: each command still checks its own capabilities. Guest client
   mappings and shortcut flags carry no persisted authority.
+### Prompts And Notifications
+
 - `UserInteractions` owns script prompts and actionable notifications, lazily
   and independently of Desktop or MCP enablement. `UserInteractionRequest`
   validates bounded declarative content; `UserInteractionRegistry` retains
@@ -145,6 +153,8 @@ Shared command, observation and diagnostic ownership. For the public tool contra
   commands require MCP content access, rechecked after a wait. Replies are not
   published in diagnostic events. CLI `--field` projects one returned JSON field
   without introducing a second command schema or a JSON-parser dependency.
+### Device Checks, Transfers And Updates
+
 - `AutomationDeviceState` shares on-demand awake/lock prerequisites between MCP
   and the self-test launcher. Build, process and installation identities are
   separate observations. `DesktopSelfTestResult` persists an atomic JSON result
@@ -187,6 +197,8 @@ Shared command, observation and diagnostic ownership. For the public tool contra
   Client reconnect logic is outside the Android process. Reconnect expiration
   or a missing installer callback remains an unknown outcome, not permission
   to repeat installation. No update worker runs during ordinary operation.
+### Android Launch And Content Delivery
+
 - `AndroidIntegrationGateway` is the single application boundary for typed and raw
   Android intents, semantic URI/file/share operations, published shortcuts,
   notification `PendingIntent` actions, Activity results, and external App
@@ -280,6 +292,8 @@ Shared command, observation and diagnostic ownership. For the public tool contra
   task without moving or resizing it. Initial bounds are invalid with an exact
   task. A missing or mismatched exact task is a failure and never falls back to
   creating another window.
+### Activity Results And Grants
+
 - `AndroidActivityResultStore` owns the bounded lifecycle of document picker
   and other Activity results. Synchronous automation waits use `EventDrivenWaits`;
   UI owners subscribe to request readiness without occupying a worker while a
@@ -317,6 +331,8 @@ Shared command, observation and diagnostic ownership. For the public tool contra
   Nested diagnostic fields are copied when recorded; later edits to an
   operation response cannot modify the saved evidence. Result and event
   snapshots likewise never expose the registries' internal JSON objects.
+### Files And Terminals
+
 - Direct file reads, file writes and shell execution have separate permissions.
   `DesktopAutomationFileTools` delegates to the same typed `ShellFileSystem`
   service as built-in Files. `DesktopAutomationConsoleSessions` owns a bounded
@@ -342,6 +358,8 @@ Shared command, observation and diagnostic ownership. For the public tool contra
   path. Terminal input therefore reaches the real PTY directly instead of
   synthesizing pointer coordinates. Closing the MCP server does not terminate
   headless or user-owned terminal sessions.
+### Capture And App Functions
+
 - `CaptureRequest` describes an explicit display or task and an optional immutable pixel
   rectangle. `CaptureService` resolves geometry, validates selection,
   and asks the existing shell capture backend for one cropped PNG pipe or one

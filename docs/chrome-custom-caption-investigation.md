@@ -8,6 +8,16 @@ Status: unresolved firmware integration defect. All experimental runtime code
 was removed. This document records the evidence and rejected approaches; it
 does not describe a feature present in the current MagicDesk build.
 
+- [Goal](#goal)
+- [Expected Android Behavior](#expected-android-behavior)
+- [Confirmed Firmware Failure](#confirmed-firmware-failure)
+- [Generic Router Prototype](#generic-router-prototype)
+- [Transfer Experiments](#transfer-experiments)
+- [Self-Test Findings](#self-test-findings)
+- [Rejected Runtime Changes](#rejected-runtime-changes)
+- [Acceptable Solution Contract](#acceptable-solution-contract)
+- [Future Validation](#future-validation)
+
 ## Goal
 
 Allow applications such as Chrome to place interactive controls in Android's

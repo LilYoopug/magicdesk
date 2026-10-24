@@ -7,6 +7,12 @@ need no hooks: observed, eligible syscall sites enter the same provider.
 Source-built libc integration and its deployment registry have been removed.
 `--env SHROOT_MACHINE_ENTRY=0` selects Base without removing the shared handler.
 
+- [Call Contract](#call-contract)
+- [Execution Ownership](#execution-ownership)
+- [Sandboxes And Debuggers](#sandboxes-and-debuggers)
+- [Machine-Code Frontend](#machine-code-frontend)
+- [Verification And Performance](#verification-and-performance)
+
 ## Call Contract
 
 `cooperative_entry.h` accepts a syscall number and six original 64-bit arguments,
@@ -273,6 +279,8 @@ not retire a slot as if Linux had completed `close` with a late `EINTR`. Unknown
 outcomes abandon the metadata claim, never replay the effect. No allocation is
 required to publish an already-created native FD.
 
+#### Cancellation And Completed Effects
+
 A cancelled-before-effect plan returns explicit pre-execution handoff after its
 owners retire, not a synthetic `EINTR` to libc. If the signal handler returns,
 the caller executes its original syscall through ordinary admission. A handler
@@ -288,6 +296,8 @@ the pending result before route selection. A signal stop cancels any unadmitted
 next request before its handler can abandon the call frame. This is bounded
 one-request pipelining, not an unbounded FD cache or a second descriptor table.
 The synchronous receipt remains valid when the worker wins the publication race.
+
+#### Writable Opens And Birth Publication
 
 Writable, append and truncate opens prepare any required copy-up in the normal
 engine. Preparation never performs the application's data open or truncation:
@@ -355,12 +365,16 @@ Openat2 captures and validates the exact known open_how structure, including
 BENEATH/IN_ROOT/symlink restrictions; extended sizes retain the original decoder.
 O_PATH symlink endpoints also retain their existing route.
 
+#### Deferred Opens
+
 Deferred FIFO opens retain their helper and unpublished endpoint in the buffer
 service. Their guest waits in an interruptible native poll. Completion wakes the
 exact task; a signal cancels and reaps the helper before its ownership disappears.
 The existing syscall-restart path preserves kernel `SA_RESTART` and libc's
 cancellation PC. Neither the namespace worker nor a permanently stopped guest
 waits for the peer. Temporary signal shields do not become application masks.
+
+### Wait And Wake Protocol
 
 A release-published request has a monotonic sequence and one response receipt.
 Conditional wakeups use sequentially consistent wait registration and state
@@ -411,6 +425,8 @@ without a later worker write into abandoned memory. Reentry on a busy client
 keeps the ordinary syscall path; abandoning that client does not authorize reuse
 of an in-flight channel.
 
+### Bounded Resource Reuse
+
 `execution_window` is transport-independent bounded resource reuse. The inode
 provider holds only the store gate and its validated catalogue generation, not
 a transaction or an unfinished read operation. Stat, FD metadata, access,
@@ -435,8 +451,11 @@ borrow that retained anchor's descriptor, as do fstat/fstatfs. Data/offset and
 descriptor mutation operations which need the actual OFD still capture it.
 A relative operation additionally requires the exact
 base-mount anchor and descriptor, never a stale pathname or cached FD number.
-Nested mounts/providers and restricted
-native roots do not opt into this scope. Count/time expiry, provider changes,
+Dynamic local mounts do not disable retention for unrelated base-store paths.
+The inode walker revokes retention before entering the general mount/provider
+path; it preserves the executor's lifetime reference until normal window end.
+Foreign topology imports and restricted native roots retain separate admission.
+Count/time expiry, provider changes,
 delegation, parking and teardown end it. It caches neither stat
 results nor credentials/permission decisions; native attributes are read anew.
 Only the physical identity of a managed directory backing may survive between

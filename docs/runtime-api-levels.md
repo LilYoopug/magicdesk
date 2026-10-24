@@ -1,5 +1,10 @@
 # Runtime API Levels
 
+- [Supported Contract](#supported-contract)
+- [Boundary Enforcement](#boundary-enforcement)
+- [Release-Specific Behavior](#release-specific-behavior)
+- [Verification](#verification)
+
 ## Supported Contract
 
 The MagicDesk APK minimum is Android 14 / API 34. Managed Desktop requires

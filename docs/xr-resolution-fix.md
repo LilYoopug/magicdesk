@@ -1,5 +1,11 @@
 # VITURE XR resolution fix
 
+- [Problem](#problem)
+- [Runtime solution](#runtime-solution)
+- [Validated target](#validated-target)
+- [Source layout](#source-layout)
+- [Rebuild in Termux](#rebuild-in-termux)
+
 ## Problem
 
 On the RedMagic 11 Pro (`NX809J`), VITURE glasses can change their EDID through

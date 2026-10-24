@@ -40,8 +40,10 @@ use **Exit MagicDesk** to close active sessions. Uninstall the Shizuku manager
 before installing [Shevery](https://github.com/HmnDev-Tech/shevery/releases/latest):
 their Android permissions and provider authorities conflict. Start Shevery's
 server, then in MagicDesk's **Settings > Integrations** select **Shizuku** for
-**Privileged service** and set **Shizuku manager package** to
-`com.hamondev.shevery`. Exit and reopen MagicDesk, then grant access through
+**Privileged service**. The default **Shizuku manager package** list is
+`com.hamondev.shevery;moe.shizuku.privileged.api`; MagicDesk selects the first
+installed package at startup. If an older custom value is saved, reset the field
+or add Shevery to that list. Exit and reopen MagicDesk, then grant access through
 Shevery. Keep **Limits > Maximum access > Shell** for UID 2000.
 
 Alternatively, on a rooted phone, choose **Settings > Integrations > Privileged

@@ -28,6 +28,13 @@ is not a fallback for another task.
 See [namespace execution](namespace-execution.md) for the launch filesystem and
 [interception](interception.md) for restricted domains.
 
+- [Contracts](#contracts)
+- [Clone Admission](#clone-admission)
+- [Process Limits](#process-limits)
+- [Request Context](#request-context)
+- [Resource Changes](#resource-changes)
+- [Boundaries](#boundaries)
+
 ## Contracts
 
 | Area | Reference |
@@ -50,12 +57,19 @@ The existing signal shield covers preparation and replay, then restores the
 application mask immediately before kernel creation so the child inherits it.
 Denied or failed creation releases the same reservations and shield.
 
-`set_tid` allocation and `CLONE_INTO_CGROUP` remain explicit `EOPNOTSUPP` cases;
-host PID or cgroup identities must not substitute for guest ones. Clone-created
-pidfds support native wait/poll, but their logical descriptor annotation is not
-yet complete. `test_clone3.py` covers Base and lazy entry, fork/vfork/thread
-stacks, TID writes, pidfd wait, protected callers, namespace birth, seccomp
-denial and signal-handler reentry with unchanged parent/child masks.
+`pid_namespace` reserves requested `set_tid` values in logical PID views, including
+ancestor permission checks. `cgroup` reserves v2 placement before a
+`CLONE_INTO_CGROUP` birth. Failed creation releases both reservations; publication
+follows the confirmed child. A requested native ancestor PID still requires the
+host kernel's permission. Guest IDs and cgroup handles never substitute for
+unrelated host objects.
+
+Clone-created and received pidfds acquire logical identity on use through exact
+descriptor capture, not a guessed FD number. `test_clone3.py` covers Base and
+lazy entry, fork/vfork/thread stacks, TLS, TID writes, pidfd wait, logical PID
+selection, cgroup placement, protected callers and rollback. Versioned read-only
+arguments at a guard page, seccomp denial and signal-handler reentry retain
+native argument, mask and disposition checks.
 
 ## Process Limits
 

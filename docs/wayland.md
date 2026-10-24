@@ -190,6 +190,11 @@ through the [shared GPU importer](graphics.md#linux-buffer-import), without a
 DRM node. SHM/software remains the compatibility path; GPU drivers are not a
 startup requirement.
 
+Standard `single-pixel-buffer-v1` buffers use wlroots' shared scene renderer,
+including viewport scaling. `presentation-time` reports the headless output's
+software presentation event; it does not claim hardware-clock, vblank or physical
+scanout completion. Scene sampling and feedback lifetime remain owned by wlroots.
+
 The native runtime covers xdg-toplevel discovery and metadata, GPU/software
 rendering, configure/ack, frame callbacks, borrowed-output resize, pointer/key
 input, focus release and graceful close. Popup nodes retain their parent's native scene
@@ -606,6 +611,8 @@ isolation across exec. Unit tests cover UID/nonce admission and replay, and
 render admission without consuming frame credit. The window fixture covers
 minimum-size coordinate mapping, unchanged metadata, rendering backpressure and
 hidden-output suspend/resume.
+It also checks scaled single-pixel buffer colors and presentation feedback,
+including the absence of hardware timing flags.
 The shell fixture checks explicit admission, separate application/shell catalogs,
 logical output discovery, resizing, scale and removal without exposing render-only targets,
 initial configure delivery before the client's sync roundtrip and asynchronous

@@ -6,6 +6,11 @@ to the direct rootfs for unsupported virtual paths. This is an experimental
 runtime used by named Shroot environments, not a host kernel mount namespace, security sandbox
 or complete Linux ABI.
 
+- [Ownership](#ownership)
+- [File Contract](#file-contract)
+- [Proc Object Identity](#proc-object-identity)
+- [Verification](#verification)
+
 ## Ownership
 
 `namespace_run.c` owns a subreaper guardian. The guardian retains the supervisor

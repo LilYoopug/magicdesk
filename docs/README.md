@@ -50,7 +50,10 @@ The focused contracts remain authoritative for
 [fullscreen/focus](fullscreen-transitions.md), [window layout](window-layout.md),
 and [Shroot native internals](../native/shroot/README.md).
 Use [Shroot fixtures](../native/guest-exec-lab/README.md) for Linux checks and
-the [validation matrix](testing-backlog.md) for device coverage. Desktop
+the [device validation matrix](testing-backlog.md) for Android coverage and the
+[distribution matrix](../native/guest-exec-lab/validation-matrix.md) for per-OS
+Linux acceptance. Its [evidence ledger](../native/guest-exec-lab/distribution-evidence.md)
+keeps exact application receipts separate from the status tables. Desktop
 self-tests do not replace protocol, installer or guest-runtime workflows.
 
 ## Evidence And Project Policy

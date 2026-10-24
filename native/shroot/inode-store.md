@@ -59,6 +59,8 @@ misses trim idle excess. Cache capacity is not a guest `EMFILE` condition.
 `inode_schema.c` owns creation, format/revision admission, metadata upgrades,
 connection journal policy and rebuildable lookup indexes;
 `inode_path.c` resolves paths and reconstructs directory paths;
+`inode_path_cache.c` retains bounded directory-prefix routes and revalidates
+their ancestors against current caller and mount policy;
 `inode_cache.c` owns bounded metadata caching and row-dependency invalidation;
 `inode_store.c` defines namespace operations, `inode_directory.c` implements
 directory cursors, `inode_socket.c` implements socket publication and address
@@ -419,6 +421,32 @@ before releasing the snapshot. Points retain the selected view and mount context
 native identity alone cannot choose a bind alias. Crossing a provider releases
 the old transaction before entering another, avoiding cross-store lock ordering.
 
+Read-only `stat`, `readlink` and access queries complete against the selected
+inode inside that snapshot, without pinning final parent/object descriptors or
+resolving the leaf again. Mount policy, logical metadata, executable-catalogue
+projection and caller credentials remain authoritative. Operations returning
+objects or changing names still retain their normal descriptor/dentry custody.
+
+Base-store paths use the inode walker even after dynamic mounts. A compact
+native-identity filter, derived from the mount placement index, rejects only
+possible crossings; exact lookup confirms each hit. A confirmed crossing
+restarts through the namespace walker before mutation. Publication, move and
+detach invalidate the same index; there is no separate fixed mount-count limit
+or persisted path cache. Short single-store operation windows remain available
+after local topology changes. Before falling back to another mount/provider,
+the inode owner revokes gate retention; subsequent scopes acquire/release their
+own gates until the executor ends the window. Foreign topology imports and
+restricted roots keep independent admission. No launch-topology snapshot or
+cross-store lock retention is required.
+
+A bounded, connection-local prefix cache remembers up to 128 resolved directory
+routes, with at most 32 nodes per route. Catalogue mutation, rollback and an
+external data-version change retire routes. Every reuse rechecks ancestor search
+permissions, host-provider boundaries and exact current mount placement. The
+root and starting directory identity are part of the key. Terminal entries and
+native attributes are never cached here; symlink traversal, dot components,
+constrained walks and deeper suffixes continue through the ordinary resolver.
+
 Directory hard links and moves into descendants are rejected. Replacing or
 removing a directory requires it to be empty. Removed directories retain their
 identity and parent for live descriptors, report zero links and cannot acquire
@@ -537,14 +565,25 @@ independent of OCI parsing and launch-local directory attachments.
 - Each connection reuses compiled inode, descriptor, name and directory queries,
   plus BEGIN IMMEDIATE/COMMIT/ROLLBACK programs. Every use resets the statement and clears all bindings
   before leaving the operation. A bounded metadata cache is admitted against
-  SQLite's current data version; no read snapshot survives the operation.
+  SQLite's current data version; no read transaction survives the operation.
+  The SQLite page cache has a demand-grown 8 MiB target per connection; this
+  avoids repeatedly reading index pages during broad directory walks without
+  reserving that memory for small stores. It is separate from the bounded row
+  cache and does not change schema or invalidation semantics. Reverse directory
+  lookup uses the object index, not a scan over the parent's children. Mount
+  identity from a selected view does not require reconstructing the pathname.
   The exclusive store gate, not a read-only SQLite transaction, keeps catalogue
   observations consistent across the operation. Read scopes and native-name
   create/rename/unlink therefore issue no BEGIN/COMMIT. Catalogue mutation admits
   BEGIN IMMEDIATE before its first write; rollback and durable promotion keep
   their existing atomicity. The version check and interprocess gate are retained.
   Local preupdate hooks invalidate dependent object/name/backing/path rows,
-  including trigger changes, without running SQL from the hook. Rollback of
+  including trigger changes, without running SQL from the hook. The 4096-entry
+  cache separates descriptor and pathname sets. Dependency-version buckets
+  make invalidation independent of capacity; hash collisions only discard
+  additional entries. A parent attribute change does not discard unchanged
+  sibling names. External invalidation advances an epoch without clearing the
+  entire allocation. Rollback of
   mutations discards speculative records; read-only failure does not clear them.
   A versioned empty-catalogue fact lets native-name directories skip per-name
   SQL absence lookups. It does not cache native directory contents or imply
@@ -553,14 +592,16 @@ independent of OCI parsing and launch-local directory attachments.
   can make a catalogue entry visible.
   Other writers invalidate the cache on the next admission. Native attributes
   and permission decisions are not cached.
-  Within one locked operation, permission checks may reuse validation of up to
-  four local logical directories' physical identities. This avoids repeated
+  Within one locked operation/window, permission checks may reuse validation of
+  logical directory physical identities in a 256-entry set-associative table.
+  This avoids repeated
   backing `stat` calls during path search, parent-write and sticky checks.
   Every check still evaluates the current node and caller; ACL, Landlock and
   overlay policy remain independent. Admission and promotion to a catalogue
-  write clear this validation set. Native leaves, source directories, retained
+  write retire this validation set. Leased source directories follow the same
+  backing-identity contract. Native leaves, retained
   descriptors, physical-permission directories and user-visible stat bypass it.
-  No permission result or physical attribute snapshot survives the operation.
+  No permission result or physical attribute snapshot is retained.
   Resolved nodes in the current view also prime the descriptor index by backing
   device/inode, avoiding a second SQL lookup after open. Actual FD identity and
   native attributes still come from the kernel; old copy-up backings retain their
@@ -687,6 +728,8 @@ file/hardlink identity, inspection and downgrade rejection, busy live owners,
 concurrent updates, injected ENOSPC, and SIGKILL before/after commits including
 rollback-to-WAL preparation. It rejects transaction/journal control in upgrade
 SQL and checks dependent source leases, shared bodies and COW across revisions.
+Ordinary concurrent admission waits for the current upgrade; exclusive
+maintenance fails busy before waiting for the operation gate.
 An authorizer fixture rejects full-audit pragmas during ordinary admission,
 inspection, retained reconnects and file operations. File operations must not
 reenter schema admission. `test_oci.py` checks unsupported families, wrong application

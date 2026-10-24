@@ -57,6 +57,17 @@ service** set to **Shizuku**. Package changes apply after Exit and reopen;
 [setup instructions](getting-started.md#install) cover manager replacement.
 The effective UID and access limits apply equally to either manager.
 
+The package fields also accept an ordered list separated by semicolons. The
+Shizuku default is `com.hamondev.shevery;moe.shizuku.privileged.api`; an explicitly
+saved list is retained. At process startup,
+MagicDesk chooses the first installed package from left to right. Whitespace
+and empty separators are ignored. Only the list is saved, not the resolved
+choice; existing services never switch recipients in place. If none is installed,
+the first entry remains the destination for the existing unavailable/install
+diagnostics. Shizuku-Next uses the original Shizuku package name and needs no
+additional entry. This is package selection, not a separate privilege backend
+or a retry through another manager after a permission or service failure.
+
 **Settings > Limits (next app start) > Maximum access** applies to either backend:
 
 - **Root** permits the launcher's UID 0 or 2000, without elevating a shell launcher.

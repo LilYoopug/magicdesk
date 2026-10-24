@@ -7,6 +7,12 @@ The explicit [namespace executor](namespace-execution.md)
 routes selected guest syscalls here. Direct-backend hard-link controls remain
 separate from successful namespace package-lifecycle checks.
 
+- [Ownership](#ownership)
+- [Requests And Descriptors](#requests-and-descriptors)
+- [Outcomes And Cancellation](#outcomes-and-cancellation)
+- [Verification](#verification)
+- [Limits](#limits)
+
 ## Ownership
 
 - `fs_operation.h` defines borrowed requests, operation results and caller-owned

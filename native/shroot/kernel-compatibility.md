@@ -1,5 +1,9 @@
 # Kernel Compatibility
 
+- [Baseline](#baseline)
+- [Newer Interfaces](#newer-interfaces)
+- [Validation Limits](#validation-limits)
+
 ## Baseline
 
 Shroot's minimum supported kernel is **Linux 5.15**. This is a design/support
@@ -7,6 +11,8 @@ boundary, not a claim of complete device coverage. The MagicDesk APK remains
 Android 14 / API 34 and managed Desktop remains Android 15 / API 35; neither
 acquires Shroot's kernel requirements. Shell tools, Termux, prepared chroot and
 graphics services remain independent when guest execution is unavailable.
+
+### Guest FUSE
 
 Guest FUSE advertises protocol 7.31, with older daemon negotiation, through a
 typed guest `/dev/fuse` and the existing descriptor transport. It does not open
@@ -19,6 +25,8 @@ protocol, cancellation, publication and teardown. See [FUSE limits](fuse.md).
 `fuse_snapshot` reuses sealed images across exec/mmap with baseline F_DUPFD_CLOEXEC,
 FOPEN_KEEP_CACHE and explicit inode invalidation. Its bounded cache adds no host
 kernel dependency or work to ordinary native-backed IO.
+
+### Native Storage
 
 Native-leaf storage uses baseline openat/fstat/fchmod, user xattrs, proc FD magic
 links and fsync. `inode_native.c` uses the retained proc alias for O_PATH metadata,
@@ -41,6 +49,8 @@ that case and for exceptional metadata/ACLs. Other errors are not retried.
 `test_native_leaf` covers injected denials, exact native events, one-slot FD
 capacity and EMFILE cleanup; the cooperative runtime covers guest admission,
 publication, cancellation and watches. No kernel minimum or storage change.
+
+### Input And Network Providers
 
 The optional gamepad bus uses baseline Unix stream/datagram socketpairs,
 eventfd, poll/epoll, SCM credentials and the existing typed descriptor transport.
@@ -66,6 +76,8 @@ DNAT/SNAT adapters, bridge hairpin control, netlink credential snapshots and
 IPv4 IP_PKTINFO use baseline userspace wire formats
 and existing socket/relay owners. They introduce no newer host dependency.
 
+### Clock And Capability Admission
+
 Cooperative-entry spin timing optionally uses the arm64
 [`__kernel_clock_gettime@LINUX_2.6.39` vDSO ABI](https://man7.org/linux/man-pages/man7/vdso.7.html).
 `vdso.c` resolves its versioned export from the kernel's `AT_SYSINFO_EHDR`;
@@ -79,6 +91,8 @@ Admission uses actual operations under the selected executor identity, not an
 Android-version inference or `uname`-only capability check. Kernel configuration,
 SELinux, application filters and vendor backports affect availability. Headers
 merely allow compiling an operation; they do not make it available at runtime.
+
+### Limits, Cancellation And Landlock
 
 `process_limits` implements launch-local `RLIMIT_NPROC` accounting using the
 existing clone/identity/exit events, task-affine ABI copies and typed proc files.
@@ -111,6 +125,8 @@ from actual guest permission checks. The same ABI 1 assertions run under UID
 1000 in a reference Linux 6.18 QEMU VM; that reference does not raise Shroot's
 minimum. See [filesystem restrictions](../../docs/shroot.md#filesystem-restrictions)
 for provider limits and the difference from native security confinement.
+
+### Syscall Entry And FD Publication
 
 The baseline includes pidfds, selective ptrace, seccomp notifications,
 `openat2`, `faccessat2`, `close_range` and shared/sealed memfds. The native read
@@ -200,6 +216,8 @@ protected callers, preserved registers/NZCV and masks, application ERRNO/TRAP
 filters, and concurrent SIGSTOP/SIGCONT cycles. ARM64's temporary x7 marker at
 syscall stops is never copied back into the application context.
 
+### Cross-Process Rendezvous
+
 Private launch rendezvous reuses the registry's flags-zero pidfd, proc-descriptor
 identity and file locks, plus Unix seqpacket/SO_PEERCRED and nonblocking IO. It
 adds no newer-kernel primitive or shared-startup requirement. Discovery failure
@@ -211,6 +229,8 @@ flags, socket diagnostics or per-IO capability probe is required.
 Creation-time ancillary-format selection uses the existing IPC metadata gate,
 SQLite transaction and cookie binding. It adds no kernel primitive or probe;
 ordinary read/write remain kernel-owned.
+
+### Mount Policies And Graphs
 
 Shared mount policy uses memfd size seals plus `F_SEAL_FUTURE_WRITE`, present in
 the [Linux 5.15 seal ABI](https://github.com/torvalds/linux/blob/v5.15/include/uapi/linux/fcntl.h#L29-L41),
@@ -250,6 +270,9 @@ Failure does not change the selected identity or require them for other services
 Base-root relocation uses that same userspace graph, O_PATH custody and origin
 leases. Guest pivot_root does not issue a privileged host mount/pivot syscall or
 add a kernel capability requirement.
+
+### Namespace Events And Readiness
+
 Guest UTS and SysV IPC namespaces also use supervisor-owned resources, not host
 namespace privileges. Their clone/unshare adapters remove only the implemented
 namespace flags before the ordinary kernel transition and commit on its exact
@@ -282,6 +305,9 @@ remote-admission fixture uses baseline ptrace register/signal-mask access and
 seccomp TSYNC, preserving the application's filter decision. It compares native
 interrupt/restart behavior under dumpable and protected tasks; production
 cross-owner admission also has guest coverage with protected foreign readers.
+
+### Task-Affine Calls And Checkpoints
+
 The common task-call executor also uses baseline `PTRACE_GET_SYSCALL_INFO` and
 `NT_ARM_SYSTEM_CALL` to restore syscall entry/seccomp/exit boundaries without
 repeating side effects. Restart-code exits use the kernel-restarted entry to
@@ -325,6 +351,9 @@ exercise that path. Single-task admission can fall back from denied seccomp
 TSYNC to baseline PR_SET_SECCOMP, only after excluding siblings and private
 helpers. Native fixtures cover that application-filtered path at all supported
 continuation boundaries. The inventory/admission modules add no kernel API.
+
+### Native Wait Context
+
 Mixed-queue native waiting preserves the caller's signalfd and temporary
 signal-mask context when the caller exclusively owns its file table. This uses
 the existing ptrace syscall boundary and exact native descriptor, not a new
@@ -359,6 +388,9 @@ the existing process-image inspection, worker preparation and anonymous-image
 custody; it does not add a kernel exec or proc-FD capability requirement.
 Local typed SCM_RIGHTS custody adds a pipe EOF to the existing worker event loop;
 it needs no newer kernel API, polling loop or additional worker thread.
+
+### Process Birth And Proc Views
+
 Guest PID namespaces likewise use retained userspace identities, not native
 CLONE_NEWPID authority. `pid_namespace` and the supervisor use baseline clone,
 wait4/waitid, flags-zero pidfd_open/pidfd_send_signal, ptrace birth/exec/exit
@@ -405,6 +437,9 @@ memory adapter. Proc-root capture and live fdinfo use retained O_PATH/proc
 descriptions and that same private-table helper. None adds a post-5.15 runtime
 requirement; `test_thread_identity_runtime.py` and `test_proc_root_runtime.py`
 cover ordinary/protected tasks, PID namespaces and debugger ownership.
+
+### Memory And JIT Repair
+
 Noexec mapping policy uses the existing seccomp/ptrace observation and
 CLONE_VM ownership, not MFD_NOEXEC_SEAL or a host mount. MREMAP_DONTUNMAP is
 within the baseline (5.7 for anonymous private mappings, 5.13 for additional
@@ -459,6 +494,9 @@ userfaultfd probe separately tests full kernel-fault handling and
 Shroot or the private-view prototype. Available user-mode faults do not imply
 permission to service kernel accesses to missing pages. The experiment does not
 use newer userfaultfd move/poison ioctls or change SELinux/sysctl policy.
+
+### Executable And Descriptor Custody
+
 Anonymous ELF custody uses baseline `F_GET_SEALS`, CLOEXEC duplication, pread
 and backed mappings. It does not require `MFD_EXEC` or `MFD_NOEXEC_SEAL`.
 Read-only anonymous views and task-local controlled mappings use the same 5.15
@@ -574,6 +612,8 @@ export splits into existing 253-right packets. `--case fd-observation` checks
 protected callers, source-table replacement, quotas, filter denial and partial
 export cancellation. It adds no post-5.15 requirement or startup probe.
 
+### Network Configuration
+
 Offline network namespaces, private devpts views and permissive cgroups require
 no post-5.15 interface or host namespace/cgroup privilege. Their owners use the
 existing resource transactions, socketpair/SCM_RIGHTS, native PTY ioctls and
@@ -653,6 +693,8 @@ through proc: the retained description supplies the descriptor, as for anonymous
 ELF images. `--case mount-namespace` covers path/FD aliases, owner exit, recursive
 bind, copy-cycle prevention, authority and repeated lazy retirement.
 
+### Cgroups And Device Policy
+
 Logical `CLONE_NEWCGROUP`, namespace handles/ioctls and `setns` use the same
 resource transactions and control-file carriers. Captured hierarchy roots and
 user-namespace authority follow the Linux 5.15 contract; no host cgroup namespace
@@ -685,6 +727,8 @@ SCM_RIGHTS, readonly policy, failed FD publication, invalid attributes and exact
 warmed descriptor cleanup under UID 2000, plus map capacity/flags, key iteration,
 bad-pointer returns, shared descriptor identity, program-held map lifetime and
 two-stage instruction queries with short buffers, short ABI and invalid pointers.
+
+### Mount API And Transient Filesystems
 
 The descriptor mount API (`fsopen`, `fspick`, `fsconfig`, `fsmount`, `move_mount`,
 `mount_setattr`) follows
@@ -726,6 +770,8 @@ visibility, retained writers/mappings, cold reset and fail-fast maintenance.
 `test_inode_view.c` covers upper-policy propagation into writable overlays,
 denied upper acquisition/activation and independently scoped overlay remounts.
 Both temporary kinds are disk-backed, not memory-only/no-swap implementations.
+
+### Rejection And Auxiliary Providers
 
 TCP REJECT uses baseline SO_LINGER with zero linger on relay-owned stream FDs
 (`network_forward.c`), not host netfilter or raw packet injection. Local
@@ -834,6 +880,8 @@ clone and ADDFD operations. ADDFD also covers EINVAL and EACCES. Each rejected
 guest probe must leave an independent shell usable. Probe success alone is not
 certification of the full execution path.
 
+### Optional Probe Coverage
+
 `test_resources.py --case pidfd-table` is a separate 6.9+ feasibility check,
 not part of the baseline suite or production adapter. Sixteen cases cover
 same-group private-table getfd with ordinary/nondumpable tasks, zero to three
@@ -863,6 +911,8 @@ They add no post-5.15 dependency or separate transport implementation.
 Superseded private-engine FD relays and whole-loop read-lease experiments are
 removed. Their historical measurements do not establish sandbox admission or
 authorize reopening an ordinary proc FD link as generic descriptor transfer.
+
+### Signal And Checkpoint Coverage
 
 The shared deferred-standard-signal owner uses baseline tkill and ptrace
 siginfo/mask operations, not service single-step. It queues the retained signal's
@@ -919,6 +969,8 @@ limitation remains: fallback userspace LDR/STR faults can reset ignored/blocked
 SIGSEGV before the tracer receives the fault. The checkpoint fixture retains
 explicit negative controls against native EFAULT behavior; replacing completion
 markers is not a fix for faulting memory access.
+
+### Lazy SVC And Publication Coverage
 
 The default [lazy-entry owner](../guest-exec-lab/svc-rewriting.md)
 (`SHROOT_MACHINE_ENTRY=0` selects Base) uses no hardware-breakpoint experiment. `svc_runtime.c` prepares private frames and nearby RX pools;

@@ -4,6 +4,10 @@ This guide describes the current machine-entry contract and its regression
 fixtures. Superseded predecessor/call-edge, hardware-breakpoint, mirror-loader
 and source-built-libc experiments are removed; Git retains their history.
 
+- [Product Boundary](#product-boundary)
+- [Regression Commands](#regression-commands)
+- [Admission Limits](#admission-limits)
+
 ## Product Boundary
 
 The ordinary bootstrap/supervisor enables lazy entry by default for inode-store

@@ -5,6 +5,11 @@ backend. It uses Android's Vulkan driver when the required capabilities are
 available and retains a software backend. It does not require Desktop, root,
 Termux, a DRM device, or EGL. The Android baseline is API 34.
 
+- [Boundaries](#boundaries)
+- [Linux Buffer Import](#linux-buffer-import)
+- [Protocol Adapters](#protocol-adapters)
+- [Completion And Failure](#completion-and-failure)
+
 ## Boundaries
 
 App-side launches pass `GraphicalLaunchOptions` directly to both session backends.
@@ -299,7 +304,7 @@ not made compatible merely by copying its driver libraries.
 
 ### Server Composition
 
-The installer's optional KWin 6.3.6 patch is a Linux client-side nested-compositor
+The installer's optional KWin patch is a Linux client-side nested-compositor
 adapter. It accepts DMA-BUF v3 format/modifier events without inventing a DRM
 device. A Wayland EGL display and linear DMA-heap allocator feed KWin's existing
 `EglSwapchain`; the normal DRM/GBM path remains independent. The non-DRM path

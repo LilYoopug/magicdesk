@@ -7,6 +7,13 @@ SIGSYS handlers and alternate stacks belong to the application. See the
 [interception contract](../shroot/interception.md) and
 [production browser workflows](browser/README.md).
 
+- [Reproduction](#reproduction)
+- [Policy Boundaries](#policy-boundaries)
+- [Selective Ptrace Hybrid](#selective-ptrace-hybrid)
+- [Signal-Neutral Checkpoints](#signal-neutral-checkpoints)
+- [Real Browser Boundaries](#real-browser-boundaries)
+- [Primary References](#primary-references)
+
 ## Reproduction
 
 Use a disposable prepared glibc store and an immutable staged runtime:

@@ -5,6 +5,11 @@ a second namespace or a polling daemon. One namespace worker owns the subscripti
 native event source and delivery queues for its supervised guest tree. Independent
 launches watching one store observe each other's committed mutations.
 
+- [Namespace Events](#namespace-events)
+- [Descriptors And Delivery](#descriptors-and-delivery)
+- [Verified Coverage](#verified-coverage)
+- [Limits](#limits)
+
 ## Namespace Events
 
 `inode_events.c` records create, link, unlink, rename/exchange and socket-name

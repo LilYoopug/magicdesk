@@ -11,6 +11,13 @@ This file is the architecture map; focused contracts below own implementation
 invariants. [Fixture instructions](../guest-exec-lab/README.md) own test setup
 and evidence, rather than installation recipes.
 
+- [Runtime Model](#runtime-model)
+- [Ownership](#ownership)
+- [Application Integration](#application-integration)
+- [Contracts](#contracts)
+- [Execution Policy](#execution-policy)
+- [Build And Verification](#build-and-verification)
+
 ## Runtime Model
 
 The bootstrap maps an ARM64 ELF and its optional interpreter, constructs its
@@ -31,7 +38,10 @@ selects Base explicitly. See
 One supervisor owns each process tree. Selective seccomp TRACE/USER_NOTIF directs
 operations needing adaptation to either a task-affine adapter or a filesystem
 worker. The supervisor is the sole kernel ptracer. Ordinary unselected data IO,
-memory, futex and signal operations retain native execution; features such as
+memory, futex and signal-mask operations retain native execution; signal sending
+always checks launch membership and guest credentials, even without a PID
+namespace. Group/broadcast sends select only supervised guest processes, never
+other Android processes sharing the executor UID. Features such as
 guest debugging, routed networking and virtual descriptor readiness activate
 only for their owning resources.
 

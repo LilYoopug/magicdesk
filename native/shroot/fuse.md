@@ -6,6 +6,13 @@ mounts. Android's real FUSE device and kernel mount permission are not used.
 The selected executor identity, namespace owner, DAC, Landlock and mount policy
 remain authoritative. This adds no persistent store format or APK dependency.
 
+- [Ownership](#ownership)
+- [Protocol and Policy](#protocol-and-policy)
+- [Append and Notifications](#append-and-notifications)
+- [Mapping Limits](#mapping-limits)
+- [Descriptor Closure](#descriptor-closure)
+- [Verification](#verification)
+
 ## Ownership
 
 - `fuse_device` owns the typed character device and daemon IO. Final device

@@ -10,6 +10,15 @@ remain part of the single APK and codebase, with generic Android behavior kept
 shared and optional firmware behavior isolated behind an existing platform or
 SoC boundary.
 
+- [Choose The Contribution Track](#choose-the-contribution-track)
+- [Establish A Baseline](#establish-a-baseline)
+- [Use MCP As The Observation Plane](#use-mcp-as-the-observation-plane)
+- [Classify Before Changing Code](#classify-before-changing-code)
+- [Build The Regression Evidence](#build-the-regression-evidence)
+- [Implement Through Existing Boundaries](#implement-through-existing-boundaries)
+- [Verify The Change](#verify-the-change)
+- [Keep The Handoff Reviewable](#keep-the-handoff-reviewable)
+
 ## Choose The Contribution Track
 
 ### Evidence-only track
