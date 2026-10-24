@@ -17,6 +17,8 @@ def main():
     parser.add_argument('--store', required=True)
     parser.add_argument('--rounds', type=int, default=5)
     parser.add_argument('--iterations', type=int, default=10000)
+    parser.add_argument('--file-blocks', type=int, default=1,
+                        help='Consecutive 1024-operation file blocks per launch (1-64); retain first and tail timings')
     parser.add_argument('--cpu-mask', type=lambda value: int(value, 16),
                         help='Optional native taskset hexadecimal mask for controlled comparisons')
     parser.add_argument('--workload', action='append', choices=(
@@ -25,6 +27,8 @@ def main():
     parser.add_argument('--output', type=Path, default=Path('build/readiness-performance'))
     args = parser.parse_args()
     assert 1 <= args.rounds <= 100 and 1 <= args.iterations <= 1000000
+    if not 1 <= args.file_blocks <= 64:
+        parser.error('--file-blocks must be between 1 and 64')
     if args.cpu_mask is not None and args.cpu_mask <= 0:
         parser.error('--cpu-mask must be a positive hexadecimal mask')
     suite = Suite(args.output, args.build)
@@ -43,7 +47,11 @@ def main():
         suite.report['scope'] = dict(store=args.store,
             fixture='same guest binary and installed userspace; no timing diagnostics',
             cpuMask=None if args.cpu_mask is None else format(args.cpu_mask, 'x'),
-            timing='loop wall/caller CPU; time -p covers full launch and reaped descendants')
+            timing='loop wall/caller CPU; time -p covers full launch and reaped descendants',
+            fileBlocks=args.file_blocks,
+            blockScope='first block follows fixture setup, not a dropped filesystem cache; tail is the last half',
+            cpuScope='block CPUs are caller endpoints, not worker placement; frequencies cover the command envelope')
+        suite.report['fixtureHash'] = suite.command(['sha256sum', suite.base + '/benchmark'], quiet=True)
         placement = [] if args.cpu_mask is None else ['/system/bin/taskset', format(args.cpu_mask, 'x')]
         modes = {}
         for name, runner in [('current', suite.runner), ('reference', reference + '/libmagicdesk_guest_run.so')]:
@@ -59,8 +67,9 @@ def main():
                      'idle': [target + '/benchmark', 'idle', '1'],
                      'python-start': ['/usr/bin/python3', '-c', 'import ssl,asyncio,sqlite3,multiprocessing'],
                      'ls-start': ['/usr/bin/ls', '--version']}
+        file_workloads = {'file-stat', 'file-open', 'file-cycle'}
         for workload in ('file-stat', 'file-open', 'file-cycle'):
-            workloads[workload] = [target + '/benchmark', workload, '1024']
+            workloads[workload] = [target + '/benchmark', workload, '1024', str(args.file_blocks)]
         if args.workload:
             workloads = {name: command for name, command in workloads.items() if name in args.workload}
         measured = {'poll', 'epoll', 'idle', 'file-stat', 'file-open', 'file-cycle'}
@@ -80,14 +89,26 @@ def main():
                     records = [json.loads(line.removeprefix('READINESS_BENCH '))
                                for line in output.splitlines() if line.startswith('READINESS_BENCH ')]
                     if workload in measured:
-                        assert len(records) == 1, output
-                        row.update(records[0])
+                        expected = args.file_blocks if workload in file_workloads else 1
+                        assert len(records) == expected, output
+                        assert [record['block'] for record in records] == list(range(expected)), output
+                        assert all(record['workload'] == workload for record in records), output
+                        row['blocks'] = records
+                        for field in ('iterations', 'seconds', 'callerCpuSeconds',
+                                      'voluntarySwitches', 'involuntarySwitches'):
+                            row[field] = sum(record[field] for record in records)
+                        if workload in file_workloads:
+                            row['firstBlockSeconds'] = records[0]['seconds']
+                            row['tailBlockSeconds'] = statistics.median(
+                                record['seconds'] for record in records[len(records) // 2:])
                     samples.append(row)
         suite.report['medians'] = {
             name: {workload: {field: statistics.median(row[field] for row in samples
                 if row['mode'] == name and row['workload'] == workload)
                 for field in ('launchSeconds', 'totalCpuSeconds') +
-                    (('seconds', 'callerCpuSeconds') if workload in measured else ())}
+                    (('seconds', 'callerCpuSeconds', 'voluntarySwitches', 'involuntarySwitches')
+                     if workload in measured else ()) +
+                    (('firstBlockSeconds', 'tailBlockSeconds') if workload in file_workloads else ())}
                 for workload in workloads} for name in modes}
         print(json.dumps(suite.report['medians'], indent=2), flush=True)
         suite.report['passed'] = True

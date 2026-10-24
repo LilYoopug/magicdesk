@@ -217,11 +217,10 @@ int md_svc_machine_return(struct md_svc_registry *r,struct md_svc_machine_thread
     if (!error) s->draining=0;
     return error ? error : 1;
 }
-int md_svc_machine_syscall(struct md_svc_registry *r,struct md_svc_machine_thread *s,pid_t pid) {
+int md_svc_machine_syscall(struct md_svc_registry *r,struct md_svc_machine_thread *s,pid_t pid,
+        const struct user_pt_regs *observed) {
     if (!r) return 0;
-    struct user_pt_regs registers;
-    int error=regs(pid,PTRACE_GETREGSET,&registers);
-    if (error) return error;
+    struct user_pt_regs registers=*observed;
     int owned=md_svc_machine_return(r,s,pid,&registers);
     if (owned<=0) return owned;
     int number=-1;

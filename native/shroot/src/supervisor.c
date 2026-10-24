@@ -8850,12 +8850,18 @@ int main(int argc, char **argv) {
             if (t->born) resume(pid,0);
         }
         else if (event == PTRACE_EVENT_SECCOMP) {
-            if (t->phase==IDLE && md_memory_svc(t->memory)) {
-                int owned=md_svc_machine_syscall(md_memory_svc(t->memory),&t->machine,pid);
+            struct user_pt_regs regs;
+            int captured=t->phase==IDLE && md_memory_svc(t->memory);
+            if (captured) {
+                if (!registers(pid,&regs)) continue;
+                int owned=md_svc_machine_syscall(md_memory_svc(t->memory),&t->machine,pid,&regs);
                 if (owned==-ESRCH) { t->resume_lost=1; continue; }
                 if (owned<0) errno=-owned;
                 CHECK(owned>=0);
                 if (owned) { resume(pid,0); continue; }
+                /* Observe the executed site before compact Base handlers can
+                 * consume it. Reuse this snapshot for ordinary dispatch too. */
+                machine_observe(t,&regs);
             }
             if (t->phase==WAIT_CANCEL_EXIT) {
                 if (skip(pid)) resume(pid,0);
@@ -8875,15 +8881,13 @@ int main(int argc, char **argv) {
             } else if (!tracee_request(t,PTRACE_GETEVENTMSG,NULL,&cookie,"seccomp-event")) continue;
             if (fd_close_compact(t,cookie,observed)) continue;
             if (cookie&MD_INTERCEPT_CLOSE) cookie=MD_INTERCEPT_FD;
-            struct user_pt_regs regs;
-            if (!registers(pid, &regs)) continue;
+            if (!captured && !registers(pid, &regs)) continue;
             if (t->entry_fence_result) {
                 int result=t->entry_fence_result; t->entry_fence_result=0;
                 return_value(t,&regs,result); continue;
             }
             if (cookie==MD_INTERCEPT_TASK) { return_value(t,&regs,-EPERM); continue; }
             if (cookie==MD_INTERCEPT_OBSERVE && entry_fence_admission(t,&regs,status,&usage)) continue;
-            if (t->phase==IDLE) machine_observe(t,&regs);
             if (regs.regs[8]==SYS_ptrace && t->phase==IDLE)
                 TRACE("PROBE guest debugger caller=%d request=%llu target=%llu address=%#llx data=%#llx traced=%d\n",
                     pid,regs.regs[0],regs.regs[1],regs.regs[2],regs.regs[3],

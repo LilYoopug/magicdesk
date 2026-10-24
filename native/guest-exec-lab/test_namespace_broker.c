@@ -5,6 +5,7 @@
 #include "fs_native.h"
 #include "inode_internal.h"
 #include "../shroot/src/cooperative_channel.h"
+#include "test_syscall_sites.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -181,7 +182,9 @@ __asm__(".text\n.balign 4\n.global result_call\nresult_call:\n"
 static int discovery_listener;
 static atomic_uint discovery_calls;
 static void discovery_delegate(const struct seccomp_notif *request) {
-    assert(request->data.nr==SYS_faccessat && request->data.instruction_pointer==(uintptr_t)result_return);
+    uintptr_t offset=request->data.instruction_pointer-(uintptr_t)md_test_syscall_sites;
+    assert(request->data.nr==SYS_faccessat && (request->data.instruction_pointer==(uintptr_t)result_return
+        || (offset<MD_TEST_SYSCALL_SITES*MD_TEST_SYSCALL_STRIDE && offset%MD_TEST_SYSCALL_STRIDE==8)));
     atomic_fetch_add(&discovery_calls,1);
     struct seccomp_notif_resp reply={.id=request->id,.error=-EAGAIN};
     assert(!ioctl(discovery_listener,SECCOMP_IOCTL_NOTIF_SEND,&reply));
@@ -196,11 +199,14 @@ static void discovery(const char *store) {
         alarm(25); close(channel[0]);
         int fd=listener(SYS_faccessat); send_listener(channel[1],fd); close(fd);
         char byte;
-        for (unsigned i=0;i<6;++i) {
+        for (unsigned i=0;i<6+MD_TEST_SYSCALL_SITES*2+4;++i) {
             /* EVENT_WAIT: parent advances this exact discovery generation. */
             assert(read(channel[1],&byte,1)==1 && byte=='r');
-            long result=result_call(AT_FDCWD,(uintptr_t)"/entries",F_OK,0,0,0,SYS_faccessat);
-            assert(result==(i==0 || i==3 ? -EAGAIN : 0));
+            unsigned site=i<6 || i>=6+MD_TEST_SYSCALL_SITES*2 ? 0 : (i-6)/2;
+            md_test_syscall_fn call=i<6 ? result_call : md_test_syscall_site(site);
+            long result=call(AT_FDCWD,(uintptr_t)"/entries",F_OK,0,0,0,SYS_faccessat);
+            int cold=i<6 ? i==0 || i==3 : !(i%2);
+            assert(result==(cold ? -EAGAIN : 0));
             assert(write(channel[1],"d",1)==1);
         }
         _exit(0);
@@ -220,10 +226,14 @@ static void discovery(const char *store) {
     unsigned eligible=MD_BROKER_READ|MD_BROKER_DISCOVERY;
     assert(!md_broker_task(broker,child,eligible,0,0,NULL));
     md_broker_listen(broker,discovery_listener);
-    for (unsigned i=0;i<6;++i) {
+    for (unsigned i=0;i<6+MD_TEST_SYSCALL_SITES*2+4;++i) {
         if (i==2) md_broker_resample(broker,child,(uintptr_t)result_return+4);
         if (i==3) md_broker_resample(broker,child,(uintptr_t)result_return);
         if (i==5) assert(!md_broker_task(broker,child,eligible,0,0,NULL));
+        if (i==6+MD_TEST_SYSCALL_SITES*2+2) {
+            md_broker_forget(broker,child);
+            assert(!md_broker_task(broker,child,eligible,0,0,NULL));
+        }
         assert(write(channel[0],"r",1)==1);
         char byte;
         struct pollfd ready[]={{.fd=channel[0],.events=POLLIN},{.fd=md_fs_worker_fd(worker),.events=POLLIN}};
@@ -236,13 +246,14 @@ static void discovery(const char *store) {
         assert(read(channel[0],&byte,1)==1 && byte=='d');
     }
     int status; assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
-    assert(atomic_load(&discovery_calls)==2 && !md_fs_worker_error(worker));
+    assert(atomic_load(&discovery_calls)==4+MD_TEST_SYSCALL_SITES && !md_fs_worker_error(worker));
     md_broker_forget(broker,child);
     assert(!md_fs_worker_stop(worker)); md_broker_destroy(broker);
     md_task_registry_destroy(tasks); md_identity_release(&identity);
     md_domain_release(resources.fs); md_fd_origins_release(resources.files);
     assert(!close(discovery_listener) && !close(channel[0]) && descriptors()==before);
     puts("PASS broker discovery: one cold delegation, exact-site resampling, warm calls and eligibility refresh");
+    puts("PASS broker discovery cache: 32 sites, bounded repeat suppression, evicted-site retry and new owner");
 }
 static void completed_result(const char *store,int nr) {
     unsigned before=descriptors();

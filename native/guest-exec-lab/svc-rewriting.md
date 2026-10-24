@@ -23,6 +23,23 @@ fixtures exercise the same transport independently of patch discovery.
 Memory changes retire overlapping entry points; resident continuations remain
 until address-space teardown. Debugger ownership disables machine admission.
 
+Seccomp stops share one register snapshot between checkpoint recovery, executed
+site discovery and ordinary dispatch. Discovery precedes compact Base handlers:
+an inexpensive first `close` must not prevent later calls from using lazy entry.
+The `--case fd-discovery` cooperative fixture uses ordinary SVC instructions,
+not the explicit entry API, and checks close/dup/fcntl/lseek completion counters
+as well as descriptor flags and EBADF. Base runs assert that these counters stay
+zero. Calls which already go straight to the kernel need no discovery stop.
+
+Broker discovery uses a bounded recent-address cache only to suppress repeated
+cold attempts. A cache miss always delegates, evicting an older address if
+needed; cache capacity is not an admission limit for new SVCs. An evicted,
+unpatchable site can be sampled again. The supervisor registry separately owns
+patch eligibility and resident code capacity. `--case site-discovery` checks
+32 executed sites; the broker fixture also checks warm suppression, eviction,
+exact-address resampling and fresh discovery after task-record reuse without
+installing any patches. Eligibility refreshes retain the same owner's cache.
+
 Recovery of an unexecuted entry restores its original SVC before delivering a
 deferred signal. The retry observer republishes only after that syscall enters
 the kernel. A handler's unrelated syscall leaves the site suspended until later

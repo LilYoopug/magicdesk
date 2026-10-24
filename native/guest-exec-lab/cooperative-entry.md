@@ -86,6 +86,27 @@ falling back to Base does not establish accelerated throughput. Sandboxes revoke
 lazy admission; their results measure the supported original-SVC fallback.
 Counter collection adds work to hot paths and is not enabled for normal timings.
 
+### Handoff And Startup
+
+`benchmark_readiness.py --build BUILD --reference REFERENCE_BUILD --store STORE
+--file-blocks 16 --workload file-stat --workload file-open` interleaves Base and
+lazy entry with the same guest ELF. Each launch retains all consecutive
+1024-operation blocks, caller CPU time, voluntary/involuntary context switches
+and caller CPU endpoints. Output is deferred until the series ends. The first
+block follows fixture initialization; it is not a filesystem-cache-cold test.
+Full launch time and the last-half block median remain separate measurements.
+Frequency observations cover host cpufreq policies across each command, not the
+instantaneous frequency of every worker or caller instruction.
+
+Compare unrestricted execution, a shared multi-CPU mask and a single-CPU mask.
+A shared mask does not prove simultaneous execution on separate CPUs. Sustained
+per-call context switches can distinguish a parked handoff regime from an
+ordinary frequency change. A shorter cooldown or longer spin can help that
+regime while regressing single-CPU execution or a different cold-start workload.
+Check CPU cost and both metadata and FD plans before accepting such tuning;
+neither a good warmed median nor disabling the optional synchronous seccomp
+wake hint alone proves that cold-start instability is fixed.
+
 ## Correctness Boundaries
 
 | Boundary | Required checks |

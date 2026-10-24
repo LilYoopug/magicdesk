@@ -37,6 +37,7 @@
 #include "fs_continuation.h"
 
 enum { EXECUTION_BURST_CALLS=32, EXECUTION_BURST_NS=100000 };
+enum { DISCOVERY_RECENT=16 };
 
 struct operation {
     struct md_fs_work work;
@@ -126,7 +127,7 @@ struct task {
     int pid, eligible, process, borrowed;
     uintptr_t gate, watch_gate;
     uintptr_t cooperative_gate;
-    struct { uintptr_t pc; unsigned seen; } discovery[16];
+    struct { uintptr_t recent[DISCOVERY_RECENT]; unsigned next; } discovery;
     struct md_broker_code_ranges machine;
     struct md_entry_channel *channel;
     uint64_t sequence;
@@ -862,8 +863,8 @@ void md_broker_resample(struct md_namespace_broker *b,pid_t pid,uintptr_t pc) {
     if (!b) return;
     pthread_mutex_lock(&b->lock);
     struct task *t=find_task(b,pid);
-    if (t) for (unsigned i=0;i<16;++i)
-        if (t->discovery[i].pc==pc) { t->discovery[i].seen=0; break; }
+    if (t) for (unsigned i=0;i<DISCOVERY_RECENT;++i)
+        if (t->discovery.recent[i]==pc) { t->discovery.recent[i]=0; break; }
     pthread_mutex_unlock(&b->lock);
 }
 int md_broker_task(struct md_namespace_broker *b, int pid, int eligible, uintptr_t raw_gate, uintptr_t watch_gate,
@@ -875,6 +876,7 @@ int md_broker_task(struct md_namespace_broker *b, int pid, int eligible, uintptr
         for (t = b->tasks; t && (t->pid || t->borrowed); t = t->next) { }
         if (!t) { t = calloc(1, sizeof(*t)); if (t) { t->process = -1; t->next = b->tasks; b->tasks = t; } }
         if (t) {
+            memset(&t->discovery,0,sizeof(t->discovery));
             unsigned bucket = (unsigned)pid % TASK_BUCKETS;
             t->indexed = b->task_index[bucket]; b->task_index[bucket] = t;
         }
@@ -1442,6 +1444,15 @@ static int prepare_wait(void *context) {
     pthread_mutex_unlock(&b->lock);
     return pending;
 }
+static int discovery_sample(struct task *task,uintptr_t pc) {
+    for (unsigned i=0;i<DISCOVERY_RECENT;++i)
+        if (task->discovery.recent[i]==pc) return 0;
+    /* Bound repeat suppression, not discovery: a miss always gets an attempt.
+     * Code admission and pool capacity belong to the supervisor's registry. */
+    task->discovery.recent[task->discovery.next]=pc;
+    task->discovery.next=(task->discovery.next+1)%DISCOVERY_RECENT;
+    return 1;
+}
 static int receive_one(struct md_namespace_broker *b,struct md_filesystem *fs,
         struct md_execution_window *window) {
     struct seccomp_notif q = {0};
@@ -1484,14 +1495,9 @@ static int receive_one(struct md_namespace_broker *b,struct md_filesystem *fs,
         for (unsigned i=0;eligible && i<task->machine.count;++i)
             if (q.data.instruction_pointer-task->machine.starts[i]<task->machine.size) eligible=0;
         if (eligible && (task->eligible&MD_BROKER_DISCOVERY) && md_entry_supported(q.data.nr)) {
-            /* Bounded cold sampling delegates an unexecuted request through the
-             * normal stop owner. The worker never installs code or reads registers. */
-            for (unsigned i=0;i<16;++i) {
-                if (!task->discovery[i].pc) task->discovery[i].pc=q.data.instruction_pointer;
-                if (task->discovery[i].pc!=q.data.instruction_pointer) continue;
-                if (!task->discovery[i].seen) { ++task->discovery[i].seen; eligible=0; }
-                break;
-            }
+            /* Delegate an unexecuted request through the normal stop owner.
+             * The worker never installs code or reads registers. */
+            if (discovery_sample(task,q.data.instruction_pointer)) eligible=0;
         }
         watch = q.data.instruction_pointer == task->watch_gate;
         task->borrowed++;

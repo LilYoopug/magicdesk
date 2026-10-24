@@ -19,7 +19,8 @@ int md_svc_machine_retry(struct md_svc_registry *,struct md_svc_machine_thread *
 void md_svc_machine_forget(struct md_svc_machine_thread *);
 /* The supervisor retains resume ownership. A handled checkpoint requests one
  * syscall-exit stop; the common signal queue owns subsequent delivery. */
-int md_svc_machine_syscall(struct md_svc_registry *,struct md_svc_machine_thread *,pid_t);
+int md_svc_machine_syscall(struct md_svc_registry *,struct md_svc_machine_thread *,pid_t,
+    const struct user_pt_regs *observed);
 int md_svc_machine_exit(struct md_svc_machine_thread *,pid_t);
 int md_svc_machine_signal(struct md_svc_registry *,struct md_svc_machine_thread *,pid_t,
     struct md_signal_delivery *,int *deliver);

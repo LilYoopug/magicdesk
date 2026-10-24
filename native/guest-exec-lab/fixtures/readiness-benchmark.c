@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,13 +23,16 @@ static double cpu(const struct rusage *r) {
         +(r->ru_utime.tv_usec+r->ru_stime.tv_usec)*1e-6;
 }
 int main(int argc,char **argv) {
-    assert(argc==3);
+    assert(argc==3 || argc==4);
     unsigned count=(unsigned)strtoul(argv[2],NULL,10);
     assert(count && count<=1000000);
+    unsigned blocks=argc==4 ? (unsigned)strtoul(argv[3],NULL,10) : 1;
+    assert(blocks && blocks<=64);
     int idle=!strcmp(argv[1],"idle"),epoll=!strcmp(argv[1],"epoll");
     int cycle=!strcmp(argv[1],"file-cycle"),opening=!strcmp(argv[1],"file-open");
     int files=cycle || opening || !strcmp(argv[1],"file-stat");
     assert(files || idle || epoll || !strcmp(argv[1],"poll"));
+    assert(files || blocks==1);
     char directory[]="/tmp/md-readiness-XXXXXX";
     int dir=-1;
     if (files) {
@@ -44,30 +48,48 @@ int main(int argc,char **argv) {
     struct epoll_event event={.events=EPOLLIN,.data.u64=42},received;
     assert(!epoll_ctl(queue,EPOLL_CTL_ADD,fd,&event));
     struct pollfd p={.fd=fd,.events=POLLIN};
-    struct rusage before,after; assert(!getrusage(RUSAGE_SELF,&before));
-    double start=now();
-    for (unsigned i=0;i<count;++i) {
-        if (files) {
-            if (cycle || opening) {
-                int file=openat(dir,"file",O_RDONLY|O_CLOEXEC|(cycle ? O_CREAT|O_EXCL : 0),0600);
-                assert(file>=0 && !close(file));
-                if (cycle) assert(!renameat(dir,"file",dir,"renamed") && !unlinkat(dir,"renamed",0));
+    struct {
+        double elapsed, cpu;
+        long voluntary, involuntary;
+        int start_cpu, end_cpu;
+    } samples[64];
+    for (unsigned block=0;block<blocks;++block) {
+        samples[block].start_cpu=sched_getcpu();
+        struct rusage before,after; assert(!getrusage(RUSAGE_SELF,&before));
+        double start=now();
+        for (unsigned i=0;i<count;++i) {
+            if (files) {
+                if (cycle || opening) {
+                    int file=openat(dir,"file",O_RDONLY|O_CLOEXEC|(cycle ? O_CREAT|O_EXCL : 0),0600);
+                    assert(file>=0 && !close(file));
+                    if (cycle) assert(!renameat(dir,"file",dir,"renamed") && !unlinkat(dir,"renamed",0));
+                } else {
+                    struct stat st; assert(!fstatat(dir,"file",&st,0) && S_ISREG(st.st_mode));
+                }
+            } else if (epoll) {
+                assert(epoll_wait(queue,&received,1,0)==1);
+                assert(received.events==EPOLLIN && received.data.u64==42);
             } else {
-                struct stat st; assert(!fstatat(dir,"file",&st,0) && S_ISREG(st.st_mode));
+                struct timespec timeout={.tv_sec=idle ? 2 : 0};
+                assert(ppoll(&p,1,&timeout,NULL)==(idle ? 0 : 1));
+                assert(p.revents==(idle ? 0 : POLLIN));
             }
-        } else if (epoll) {
-            assert(epoll_wait(queue,&received,1,0)==1);
-            assert(received.events==EPOLLIN && received.data.u64==42);
-        } else {
-            struct timespec timeout={.tv_sec=idle ? 2 : 0};
-            assert(ppoll(&p,1,&timeout,NULL)==(idle ? 0 : 1));
-            assert(p.revents==(idle ? 0 : POLLIN));
         }
+        samples[block].elapsed=now()-start;
+        assert(!getrusage(RUSAGE_SELF,&after));
+        samples[block].cpu=cpu(&after)-cpu(&before);
+        samples[block].voluntary=after.ru_nvcsw-before.ru_nvcsw;
+        samples[block].involuntary=after.ru_nivcsw-before.ru_nivcsw;
+        samples[block].end_cpu=sched_getcpu();
     }
-    double elapsed=now()-start;
-    assert(!getrusage(RUSAGE_SELF,&after));
-    printf("READINESS_BENCH {\"workload\":\"%s\",\"iterations\":%u,\"seconds\":%.9f,\"callerCpuSeconds\":%.9f}\n",
-        argv[1],count,elapsed,cpu(&after)-cpu(&before));
+    /* Output after the entire series: logging must not park the worker between blocks. */
+    for (unsigned block=0;block<blocks;++block)
+        printf("READINESS_BENCH {\"workload\":\"%s\",\"block\":%u,\"iterations\":%u,"
+            "\"seconds\":%.9f,\"callerCpuSeconds\":%.9f,\"voluntarySwitches\":%ld,"
+            "\"involuntarySwitches\":%ld,\"startCpu\":%d,\"endCpu\":%d}\n",
+            argv[1],block,count,samples[block].elapsed,samples[block].cpu,
+            samples[block].voluntary,samples[block].involuntary,
+            samples[block].start_cpu,samples[block].end_cpu);
     assert(!close(queue) && !close(fd));
     if (files) {
         if (!cycle) assert(!unlinkat(dir,"file",0));

@@ -3,6 +3,7 @@
 #include "../shroot/src/cooperative_channel.h"
 #include "../shroot/src/posix_acl.h"
 #include "../shroot/src/interception.h"
+#include "test_syscall_sites.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -57,6 +58,51 @@ static long call6(int nr,unsigned long a,unsigned long b,unsigned long c,unsigne
     ++fallback_calls;
     long result=syscall(nr,a,b,c,d,e,f);
     return result<0 ? -errno : result;
+}
+/* Separate executed sites: a compact close must discover its own gate, while
+ * the shared FD site must admit each subsequently observed syscall number. */
+__attribute__((noinline)) static long discovery_close(int fd) {
+    register long x0 __asm__("x0")=fd,x8 __asm__("x8")=SYS_close;
+    __asm__ volatile("svc 0" : "+r"(x0) : "r"(x8) : "memory","cc");
+    return x0;
+}
+__attribute__((noinline)) static long discovery_fd(int number,long a,long b,long c) {
+    register long x0 __asm__("x0")=a,x1 __asm__("x1")=b,x2 __asm__("x2")=c,x8 __asm__("x8")=number;
+    __asm__ volatile("svc 0" : "+r"(x0) : "r"(x1),"r"(x2),"r"(x8) : "memory","cc");
+    return x0;
+}
+static void fd_discovery(void) {
+    const char *name="/tmp/fd-discovery";
+    int retired=-1;
+    for (unsigned i=0;i<128;++i) {
+        int fd=open(name,O_CREAT|O_RDWR,0600); assert(fd>=0);
+        int alias=(int)discovery_fd(SYS_dup,fd,0,0); assert(alias>=0 && alias!=fd);
+        assert(!discovery_fd(SYS_fcntl,alias,F_SETFD,FD_CLOEXEC));
+        assert(discovery_fd(SYS_fcntl,alias,F_GETFD,0)==FD_CLOEXEC);
+        long flags=discovery_fd(SYS_fcntl,alias,F_GETFL,0);
+        assert(flags>=0 && (flags&O_ACCMODE)==O_RDWR);
+        assert(discovery_fd(SYS_lseek,alias,0,SEEK_CUR)==0);
+        assert(!discovery_close(alias) && !discovery_close(fd));
+        retired=fd;
+    }
+    /* Error admission must not warm the valid-close site for this test. */
+    assert(discovery_close(retired)==-EBADF && discovery_close(-1)==-EBADF);
+    assert(!unlink(name));
+    puts("PASS native FD discovery: executed close, dup, fcntl and lseek sites without explicit entry API");
+}
+static void site_discovery(void) {
+    int fd=open(path,O_CREAT|O_RDWR,0600); assert(fd>=0);
+    assert(write(fd,"payload",7)==7 && !close(fd));
+    for (unsigned site=0;site<MD_TEST_SYSCALL_SITES;++site) {
+        md_test_syscall_fn call=md_test_syscall_site(site);
+        for (unsigned repeat=0;repeat<16;++repeat) {
+            struct stat st;
+            assert(!call(AT_FDCWD,(uintptr_t)path,(uintptr_t)&st,0,0,0,SYS_newfstatat));
+            assert(st.st_size==7 && S_ISREG(st.st_mode));
+        }
+    }
+    assert(!unlink(path));
+    puts("PASS native site discovery: 32 distinct SVCs without explicit entry API");
 }
 static void reap(pid_t child) {
     int status;
@@ -1483,6 +1529,12 @@ int main(int argc,char **argv) {
     }
     if (argc>1 && (!strcmp(argv[1],"--initial-stack") || !strcmp(argv[1],"--stack-empty"))) {
         initial_stack(argc,argv,!strcmp(argv[1],"--stack-empty")); return 0;
+    }
+    if (argc>1 && !strcmp(argv[1],"--fd-discovery")) {
+        fd_discovery(); return 0;
+    }
+    if (argc>1 && !strcmp(argv[1],"--site-discovery")) {
+        site_discovery(); return 0;
     }
     if (argc>1 && !strcmp(argv[1],"--jit-busy")) {
         int fd=open(path,O_CREAT|O_RDWR,0600); assert(fd>=0 && write(fd,"payload",7)==7 && !close(fd));
