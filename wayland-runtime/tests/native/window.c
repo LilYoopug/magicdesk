@@ -7,6 +7,9 @@
 #include "linux-dmabuf-v1-client-protocol.h"
 #include "pointer-constraints-unstable-v1-client-protocol.h"
 #include "relative-pointer-unstable-v1-client-protocol.h"
+#include "single-pixel-buffer-v1-client-protocol.h"
+#include "viewporter-client-protocol.h"
+#include "presentation-time-client-protocol.h"
 #ifdef __ANDROID__
 #include "dmabuf_producer.h"
 #endif
@@ -32,11 +35,18 @@ static bool interaction;
 static bool dma_client;
 static bool dma_cursor;
 static bool pointer_lock_test;
+static bool single_pixel;
 
 struct Client {
     struct wl_display *display;
     struct wl_compositor *compositor;
     struct wl_shm *shm;
+    struct wp_single_pixel_buffer_manager_v1 *single_pixel_manager;
+    struct wp_viewporter *viewporter;
+    struct wp_viewport *viewport;
+    struct wp_presentation *presentation;
+    bool presentation_clock;
+    int presented;
     struct zwp_linux_dmabuf_v1 *dma;
     struct xdg_wm_base *shell;
     struct wl_surface *surface;
@@ -288,6 +298,36 @@ static void seat_name(void *data, struct wl_seat *seat, const char *name) {
 }
 static const struct wl_seat_listener seat_listener = {.capabilities = seat_capabilities, .name = seat_name};
 
+static void presentation_clock(void *data, struct wp_presentation *presentation, uint32_t clock) {
+    (void)presentation;
+    assert(clock == CLOCK_MONOTONIC);
+    ((struct Client *)data)->presentation_clock = true;
+}
+static const struct wp_presentation_listener presentation_listener = {.clock_id = presentation_clock};
+
+static void feedback_output(void *data, struct wp_presentation_feedback *feedback, struct wl_output *output) {
+    (void)data; (void)feedback; (void)output;
+}
+static void feedback_presented(void *data, struct wp_presentation_feedback *feedback,
+        uint32_t sec_hi, uint32_t sec_lo, uint32_t nsec, uint32_t refresh,
+        uint32_t seq_hi, uint32_t seq_lo, uint32_t flags) {
+    (void)refresh; (void)seq_hi; (void)seq_lo;
+    assert(sec_hi || sec_lo);
+    assert(nsec < 1000000000);
+    // The headless output observes software completion, not hardware scanout.
+    assert(!(flags & (WP_PRESENTATION_FEEDBACK_KIND_HW_CLOCK |
+        WP_PRESENTATION_FEEDBACK_KIND_HW_COMPLETION | WP_PRESENTATION_FEEDBACK_KIND_VSYNC)));
+    ((struct Client *)data)->presented++;
+    wp_presentation_feedback_destroy(feedback);
+}
+static void feedback_discarded(void *data, struct wp_presentation_feedback *feedback) {
+    (void)data;
+    wp_presentation_feedback_destroy(feedback);
+}
+static const struct wp_presentation_feedback_listener feedback_listener = {
+    .sync_output = feedback_output, .presented = feedback_presented, .discarded = feedback_discarded,
+};
+
 static void global(void *data, struct wl_registry *registry, uint32_t name,
         const char *interface, uint32_t version) {
     (void)version;
@@ -304,6 +344,14 @@ static void global(void *data, struct wl_registry *registry, uint32_t name,
         client->compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 4);
     else if (!strcmp(interface, "wl_shm"))
         client->shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
+    else if (!strcmp(interface, "wp_presentation")) {
+        client->presentation = wl_registry_bind(registry, name, &wp_presentation_interface, 1);
+        wp_presentation_add_listener(client->presentation, &presentation_listener, client);
+    }
+    else if (single_pixel && !strcmp(interface, "wp_single_pixel_buffer_manager_v1"))
+        client->single_pixel_manager = wl_registry_bind(registry, name, &wp_single_pixel_buffer_manager_v1_interface, 1);
+    else if (single_pixel && !strcmp(interface, "wp_viewporter"))
+        client->viewporter = wl_registry_bind(registry, name, &wp_viewporter_interface, 1);
     else if ((dma_client || dma_cursor) && !strcmp(interface, "zwp_linux_dmabuf_v1")) {
         assert(version >= 3);
         client->dma = wl_registry_bind(registry, name, &zwp_linux_dmabuf_v1_interface, 3);
@@ -343,6 +391,13 @@ static void buffer_release(void *data, struct wl_buffer *buffer) {
 static const struct wl_buffer_listener buffer_listener = {buffer_release};
 
 static struct wl_buffer *client_buffer(struct Client *client) {
+    if (single_pixel) {
+        assert(client->single_pixel_manager && client->viewporter);
+        if (!client->viewport) client->viewport = wp_viewporter_get_viewport(client->viewporter, client->surface);
+        wp_viewport_set_destination(client->viewport, client->width, client->height);
+        return wp_single_pixel_buffer_manager_v1_create_u32_rgba_buffer(client->single_pixel_manager,
+            0x12121212, 0x67676767, 0xabababab, UINT32_MAX);
+    }
 #ifdef __ANDROID__
     if (dma_client) {
         assert(client->dma);
@@ -381,6 +436,8 @@ static void configure(void *data, struct xdg_surface *surface, uint32_t serial) 
     wl_surface_attach(client->surface, buffer, 0, 0);
     wl_surface_damage_buffer(client->surface, 0, 0, client->width, client->height);
     wl_callback_add_listener(wl_surface_frame(client->surface), &frame_listener, client);
+    wp_presentation_feedback_add_listener(wp_presentation_feedback(client->presentation, client->surface),
+        &feedback_listener, client);
     wl_surface_commit(client->surface);
 }
 static const struct xdg_surface_listener surface_listener = {configure};
@@ -403,6 +460,7 @@ static void toplevel_close(void *data, struct xdg_toplevel *toplevel) {
     (void)toplevel;
     struct Client *client = data;
     assert(client->frames > 0);
+    assert(client->presented > 0);
     assert(client->key_down == 1 && client->key_up == 1);
     assert(client->button_down == 1 && client->button_up == 1);
     if (interaction) assert(client->committed && client->fullscreen && client->maximized && client->width == 40 && client->height == 30);
@@ -423,6 +481,7 @@ static void run_client(const char *socket) {
     assert(wl_display_roundtrip(client.display) >= 0);
     assert(client.compositor && client.shm && client.shell && client.keyboard && client.pointer);
     assert(client.data_device_manager);
+    assert(client.presentation && client.presentation_clock);
     assert(client.initial_monitor && client.monitors == 1);
 #ifdef __ANDROID__
     if (dma_client) assert(client.dma);
@@ -460,6 +519,10 @@ static void run_client(const char *socket) {
     wl_seat_destroy(client.seat);
     xdg_wm_base_destroy(client.shell);
     wl_shm_destroy(client.shm);
+    wp_presentation_destroy(client.presentation);
+    if (client.viewport) wp_viewport_destroy(client.viewport);
+    if (client.viewporter) wp_viewporter_destroy(client.viewporter);
+    if (client.single_pixel_manager) wp_single_pixel_buffer_manager_v1_destroy(client.single_pixel_manager);
     wl_compositor_destroy(client.compositor);
     assert(wl_display_roundtrip(client.display) >= 0);
     assert(client.monitors == 1);
@@ -591,6 +654,7 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--dma-client")) { dma_client = true; run_client(NULL); return 0; }
     if (argc == 2 && !strcmp(argv[1], "--client")) { run_client(NULL); return 0; }
     fixed_client_size = argc == 2 && !strcmp(argv[1], "--fixed-size");
+    single_pixel = argc == 2 && !strcmp(argv[1], "--single-pixel");
     pointer_lock_test = argc == 2 && !strcmp(argv[1], "--pointer-lock");
     minimum_client_size = argc == 2 && !strcmp(argv[1], "--minimum-size");
     bounded_client_size = argc == 2 && !strcmp(argv[1], "--bounded-size");
@@ -612,7 +676,7 @@ int main(int argc, char **argv) {
         .pointer_capture = capture_event, .context = &host};
     mdw_server_set_events(server, &events);
     int connection = argc == 2 && !strcmp(argv[1], "--fd") ? mdw_server_connect(server) : -1;
-    assert(argc == 1 || connection >= 0 || fixed_client_size || minimum_client_size || bounded_client_size || interaction || pointer_lock_test);
+    assert(argc == 1 || connection >= 0 || fixed_client_size || minimum_client_size || bounded_client_size || interaction || pointer_lock_test || single_pixel);
     pid_t child = fork();
     assert(child >= 0);
     if (child == 0) {

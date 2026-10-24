@@ -40,6 +40,9 @@ mdw_protocol(linux-dmabuf-v1 ${PROTOCOL_DIR}/stable/linux-dmabuf/linux-dmabuf-v1
 mdw_protocol(text-input-unstable-v3 ${PROTOCOL_DIR}/unstable/text-input/text-input-unstable-v3.xml)
 mdw_protocol(pointer-constraints-unstable-v1 ${PROTOCOL_DIR}/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml)
 mdw_protocol(relative-pointer-unstable-v1 ${PROTOCOL_DIR}/unstable/relative-pointer/relative-pointer-unstable-v1.xml)
+mdw_protocol(single-pixel-buffer-v1 ${PROTOCOL_DIR}/staging/single-pixel-buffer/single-pixel-buffer-v1.xml)
+mdw_protocol(presentation-time ${PROTOCOL_DIR}/stable/presentation-time/presentation-time.xml)
+mdw_protocol(viewporter ${PROTOCOL_DIR}/stable/viewporter/viewporter.xml)
 set(MDW_WLR_PROTOCOL_DIR "" CACHE PATH "Protocol XML directory from pinned wlroots source")
 set(LAYER_XML "${MDW_WLR_PROTOCOL_DIR}/wlr-layer-shell-unstable-v1.xml")
 if(NOT EXISTS "${LAYER_XML}")
@@ -136,6 +139,9 @@ target_link_libraries(wayland-smoke PRIVATE magicdesk_wayland)
 add_test(NAME wayland-smoke COMMAND wayland-smoke)
 set_tests_properties(wayland-smoke PROPERTIES TIMEOUT 10)
 add_executable(wayland-window-test ../../../tests/native/window.c
+	${CMAKE_CURRENT_BINARY_DIR}/single-pixel-buffer-v1-client-protocol.h ${CMAKE_CURRENT_BINARY_DIR}/single-pixel-buffer-v1-protocol.c
+	${CMAKE_CURRENT_BINARY_DIR}/presentation-time-client-protocol.h ${CMAKE_CURRENT_BINARY_DIR}/presentation-time-protocol.c
+	${CMAKE_CURRENT_BINARY_DIR}/viewporter-client-protocol.h ${CMAKE_CURRENT_BINARY_DIR}/viewporter-protocol.c
 	${CMAKE_CURRENT_BINARY_DIR}/pointer-constraints-unstable-v1-client-protocol.h ${CMAKE_CURRENT_BINARY_DIR}/pointer-constraints-unstable-v1-protocol.c
 	${CMAKE_CURRENT_BINARY_DIR}/relative-pointer-unstable-v1-client-protocol.h ${CMAKE_CURRENT_BINARY_DIR}/relative-pointer-unstable-v1-protocol.c
 	${CMAKE_CURRENT_BINARY_DIR}/linux-dmabuf-v1-client-protocol.h
@@ -147,6 +153,8 @@ if(MDG_ANDROID_BUILD)
     target_include_directories(wayland-window-test PRIVATE ../../../../hosted-runtime/tests/native)
 endif()
 add_test(NAME wayland-window COMMAND wayland-window-test)
+add_test(NAME wayland-single-pixel COMMAND wayland-window-test --single-pixel)
+set_tests_properties(wayland-single-pixel PROPERTIES TIMEOUT 15)
 add_test(NAME wayland-window-fd COMMAND wayland-window-test --fd)
 add_test(NAME wayland-window-fixed-size COMMAND wayland-window-test --fixed-size)
 add_test(NAME wayland-window-minimum-size COMMAND wayland-window-test --minimum-size)

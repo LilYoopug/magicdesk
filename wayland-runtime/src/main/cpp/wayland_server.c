@@ -19,6 +19,8 @@
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_subcompositor.h>
+#include <wlr/types/wlr_single_pixel_buffer_v1.h>
+#include <wlr/types/wlr_presentation_time.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/types/wlr_fractional_scale_v1.h>
 #include <wlr/types/wlr_viewporter.h>
@@ -562,6 +564,8 @@ MdwServer *mdw_server_create(void) {
     if (!server->allocator) goto fail;
     if (!wlr_compositor_create(server->display, 6, server->renderer) ||
             !wlr_subcompositor_create(server->display) ||
+            !wlr_single_pixel_buffer_manager_v1_create(server->display) ||
+            !wlr_presentation_create(server->display, server->backend) ||
             !wlr_data_device_manager_create(server->display) ||
             !wlr_fractional_scale_manager_v1_create(server->display, 1) ||
             !wlr_viewporter_create(server->display)) goto fail;
