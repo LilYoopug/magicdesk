@@ -58,6 +58,51 @@ def dhcp6_options(data):
     return result
 
 
+def reply_dhcp4(source, wire, unicast, exchanges):
+    """One fixture lease reply, shared by standalone and booted stock clients."""
+    peer = None
+    if source is unicast:
+        request, peer = unicast.recvfrom(4096)
+    else:
+        frame = wire.recv(4096)
+        if len(frame) < 14 + 20 + 8 + 240 or frame[23] != 17:
+            return
+        header_size = (frame[14] & 15) * 4
+        udp = frame[14 + header_size:]
+        src, dst, length, _ = struct.unpack('!HHHH', udp[:8])
+        if (src, dst) != (68, 67):
+            return
+        request = udp[8:length]
+    assert request[0:3] == b'\x01\x01\x06' and request[236:240] == b'\x63\x82\x53\x63'
+    query = options(request)
+    kind = query[53][0]
+    if kind not in (1, 3):
+        return
+    exchanges.append((kind, request[12:16]))
+    print('DHCP request', kind, socket.inet_ntoa(request[12:16]), flush=True)
+    server, leased = socket.inet_aton('10.203.0.1'), socket.inet_aton('10.203.0.2')
+    answer = bytearray(request[:240])
+    answer[0] = 2
+    answer[16:20] = leased
+    answer[20:24] = server
+    answer += b'\x35\x01' + bytes([2 if kind == 1 else 5])
+    answer += b'\x36\x04' + server + b'\x01\x04\xff\xff\xff\0'
+    answer += b'\x03\x04' + server + b'\x06\x04' + server
+    for code, value in ((51, 20), (58, 3), (59, 8)):
+        answer += bytes([code, 4]) + struct.pack('!I', value)
+    answer += b'\xff'
+    if peer:
+        # RFC 2131: renewal replies target ciaddr, not necessarily the raw sender.
+        unicast.sendto(answer, (socket.inet_ntoa(request[12:16]), 68))
+        return
+    length = 8 + len(answer)
+    header = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + length, 1, 0, 64, 17, 0,
+                         server, b'\xff' * 4)
+    header = header[:10] + struct.pack('!H', checksum(header)) + header[12:]
+    wire.send(b'\xff' * 6 + wire.getsockname()[4] + b'\x08\0' + header
+              + struct.pack('!HHHH', 67, 68, length, 0) + answer)
+
+
 def guest(ipv6=False):
     def ip(*args):
         return subprocess.check_output(['ip', *args], text=True)
@@ -119,7 +164,6 @@ def guest(ipv6=False):
             events = stack.enter_context(socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM))
             events.bind(directory + '/events')
             events.settimeout(20)
-            server = socket.inet_aton('10.203.0.1')
             leased = socket.inet_aton('10.203.0.2')
             mac = wire.getsockname()[4]
 
@@ -157,47 +201,7 @@ def guest(ipv6=False):
                             answer += dhcp6_option(23, socket.inet_pton(socket.AF_INET6, 'fd92:203::1'))
                             server6.sendto(answer, peer)
                             continue
-                        peer = None
-                        if ready[0] is unicast:
-                            request, peer = unicast.recvfrom(4096)
-                        else:
-                            frame = wire.recv(4096)
-                            if len(frame) < 14 + 20 + 8 + 240 or frame[23] != 17:
-                                continue
-                            header_size = (frame[14] & 15) * 4
-                            udp = frame[14 + header_size:]
-                            src, dst, length, _ = struct.unpack('!HHHH', udp[:8])
-                            if (src, dst) != (68, 67):
-                                continue
-                            request = udp[8:length]
-                        assert request[0:3] == b'\x01\x01\x06' and request[236:240] == b'\x63\x82\x53\x63'
-                        query = options(request)
-                        kind = query[53][0]
-                        if kind not in (1, 3):
-                            continue
-                        exchanges.append((kind, request[12:16]))
-                        print('DHCP request', kind, socket.inet_ntoa(request[12:16]), flush=True)
-                        answer = bytearray(request[:240])
-                        answer[0] = 2
-                        answer[16:20] = leased
-                        answer[20:24] = server
-                        answer += b'\x35\x01' + bytes([2 if kind == 1 else 5])
-                        answer += b'\x36\x04' + server + b'\x01\x04\xff\xff\xff\0'
-                        answer += b'\x03\x04' + server + b'\x06\x04' + server
-                        for code, value in ((51, 12), (58, 3), (59, 8)):
-                            answer += bytes([code, 4]) + struct.pack('!I', value)
-                        answer += b'\xff'
-                        if peer:
-                            # RFC 2131: a renewal reply goes to ciaddr, which
-                            # need not equal the source of a raw BOOTP socket.
-                            unicast.sendto(answer, (socket.inet_ntoa(request[12:16]), 68))
-                            continue
-                        length = 8 + len(answer)
-                        header = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + length, 1, 0, 64, 17, 0,
-                                             server, b'\xff' * 4)
-                        header = header[:10] + struct.pack('!H', checksum(header)) + header[12:]
-                        wire.send(b'\xff' * 6 + mac + b'\x08\0' + header
-                                  + struct.pack('!HHHH', 67, 68, length, 0) + answer)
+                        reply_dhcp4(ready[0], wire, unicast, exchanges)
                 except BaseException as error:
                     errors.append(error)
 
