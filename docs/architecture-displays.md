@@ -246,6 +246,15 @@ privileged catalog when dimensions/density are unchanged. Source geometry
 changes do not release and reacquire unchanged physical-input routing.
 
 The viewer source menu and previous-source action share this registry.
+For a successfully attached direct virtual output, its Recents entry represents
+the source's Linux desktop. The shared task-metadata owner borrows the title/icon
+only when the source has exactly one whole-desktop host; ambiguous sources keep
+the display identity. Internal graphical hosts on that virtual source are
+excluded from Recents through the public own-task API, not removed, moved or
+finished. Their original flags survive Activity recreation and are restored
+when they leave that source. Closing a Viewer retains this internal-source role
+until display removal; ordinary phone and physical-display hosts are unchanged.
+
 `Ctrl+Alt+Tab` opens a display switcher on the output currently showing the input
 source, or on that display itself when there is no visible output attachment.
 Repeated Tab cycles valid live sources, Shift reverses, releasing Alt confirms,
@@ -257,6 +266,17 @@ Names include IDs, Desktop state and a one-shot application count; unavailable
 task observation remains unknown. Exact-identity, per-output MRU makes a quick
 chord return to the previous screen. The output's **This display** entry closes
 its output Viewer instead of creating a self-mirror.
+
+Without a managed Desktop, `HostedKeyboardShortcuts` forwards modifier chords
+and system keys from confirmed routed physical keyboards to the focused
+whole-desktop X11/Wayland host. It checks typed task/profile/display identity at
+chord admission, not on every key or through a periodic task observer. The same
+borrowed output receives both presses and releases, including autorepeat and
+reversed chords. Focus/output/route loss releases held guest keys and drains
+the remaining consumed releases without sending them to a different application.
+Ordinary unmodified typing remains Android input. Power/volume keys and the
+shared display-switch gesture stay outside the guest; managed Desktop shortcuts
+continue to use their existing task controller.
 
 Taskbar **Switch display...** shares the same controller,
 MRU and commit operation with the keyboard picker. Its clickable selector uses

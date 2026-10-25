@@ -34,6 +34,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
     private Runnable focusBoundary;
     private SparseIntArray keys = new SparseIntArray();
     private boolean borrowedKeyboard;
+    private long keyboardGeneration;
     private HostedTextInputConnection textConnection;
     private java.util.function.Predicate<MotionEvent> windowMotion;
     private float rawX, rawY;
@@ -214,6 +215,7 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
     }
 
     private void releaseHeldKeys() {
+        keyboardGeneration++;
         if (output != null) {
             for (int i = 0; i < keys.size(); i++) output.key(keys.keyAt(i), keys.valueAt(i), false);
         }
@@ -296,15 +298,45 @@ final class HostedSurfaceView extends SurfaceView implements SurfaceHolder.Callb
     @Override public boolean onKeyDown(int key, KeyEvent event) { return key(event, true) || super.onKeyDown(key, event); }
     @Override public boolean onKeyUp(int key, KeyEvent event) { return key(event, false) || super.onKeyUp(key, event); }
 
+    HostedKeyboardShortcuts.Target keyboardShortcuts() {
+        if (!keyboardAllowed || !inputAllowed || output == null || !isAttachedToWindow()
+                || !isShown() || !isFocused()) return null;
+        final long generation = keyboardGeneration;
+        return new HostedKeyboardShortcuts.Target() {
+            private final java.util.Map<Integer, KeyEvent> held = new java.util.LinkedHashMap<>();
+            private boolean valid() {
+                return keyboardGeneration == generation && keyboardAllowed && inputAllowed
+                        && output != null && isAttachedToWindow() && isShown() && isFocused();
+            }
+            @Override public boolean key(KeyEvent event) {
+                if (!valid()) return false;
+                boolean down = event.getAction() == KeyEvent.ACTION_DOWN;
+                if (down) held.put(event.getKeyCode(), new KeyEvent(event));
+                else held.remove(event.getKeyCode());
+                sendKey(event, down);
+                return true;
+            }
+            @Override public void release() {
+                if (keyboardGeneration == generation && output != null)
+                    for (KeyEvent event : held.values()) sendKey(event, false);
+                held.clear();
+            }
+        };
+    }
+
     private boolean key(KeyEvent event, boolean down) {
         if (inputAllowed && output != null && gamepads != null && gamepads.key(this, event)) return true;
         if (!keyboardAllowed || !inputAllowed || output == null || event.getKeyCode() == KeyEvent.KEYCODE_BACK || event.getKeyCode() == KeyEvent.KEYCODE_VOLUME_UP
                 || event.getKeyCode() == KeyEvent.KEYCODE_VOLUME_DOWN) return false;
+        sendKey(event, down);
+        return true;
+    }
+
+    private void sendKey(KeyEvent event, boolean down) {
         int scan = event.getScanCode();
         if (down) keys.put(event.getKeyCode(), scan);
         else keys.delete(event.getKeyCode());
         output.key(event.getKeyCode(), scan, down);
-        return true;
     }
 
     @Override public boolean onCheckIsTextEditor() { return keyboardAllowed && inputAllowed && output != null && output.supportsText(); }

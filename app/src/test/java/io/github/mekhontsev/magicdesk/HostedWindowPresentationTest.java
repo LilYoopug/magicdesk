@@ -4,7 +4,7 @@ import org.junit.Test;
 
 public final class HostedWindowPresentationTest {
     @Test public void presentationAndRecoveryShareReservationsButRetainExactHostPlacement() throws Exception {
-        RuntimeSourceFixture.verify("static " + RuntimeSourceFixture.nestedClass("HostedWindowPresentation", "HostedWindowPresentation")
+        RuntimeSourceFixture.verify("static class DisplayTaskRecents { static void requestRefresh() {} } static " + RuntimeSourceFixture.nestedClass("HostedWindowPresentation", "HostedWindowPresentation")
                 .replace("WeakReference<", "java.lang.ref.WeakReference<")
                 .replace("android.view.View", "View") + """
             record HostedWindowLayout(long parent) { static final HostedWindowLayout NONE = new HostedWindowLayout(0); }

@@ -24,6 +24,9 @@ public final class DesktopTaskDescriptionTest {
                 static class Window { View decor=new View(); View getDecorView() { return decor; } }
                 static class Activity {
                     boolean destroyed, finishing;
+                    int taskId, displayId;
+                    int getTaskId() { return taskId; }
+                    Display getDisplay() { return new Display(displayId); }
                     Window window=new Window();
                     ShellAppearance theme=new ShellAppearance(0xff111827,0xff090d14);
                     List<Presentation> publications=new ArrayList<>();
@@ -32,6 +35,32 @@ public final class DesktopTaskDescriptionTest {
                     Window getWindow() { return window; }
                     String getString(int resource) { return "title:"+resource; }
                 }
+                record Display(int getDisplayId) { }
+                static class HostedWindowPresentation {
+                    interface ContentHost { boolean wholeDesktopViewer(); }
+                }
+                static class Host extends Activity implements HostedWindowPresentation.ContentHost {
+                    boolean desktop = true;
+                    public boolean wholeDesktopViewer() { return desktop; }
+                }
+                static class DisplayTaskRecents {
+                    static void requestRefresh() { }
+                    static void update(Activity activity) { }
+                    static void forget(Activity activity) { }
+                }
+                static class DisplayPresentations {
+                    static Session viewer;
+                    static class Source { int id = 4; String name = "Portable"; boolean direct = true; }
+                    static class Session { Source source = new Source(); boolean outputAttachment = true; }
+                    static Session forTask(int id) { return id == 99 ? viewer : null; }
+                }
+                enum DisplayPresentationMode {
+                    DIRECT, MIRROR;
+                    static DisplayPresentationMode forSource(DisplayPresentations.Source source) {
+                        return source.direct ? DIRECT : MIRROR;
+                    }
+                }
+                static class R { static class drawable { static int ic_show_desktop = 12; } }
                 enum UiColor { PANEL, BACKGROUND }
                 record ShellAppearance(int primary,int background) {
                     record Palette(int primary,int background) {
@@ -52,7 +81,7 @@ public final class DesktopTaskDescriptionTest {
                 """ + RuntimeSourceFixture.nestedClass("DesktopTaskDescription", "Identity")
                 + RuntimeSourceFixture.nestedClass("DesktopTaskDescription", "Presentation")
                 + RuntimeSourceFixture.nestedClass("DesktopTaskDescription", "State")
-                + RuntimeSourceFixture.methods("DesktopTaskDescription", "apply", "bind", "refresh") + """
+                + RuntimeSourceFixture.methods("DesktopTaskDescription", "apply", "bind", "refresh", "effectiveIdentity", "forget") + """
                 public static void verify() {
                     var first=new Activity();
                     var second=new Activity();
@@ -83,6 +112,25 @@ public final class DesktopTaskDescriptionTest {
                     check(TASKS.isEmpty(),"closed Activities retained");
                     first.window.decor.moved();
                     check(first.publications.size()==4,"closed task updated");
+                    var viewer = new Activity(); viewer.taskId = 99;
+                    var host = new Host(); host.displayId = 4;
+                    apply(host,"SteamOS",icon);
+                    DisplayPresentations.viewer = new DisplayPresentations.Session();
+                    apply(viewer,"Display",7);
+                    check(viewer.publications.get(0).identity().label().equals("SteamOS"),"output lost desktop identity");
+                    check(viewer.publications.get(0).identity().bitmap()==icon,"output lost desktop icon");
+                    var other = new Host(); other.displayId = 4;
+                    apply(other,"Fedora",9); refresh();
+                    check(viewer.publications.get(1).identity().label().equals("Portable"),"ambiguous source chose an arbitrary desktop");
+                    other.finishing = true; forget(other); refresh();
+                    check(viewer.publications.get(2).identity().label().equals("SteamOS"),"closed host retained identity");
+                    host.displayId = 0; refresh();
+                    check(viewer.publications.get(3).identity().label().equals("Portable"),"moved host retained identity");
+                    host.displayId = 4;
+                    DisplayPresentations.viewer.source.direct = false; refresh();
+                    check(viewer.publications.get(4).identity().label().equals("Display"),"mirror impersonated a Linux desktop");
+                    DisplayPresentations.viewer = null; refresh();
+                    check(viewer.publications.size()==5,"unchanged fallback republished");
                 }
                 """);
     }

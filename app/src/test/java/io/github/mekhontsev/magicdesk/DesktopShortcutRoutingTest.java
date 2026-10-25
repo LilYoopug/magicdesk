@@ -80,9 +80,11 @@ public final class DesktopShortcutRoutingTest {
                 static final Handler MAIN = new Handler();
                 static int sTargetDisplay = 41;
                 static DesktopShortcutService sInstance;
+                static class HostedKeyboardShortcuts { void cancel() {} }
                 static class DesktopShortcutService {
                     int mDeviceGeneration;
                     Set<Integer> mRoutedKeyboards = Set.of();
+                    Map<Integer, HostedKeyboardShortcuts> mHostedKeyboards = new HashMap<>();
                 """ + RuntimeSourceFixture.methods("DesktopShortcutService", "refreshRouting") + """
                 }
                 public static void verify() {

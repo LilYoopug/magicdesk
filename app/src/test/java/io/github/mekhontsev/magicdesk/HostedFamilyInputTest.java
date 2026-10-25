@@ -19,6 +19,7 @@ public final class HostedFamilyInputTest {
             static class Pointer { int releases; void release() { releases++; } }
             SparseIntArray keys = new SparseIntArray();
             boolean borrowedKeyboard, contentDrag;
+            long keyboardGeneration;
             Runnable focusBoundary;
             Output output = new Output();
             Pointer pointerInput = new Pointer();

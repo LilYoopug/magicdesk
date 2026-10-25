@@ -72,6 +72,7 @@ final class BuiltInWindowRegistry {
         synchronized (WINDOWS) {
             removeLocked(activity);
         }
+        DesktopTaskDescription.forget(activity);
     }
 
     static Presentation presentation(final TaskRepository.TaskEntry task) {
@@ -173,6 +174,37 @@ final class BuiltInWindowRegistry {
             }
         }
         return false;
+    }
+
+    /** One typed focus check at chord admission, never a task sampler or a key-by-key query. */
+    static HostedKeyboardShortcuts.Target hostedKeyboardShortcuts(int displayId) {
+        var candidates = new ArrayList<Activity>();
+        synchronized (WINDOWS) {
+            for (var reference : WINDOWS) {
+                Activity activity = reference.get();
+                if (activity != null && !activity.isDestroyed() && !activity.isFinishing()
+                        && activity.getDisplay() != null && activity.getDisplay().getDisplayId() == displayId
+                        && activity instanceof HostedWindowPresentation.ContentHost host && host.wholeDesktopViewer()
+                        && host.hostedSurface() != null) candidates.add(activity);
+            }
+        }
+        if (candidates.isEmpty()) return null;
+        try {
+            for (FrameworkTaskSnapshot task : ShellAccess.readTaskSnapshots(displayId, 16)) {
+                if (!task.visible || !task.focused || task.displayId != displayId) continue;
+                for (Activity activity : candidates) {
+                    if (activity.getTaskId() == task.taskId && activity.getPackageName().equals(task.packageName)
+                            && AppProfile.current(activity).owns(task.userId)
+                            && activity.getComponentName().flattenToShortString().equals(task.topActivityName))
+                        return ((HostedWindowPresentation.ContentHost) activity).hostedSurface().keyboardShortcuts();
+                }
+                return null;
+            }
+        } catch (java.io.IOException error) {
+            CompatibilityDiagnostics.record("INPUT-HOSTED-001", "Could not resolve Linux keyboard target",
+                    ShellAccess.usefulMessage(error), error);
+        }
+        return null;
     }
 
     private static Activity closeHost(TaskRepository.TaskEntry task) {

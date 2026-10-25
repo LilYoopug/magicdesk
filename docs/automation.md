@@ -855,6 +855,11 @@ Viewer launch and attachment errors remain authoritative.
   the same display ID (including `-1`); `pointer_ready` separately verifies the
   phone mouse transport. No HOME or Desktop is acquired. Desktop shortcuts are
   enabled only when the selected display hosts its prepared workspace.
+  Without Desktop, a focused whole-Linux-desktop host receives modifier chords
+  and system keys through the shared key filter, including Alt+Tab, Alt+F4 and
+  Super. Power/volume and Ctrl+Alt+Tab remain host controls. This requires the
+  key-filter Accessibility service; synthetic MCP keys do not reproduce its
+  physical-keyboard admission checks.
   On Android 14, routing additionally requires Android's global pointer target
   to match. A failure includes the observed target and preparation instructions;
   the command does not change system desktop policy or display configuration.

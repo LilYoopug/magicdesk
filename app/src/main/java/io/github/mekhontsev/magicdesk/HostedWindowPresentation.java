@@ -68,6 +68,7 @@ final class HostedWindowPresentation {
 
     void host(Activity activity) {
         if (closed) return;
+        DisplayTaskRecents.requestRefresh();
         source = new WeakReference<>(activity);
         long version = ++generation;
         int display = activity.getDisplay() == null ? 0 : activity.getDisplay().getDisplayId();

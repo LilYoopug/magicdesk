@@ -429,6 +429,7 @@ final class DisplayPresentations {
     }
 
     static void notify(Session session) {
+        DisplayTaskRecents.presentationChanged(session);
         DesktopAutomationEventJournal.record("display", "presentation_changed", session.error.isEmpty(),
                 "viewer=" + session.id + " source=" + session.source.id + " output=" + session.output.id
                         + " ready=" + session.ready + " closed=" + session.closed);

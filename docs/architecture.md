@@ -180,7 +180,9 @@ These constraints define the supported implementation paths:
   Nubia before the client observes it; both stages require sync callbacks.
 - Physical devices keep their original Android event streams and identities.
   The key-only shortcut filter is restricted to confirmed routed keyboards;
-  outside Desktop only the display-switch gesture is consumed.
+  outside Desktop it handles the display-switch gesture and forwards modifier
+  chords/system keys to a focused whole-Linux-desktop host. Ordinary typing and
+  pointer motion retain Android dispatch. Power and volume keys remain Android's.
   Phone pointer injection is a separate virtual device, not physical relay.
 - Phone-screen-off process protection uses only the transient vendor
   service-working heartbeat; no persistent freezer whitelist is installed.
