@@ -145,7 +145,8 @@ public class GuestEnvironmentLibraryTest {
     }
 
     @Test public void legacyRecordKeepsIdentityAndPathWithoutRewritingOrNativeAdmission() throws Exception {
-        Path root = temporary.newFolder().toPath();
+        // Exercise canonical paths without relying on Windows temporary-directory aliases.
+        Path root = temporary.newFolder().toPath().resolve(".");
         Images images = new Images(); var library = library(root, images);
         String id = "3f18c2be-79cb-4dda-92da-2d4d0f8fc7ab";
         Path store = Files.createDirectory(root.resolve("instances").resolve(id));
@@ -154,7 +155,7 @@ public class GuestEnvironmentLibraryTest {
                 + "\",\"image\":\"\",\"source\":\"archive\"}";
         Files.writeString(record, json);
         var old = library.resolve("old");
-        assertEquals(id, old.id()); assertEquals(store, old.store());
+        assertEquals(id, old.id()); assertEquals(store.toRealPath(), old.store());
         assertEquals(List.of(old), library.list());
         assertEquals(json, Files.readString(record));
         assertTrue(images.commands.isEmpty());
