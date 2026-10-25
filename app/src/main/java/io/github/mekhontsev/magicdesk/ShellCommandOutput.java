@@ -131,19 +131,49 @@ final class ShellCommandOutput {
     }
 
     private static final class Capture implements Sink {
-        final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        byte[] retained;
+        int tail;
         boolean truncated;
 
         @Override public void write(byte[] input, int offset, int length) {
-            final int accepted = Math.min(length,
-                    BoundedProcessRunner.DEFAULT_MAX_OUTPUT_BYTES - bytes.size());
-            bytes.write(input, offset, accepted);
-            truncated |= accepted < length;
+            if (length == 0) return;
+            if (retained == null) {
+                final int accepted = Math.min(length,
+                        BoundedProcessRunner.DEFAULT_MAX_OUTPUT_BYTES - bytes.size());
+                bytes.write(input, offset, accepted);
+                offset += accepted;
+                length -= accepted;
+                if (length == 0) return;
+                retained = bytes.toByteArray();
+                bytes = null;
+                tail = retained.length / 2;
+                truncated = true;
+            }
+            // Keep the startup prefix and a ring containing the most recent diagnostics.
+            final int start = retained.length / 2;
+            final int capacity = retained.length - start;
+            if (length >= capacity) {
+                System.arraycopy(input, offset + length - capacity, retained, start, capacity);
+                tail = start;
+                return;
+            }
+            final int first = Math.min(length, retained.length - tail);
+            System.arraycopy(input, offset, retained, tail, first);
+            System.arraycopy(input, offset + first, retained, start, length - first);
+            tail = start + (tail - start + length) % capacity;
         }
 
         String text() {
-            return new String(bytes.toByteArray(), StandardCharsets.UTF_8)
-                    + (truncated ? "\n[MagicDesk: command output truncated]" : "");
+            if (retained == null) return bytes.toString(StandardCharsets.UTF_8);
+            final int start = retained.length / 2;
+            final byte[] ordered = new byte[retained.length - start];
+            final int first = retained.length - tail;
+            System.arraycopy(retained, tail, ordered, 0, first);
+            System.arraycopy(retained, start, ordered, first, tail - start);
+            return new String(retained, 0, start, StandardCharsets.UTF_8)
+                    + "\n[MagicDesk: command output truncated]\n"
+                    + new String(ordered, StandardCharsets.UTF_8);
         }
     }
 }

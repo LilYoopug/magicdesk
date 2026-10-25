@@ -93,6 +93,42 @@ public final class ShellCommandExecutorTest {
         assertEquals("recipient closed", error.getMessage());
     }
 
+    @Test public void overflowRetainsStartupAndFinalDiagnosticsAcrossRingWraps() throws Exception {
+        final ByteArrayOutputStream frames = new ByteArrayOutputStream();
+        final StringBuilder expected = new StringBuilder();
+        for (int i = 0; i < 180; i++) {
+            final String text = ("frame-" + i + ":").repeat(503);
+            expected.append(text);
+            frame(frames, 34, text);
+        }
+        expected.append("\nfatal: final diagnostic");
+        frame(frames, 34, "\nfatal: final diagnostic");
+        final int half = BoundedProcessRunner.DEFAULT_MAX_OUTPUT_BYTES / 2;
+        final String captured = expected.substring(0, half)
+                + "\n[MagicDesk: command output truncated]\n"
+                + expected.substring(expected.length() - half);
+        final var failure = assertThrows(ShellCommandOutput.Failure.class, () -> read(frames));
+        assertTrue(failure.stderrTruncated);
+        assertEquals(captured, failure.stderr);
+        frame(frames, 33, end(125)); frame(frames, 34, end(125));
+        final var result = read(frames);
+        assertTrue(result.stderrTruncated());
+        assertEquals(captured, result.stderr());
+        assertEquals(captured, result.output());
+        assertEquals(125, result.exitCode());
+    }
+
+    @Test public void exactCaptureLimitDoesNotTruncateOrInsertMarker() throws Exception {
+        final ByteArrayOutputStream frames = new ByteArrayOutputStream();
+        final byte[] block = "a".repeat(8192).getBytes(StandardCharsets.UTF_8);
+        final int limit = BoundedProcessRunner.DEFAULT_MAX_OUTPUT_BYTES;
+        for (int i = 0; i < limit; i += block.length) frame(frames, 34, block);
+        frame(frames, 33, end(0)); frame(frames, 34, end(0));
+        final var result = read(frames);
+        assertFalse(result.stderrTruncated());
+        assertEquals("a".repeat(limit), result.stderr());
+    }
+
     private static ShellCommandOutput.Result read(ByteArrayOutputStream frames) throws IOException {
         return ShellCommandOutput.read(new ByteArrayInputStream(frames.toByteArray()), MARKER, null);
     }
