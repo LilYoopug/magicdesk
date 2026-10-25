@@ -88,6 +88,16 @@ int main(int argc, char **argv)
         printf("swap_interval=%u maximum=%u\n", interval, maximum);
     }
     int result = swap != atoi(argv[1]) ? 4 : 0;
+    int32_t numerator = 0, denominator = 0;
+    PFNGLXGETMSCRATEOMLPROC rate = (PFNGLXGETMSCRATEOMLPROC)
+        glXGetProcAddressARB((const GLubyte *)"glXGetMscRateOML");
+    if (!rate || !rate(display, window, &numerator, &denominator)
+            || numerator <= 0 || denominator <= 0) {
+        fprintf(stderr, "GLX MSC rate unavailable\n");
+        result = 9;
+    } else {
+        printf("msc_rate=%d/%d\n", numerator, denominator);
+    }
     XMapWindow(display, window);
     XFlush(display);
     for (;;) {
