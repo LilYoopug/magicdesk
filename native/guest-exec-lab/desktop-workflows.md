@@ -378,6 +378,36 @@ and observes its exit before releasing the graphics session and display.
 checks copied/shared file tables, zero/SIGCHLD exit signals, guest filesystem
 access and guest-debugger non-inheritance for `CLONE_UNTRACED` children.
 
+### Concurrent Desktop Responsiveness
+
+Use the installed SteamOS launcher, its existing Plasma session and ordinary
+guest user. Launch Flatpak Chromium and the installed Steam game through that
+session, not separate supervisors. A game menu is insufficient: enter an actual
+level, keep the viewer visible and verify changing frames. Compare keyboard
+input and Start submenus both after launch and after their first use. Record
+CPU-frequency residency, thermal limits and battery temperature alongside each
+run. X11 pixel readback measures server-visible composition, not physical
+display latency; Android MCP injection additionally includes RPC overhead.
+
+The 2026-10-25 installed-build check used a 1920x1080 virtual output, Plasma X11,
+Flatpak Chromium and DDNet through Steam/FEX with a local tutorial server.
+Chromium retained its Flatpak/renderer seccomp sandbox and Zink/Turnip hardware
+composition; this does not certify GPU-process sandboxing. At a reported
+battery temperature of 41 C and CPU policy ceilings of 1.7856/1.4976 GHz,
+repeated submenu changes took 37-56 ms. The earlier post-launch pass took
+183-656 ms. Android-injected omnibox keys took 148-157 ms after a 351 ms first
+sample; native XTest input took 114-163 ms after a 274 ms first sample. These
+are workload observations, not native comparisons or a universal latency bound.
+Post-launch outliers and general-wait kernel scanning remain performance work.
+
+Creating and closing 160 disposable Chromium tabs with the game running left
+the same supervisor, Plasma, browser and game alive. A bounded 180-second
+SIGKILL trace recorded no signal addressed to those processes and no dropped
+trace events. Keep this separate from the deterministic birth/exit, signal-mask,
+descriptor-publication and fairness fixtures: a stress pass alone cannot prove
+that all process-lifetime races are fixed. The relevant ownership contracts are
+in [interception](../shroot/interception.md).
+
 ## Libc, IPC And Desktop Checks
 
 `test_argument_vector` covers inline/growing argument storage, readable-page

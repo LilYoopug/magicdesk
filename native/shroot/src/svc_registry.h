@@ -19,7 +19,7 @@ enum { MD_SVC_PUBLISHED, MD_SVC_RETIRED };
 struct md_svc_registry {
     uintptr_t frames, dispatch, native_begin, native_end;
     struct md_svc_code_pool pools[MD_SVC_CODE_POOLS];
-    unsigned pool_count, count, disabled, entry_fence_drained;
+    unsigned pool_count, count, disabled, entry_fence_drained, clients_dirty;
     struct md_svc_site sites[MD_SVC_SITES];
 };
 struct md_svc_registry *md_svc_registry_new(uintptr_t frames,uintptr_t dispatch);
@@ -39,7 +39,10 @@ int md_svc_registry_revoke(struct md_svc_registry *,pid_t);
 /* Retired source instructions can still have peers inside resident gates. */
 int md_svc_registry_resident(const struct md_svc_registry *);
 int md_svc_registry_unpatch(struct md_svc_registry *,pid_t,uintptr_t,size_t);
-int md_svc_registry_retire_client(pid_t,uintptr_t state);
+/* Retry incomplete retirement through any stopped member of this same mm.
+ * Liveness comes from the supervisor, never from a guest-writable handle. */
+int md_svc_registry_collect_clients(struct md_svc_registry *,pid_t,int memory_fd,
+    int (*alive)(pid_t,void *),void *);
 int md_svc_registry_suspend(struct md_svc_registry *,pid_t,uintptr_t svc);
 int md_svc_registry_resume(struct md_svc_registry *,pid_t,uintptr_t svc,uint64_t number);
 #endif

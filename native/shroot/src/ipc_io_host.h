@@ -19,6 +19,7 @@ struct md_ipc_io {
 };
 void md_ipc_io_release(struct md_ipc_io *);
 int md_ipc_io_prepare(struct md_ipc_io *, struct md_ipc_io_message *, int, int, int);
+int md_ipc_io_prepare_batch(struct md_ipc_io *, struct md_ipc_io_message *, int fd, int flags, unsigned count);
 int md_ipc_io_copy(struct md_ipc_io *, struct md_ipc_io_message *, size_t, size_t, int, int);
 int md_ipc_io_event(const struct md_ipc_io *, int socket);
 void md_ipc_io_interrupt(struct md_ipc_io *);

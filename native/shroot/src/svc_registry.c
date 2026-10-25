@@ -205,22 +205,43 @@ int md_svc_registry_unpatch(struct md_svc_registry *r,pid_t pid,uintptr_t start,
     }
     return 0;
 }
-int md_svc_registry_retire_client(pid_t pid,uintptr_t base) {
+static int client_memory(pid_t pid,int fd,uintptr_t at,void *data,size_t size,int write) {
+    if (fd<0) return write ? md_svc_registry_write(pid,at,data,size)
+        : md_svc_registry_read(pid,at,data,size);
+    ssize_t n;
+    do { n=write ? pwrite(fd,data,size,(off_t)at) : pread(fd,data,size,(off_t)at); } while (n<0 && errno==EINTR);
+    /* The retained proc description cannot follow PID reuse. Zero means that
+     * its mm has no remaining users, even if a terminal event is still queued. */
+    return n==(ssize_t)size ? 0 : n<0 ? -errno : !n ? -ESRCH : -EIO;
+}
+int md_svc_registry_collect_clients(struct md_svc_registry *r,pid_t pid,int memory_fd,
+        int (*alive)(pid_t,void *),void *context) {
+    if (!r || r->disabled || !r->clients_dirty) return 0;
+    uintptr_t base=r->frames+MD_SVC_POOL_SIZE;
     struct md_svc_payload_state state;
-    if (md_svc_registry_read(pid,base,&state,sizeof(state))) return 0;
-    for (unsigned i=0;i<MD_SVC_PAYLOAD_CLIENTS;++i) if (state.clients[i].tid==(uint64_t)pid) {
+    int error=client_memory(pid,memory_fd,base,&state,sizeof(state),0);
+    if (error) return error;
+    unsigned retired=0;
+    for (unsigned i=0;i<MD_SVC_PAYLOAD_CLIENTS;++i) {
+        uint64_t owner=state.clients[i].tid;
+        if (!owner || (owner<=INT32_MAX && alive((pid_t)owner,context))) continue;
         uintptr_t at=base+offsetof(struct md_svc_payload_state,clients)+i*sizeof(state.clients[0]);
         uint64_t zero=0;
         /* Publish the empty owner last: another thread can then claim this
          * slot without inheriting the retiring thread's opaque handle. */
         for (size_t j=sizeof(state.clients[0]);j;j-=sizeof(zero)) {
-            int error=md_svc_registry_write(pid,at+j-sizeof(zero),&zero,sizeof(zero));
+            error=client_memory(pid,memory_fd,at+j-sizeof(zero),&zero,sizeof(zero),1);
             if (error) return error;
         }
-        ++state.retired_clients;
-        return md_svc_registry_write(pid,base+offsetof(struct md_svc_payload_state,retired_clients),
-            &state.retired_clients,sizeof(state.retired_clients));
+        ++retired;
     }
+    if (retired) {
+        state.retired_clients+=retired;
+        error=client_memory(pid,memory_fd,base+offsetof(struct md_svc_payload_state,retired_clients),
+            &state.retired_clients,sizeof(state.retired_clients),1);
+        if (error) return error;
+    }
+    r->clients_dirty=0;
     return 0;
 }
 struct md_svc_registry *md_svc_registry_new(uintptr_t frames,uintptr_t dispatch) {
@@ -233,7 +254,7 @@ struct md_svc_registry *md_svc_registry_new(uintptr_t frames,uintptr_t dispatch)
 struct md_svc_registry *md_svc_registry_copy(const struct md_svc_registry *r) {
     if (!r) return NULL;
     struct md_svc_registry *copy=malloc(sizeof(*copy));
-    if (copy) *copy=*r;
+    if (copy) { *copy=*r; copy->clients_dirty=1; }
     return copy;
 }
 int md_svc_registry_pool(struct md_svc_registry *r,uintptr_t address) {

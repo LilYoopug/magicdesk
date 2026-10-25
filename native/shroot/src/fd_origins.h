@@ -123,6 +123,13 @@ int md_fd_origins_exclusive(const struct md_fd_order *);
 struct md_fd_native { unsigned kind, flags; };
 int md_fd_origins_native(const struct md_fd_order *,int number,struct md_fd_native *);
 int md_fd_origins_native_regular(const struct md_fd_order *,int number);
+/* No published object can supply virtual readiness. Requires a RUNNING turn;
+ * counts potential providers, not their mutable current readiness. */
+int md_fd_origins_native_poll(const struct md_fd_order *);
+struct pollfd;
+/* Same conservative proof for a captured vector: unrelated providers do not
+ * require adaptation. The running table turn protects slot classification. */
+int md_fd_origins_native_poll_vector(const struct md_fd_order *,const struct pollfd *,size_t);
 /* No entry yields NULL/-1; ambiguous terminal mutations fail with ESTALE,
  * rather than creating another potentially orphaned infrastructure slot. */
 int md_fd_origins_channel(struct md_fd_origins *, int *number, struct md_fd_channel **);

@@ -25,4 +25,6 @@ int md_process_limit(struct md_process_member *, const struct md_identity *actor
     const struct md_identity *target, int same_group, unsigned resource,
     const struct rlimit *next, struct rlimit *old, pid_t native_pid);
 struct md_process_limits md_process_limits_value(const struct md_process_member *);
+/* Effective kernel ceiling, including the executor's retained hard limit. */
+rlim_t md_process_native_nofile(const struct md_process_member *);
 #endif

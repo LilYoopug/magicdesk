@@ -32,6 +32,11 @@ changing x7 at an ARM64 syscall stop: the
 [kernel restores that register](https://github.com/torvalds/linux/blob/v5.15/arch/arm64/kernel/ptrace.c#L1694-L1726)
 after the stop. Notification cancellation, ordinary
 seccomp entry and debugger syscall stepping share this entry contract.
+For recvmsg and poll adapters, x10 can carry an already leased input-buffer
+address. The assembly gate passes it as the ninth C argument. Missing mappings,
+pool pressure and unsupported calls retain ordinary TAKE admission; this is not
+a per-thread buffer cache. Completion releases even an unclaimed lease after
+early argument failure.
 Before task-affine admission, a signal-delivery stop retires an unexecuted
 notification if it wins the race with the requested ptrace interruption.
 Blocking calls retain kernel EINTR and SA_RESTART semantics. For nonblocking
@@ -110,6 +115,20 @@ shared tables and debugger execution retain the full route. No registers,
 arguments, instruction address or application filter are rewritten; the table
 turn ends before potentially blocking IO. This removes redundant capture and
 watch-adapter stops, not the seccomp stop itself. Unselected native IO is unchanged.
+Poll and pselect can similarly resume at their original syscall when an ordered
+table snapshot contains no potential readiness providers. A maintained provider
+count avoids scanning the FD table or copying the vector for this decision.
+Mixed tables retain typed classification. The kernel validates pointers, limits,
+timeouts and masks; no table turn spans the blocking wait. Adapted poll copies
+its first vector chunk with BEGIN and uses supervisor monotonic timing, without
+injecting guest clock syscalls or querying foreign process limits on every poll.
+When mixed-table classification finds only native descriptors in the selected
+vector, it retires the input buffer and resumes the original wait directly;
+there is no output to copy or intermediate adapter acknowledgement.
+Short ppoll vectors can be classified directly from an ordered snapshot, without
+entering the adapter. Native epoll waits use the same provider predicate as the
+full path; queues preparing a virtual provider cannot take this shortcut.
+Failed argument reads and unknown authorities retain normal adaptation.
 Adapted calls run on guarded scratch stacks leased by `interception_memory`, the
 address-space owner. CLONE_VM shares it; fork copies private scratch-stack mapping
 metadata without sharing stack leases; exec replaces it. Completed calls return
@@ -132,6 +151,60 @@ again; it is not another stop-the-world interval.
 Kernel events without debugger accounting explicitly carry zero `rusage`.
 Deferred events retain their captured accounting across debugger attachment
 changes; replay neither queries it again nor inherits another event's values.
+Kernel collection advances at most two live TIDs in round-robin order, then
+prefers fresh SIGCHLD hints and up to four recently stopped TIDs (including
+alternating caller/helper checkpoints), within an eight-query budget for up to
+four members or at least 64 queries for larger trees. Above 64 members the budget
+matches the population, capped at 1024, amortizing the kernel's full child-list
+scan without removing its discovery bound. A single live tracee keeps the
+hint/MRU fast path. The bounded round-robin is necessary:
+`wait4(-1)` can repeatedly select hot children at the head of the kernel list,
+even with frequent general waits, while a coalesced signal loses another TID.
+Membership is updated at task admission/retirement, without a full task scan.
+The signal source is refreshed when its hint queue is empty. A general wait
+still runs at the budget boundary and is the only way to establish an empty
+kernel queue; no timer or speculative sleep is added.
+For larger task sets, general discovery collects at most 32 ready statuses
+before resuming any of them. This prevents a hot child from immediately
+reoccupying the kernel list head while the same batch is being collected.
+The collector owns each status until delivery, including its original accounting;
+membership changes and new signals cannot discard an already collected event.
+Directed hints remain the first path: repeatedly draining the full child list
+is expensive when a desktop has many sleeping threads.
+Group exit can replace an already collected seccomp or syscall-entry stop with
+a terminal stop even when ptrace still succeeds. An inconsistent protocol event
+therefore checks the current stop's exact signal information before rejecting it.
+A confirmed EXIT/EXEC replacement retires only the stale observation; its terminal
+event keeps the normal dispatch path. Ordinary valid stops need no extra query.
+Birth messages require a current-stop check before publishing any PID. If group
+death replaces a collected FORK/VFORK/CLONE stop, `task_birth` recovers the child
+from the completed native clone result at EXIT, not from the overwritten event
+message (which now holds an exit code). The parent awaits its terminal event;
+the child still receives its reserved resources. A newborn's EXIT can precede
+that publication and is retained like its initial stop, preventing premature
+reaping or resurrection of an already retired TID. These checks run only at birth,
+not on ordinary syscall entry. Native controls cover all three birth kinds,
+protected callers, nonzero exit codes and independent surviving children.
+If EXIT overtakes the birth before collection, the outstanding clone reservation
+is reconciled from its terminal result through the same publication owner. A
+cancelled seccomp entry can retain its first argument instead of a result; that
+value alone is never admitted as a child PID.
+Fatal cleanup drains collected statuses before waiting in the kernel, so an
+already owned EXIT stop cannot leave killed tracees blocked in ptrace forever.
+Birth handling also recognizes a child's initial stop already owned by the
+dispatcher before a barrier began. Its memory/files membership is not known
+until the parent's clone/fork/vfork event is replayed. The barrier retains that
+stop rather than waiting for a second one or resuming the child early.
+
+Resident-entry client retirement is address-space scoped. Terminal observation
+marks that address space dirty; a stopped live participant collects slots whose
+exact TID/address-space owner has exited. The retained proc memory description
+continues to refer to that mm across credential changes, not a reused PID.
+Opaque client state is cleared before publishing its empty owner. A lost stop
+leaves collection pending for another participant; ordinary resumes do no work
+when the registry is clean. Forked registries collect inherited foreign owners.
+Revoked registries do not collect unused slots: protected descendants may no
+longer permit memory access, and their disabled entry cannot claim those slots.
 
 Before changing mappings, memory repair yields if a stopped participant owns a
 pending broker temporary-FD retirement. It releases its writer barrier and worker
@@ -164,6 +237,14 @@ the slot. Acknowledgement and cleanup errors retain their original precedence,
 including partial reads. Both terminal IO and ordinary adapter returns use the
 same completion owner for signal/debugger state, registers and scratch-stack
 retirement. This transport is shared by proc files, FUSE and other virtual devices.
+The same terminal FINISH control retires poll and scalar socket receives, avoiding
+a separate RELEASE followed by DONE. Only scalar TAKE may publish a checkpoint
+directly at syscall entry; full-context returns keep their post-syscall boundary.
+An inline recvmsg/recvmmsg error can complete at the receive owner when the adapter
+explicitly reports that all its temporary storage is on the scratch stack. It
+publishes no msghdr or payload changes. A batch also requires no committed message;
+a late error retains publication of its successful prefix. Successful receives
+and receives with heap-backed temporary storage retain their output/cleanup continuation.
 
 ### Filesystem Requests
 
@@ -447,6 +528,29 @@ table mutations. Adapter control uses immutable bootstrap SVC checkpoints owned
 by `task_checkpoint`, not service BRKs or application SIGTRAP. Selective TRACE
 handles unfiltered markers; restricted service execution uses scoped SYSEMU to
 skip registered markers while real calls retain kernel filter admission.
+Small scalar recvmsg requests prepare their vectors before ordered socket capture,
+so capture and IO can complete in one exchange. When permitted, pidfd_getfd
+captures the exact caller's OFD under the file-table turn; it is released after
+the operation, never cached by FD number. Denied/unsupported native capture uses
+the existing task-affine export. Large vectors and ancillary publication retain
+their staged handling and exact copy/error semantics.
+For short nonblocking receives, dispatch can snapshot the header and vectors
+directly and submit the same IPC owner before entering the adapter. This uses
+one real receive on the captured OFD, not a peek or a cached readiness result.
+An empty/error result retires the input lease immediately; successful payload,
+credentials and rights retain the common adapter publisher. Failed memory or
+FD capture, blocking IO, large inputs and debugger ownership keep normal entry.
+At an initial TRACE or cancelled-notification entry, an empty/error result also
+avoids the adapter stack and signal shield. Pending application signals retain
+their original mask; successful IO enters the normal shielded publisher without
+repeating the receive.
+No guest output is written before IO, and a completed receive is never replayed.
+`MD_DIRECT capturedReceives` records this admission only with statistics enabled;
+the `receive-entry` native comparison covers blocking, MSG_DONTWAIT and O_NONBLOCK,
+credentials, rights, readonly headers, unchanged EAGAIN outputs and stream EOF.
+`entryReceives` distinguishes pre-shield admission; `receive-entry-signals`
+checks blocked pending signals, delivery and mask preservation through empty
+and successful receives against native execution.
 Only a ready supervised task uses it. FD payload delivery has a retained kernel
 recvmsg receipt, so receiver death does not require a guest acknowledgement.
 Native adapter chdir/fchdir and a dedicated bootstrap O_PATH capture entry point

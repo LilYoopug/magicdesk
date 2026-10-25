@@ -4,24 +4,6 @@
 
 size_t md_page_size;
 size_t md_length(const char *s) { size_t n = 0; while (s[n]) ++n; return n; }
-#ifndef MD_USE_LIBC
-void *memcpy(void *out, const void *in, size_t n) {
-    unsigned char *d = out; const unsigned char *s = in;
-    for (size_t i = 0; i < n; ++i) d[i] = s[i];
-    return out;
-}
-void *memset(void *out, int value, size_t n) {
-    unsigned char *d = out;
-    for (size_t i = 0; i < n; ++i) d[i] = (unsigned char)value;
-    return out;
-}
-void *memmove(void *out, const void *in, size_t n) {
-    unsigned char *d = out; const unsigned char *s = in;
-    if ((uintptr_t)d <= (uintptr_t)s) return memcpy(out, in, n);
-    while (n) { --n; d[n] = s[n]; }
-    return out;
-}
-#endif
 int md_equal(const char *a, const char *b) {
     size_t i = 0; while (a[i] && a[i] == b[i]) ++i;
     return a[i] == b[i];

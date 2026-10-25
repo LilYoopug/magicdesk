@@ -2,11 +2,14 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -16,8 +19,64 @@ static void expired(int signal) {
     (void)signal;
     atomic_store(state, 2);
 }
+static _Atomic int spawning;
+static void *short_thread(void *unused) { return unused; }
+static void *births(void *argument) {
+    unsigned round=(unsigned)(uintptr_t)argument;
+    atomic_store(&spawning,1);
+    for (;;) {
+        if (round&1) {
+            pid_t child=fork(); assert(child>=0);
+            if (!child) _exit(17);
+            int status; assert(waitpid(child,&status,0)==child && WEXITSTATUS(status)==17);
+        } else {
+            pthread_t child; assert(!pthread_create(&child,NULL,short_thread,NULL));
+            assert(!pthread_join(child,NULL));
+        }
+    }
+    return NULL;
+}
+static void birth_races(int namespaced) {
+    alarm(20);
+    if (namespaced) {
+        if (geteuid()) assert(!unshare(CLONE_NEWUSER));
+        assert(!unshare(CLONE_NEWPID));
+        pid_t init=fork(); assert(init>=0);
+        if (init) {
+            int status; assert(waitpid(init,&status,0)==init && !status);
+            puts("PASS worker completions under continuous ptrace stops: PID-scoped birth races");
+            return;
+        }
+        alarm(20);
+    }
+    assert(!prctl(PR_SET_CHILD_SUBREAPER,1));
+    for (unsigned round=0;round<128;++round) {
+        pid_t parent=fork(); assert(parent>=0);
+        if (!parent) {
+            if (round&2) assert(!prctl(PR_SET_DUMPABLE,0));
+            pthread_t thread; assert(!pthread_create(&thread,NULL,births,(void *)(uintptr_t)round));
+            while (!atomic_load(&spawning)) sched_yield();
+            for (unsigned i=0;i<round%16;++i) sched_yield();
+            _exit(round&4 ? 77 : 0);
+        }
+        unsigned parents=0; int status; pid_t pid;
+        /* EVENT_WAIT: all own descendants, including reparented fork children;
+         * the alarm fails leaked newborns or unreleased terminal stops. */
+        while ((pid=waitpid(-1,&status,0))>0) {
+            assert(WIFEXITED(status));
+            assert(WEXITSTATUS(status)==(pid==parent ? (round&4 ? 77 : 0) : 17));
+            parents+=pid==parent;
+        }
+        assert(errno==ECHILD && parents==1);
+    }
+    if (namespaced) _exit(0);
+    puts("PASS worker completions under continuous ptrace stops: birth, exit, protected callers, exact reaping");
+}
 
 int main(int argc, char **argv) {
+    if (argc==2 && (!strcmp(argv[1],"birth") || !strcmp(argv[1],"birth-namespace"))) {
+        birth_races(!strcmp(argv[1],"birth-namespace")); return 0;
+    }
     int descriptors=argc==2 && !strcmp(argv[1],"descriptors");
     assert(argc==1 || descriptors);
     enum { WORKERS = 16 };

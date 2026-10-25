@@ -155,6 +155,9 @@ static struct md_fs_anchor *borrowed_file_origin(struct md_fd_object *object) {
     return ((struct borrowed_file *)object)->origin;
 }
 static void borrowed_file_destroy(struct md_fd_object *object) { (void)object; }
+static struct md_control_file borrowed_readiness(struct md_fd_object *object) {
+    (void)object; return (struct md_control_file){0};
+}
 struct closing_file { struct md_fd_object object; unsigned closes,destroyed; };
 static void closing_destroy(struct md_fd_object *object) { ++((struct closing_file *)object)->destroyed; }
 static long closing_close(struct md_fd_object *object,const struct md_control_actor *actor,
@@ -227,11 +230,16 @@ static void native_io_proofs(struct md_mount_namespace *view,struct md_fs_anchor
     struct md_fs_anchor *file=capture(view,memfd_create("native-io",MFD_CLOEXEC));
     struct md_fd_origins *files=md_fd_origins_new(); assert(files);
     struct md_fd_order turn={0};
+    struct pollfd vector[]={{8,POLLIN,0},{9,POLLOUT,0},{-1,0,0},{127,POLLIN,0}};
+    assert(!md_fd_origins_native_poll_vector(&turn,vector,4));
     put(files,8,file,0); put(files,9,directory,0);
+    assert(!md_fd_origins_native_poll(&turn));
     assert(!md_fd_origins_native_regular(&turn,8));
     assert(md_fd_order_begin(files,&turn,NULL)==1);
     assert(!md_fd_origins_native_regular(&turn,8));
     assert(!md_fd_order_start(&turn));
+    assert(md_fd_origins_native_poll(&turn));
+    assert(md_fd_origins_native_poll_vector(&turn,vector,4));
     allocation_budget=0;
     struct md_fd_native native={0};
     assert(md_fd_origins_native(&turn,8,&native) && native.kind==S_IFREG && !native.flags);
@@ -262,6 +270,48 @@ static void native_io_proofs(struct md_mount_namespace *view,struct md_fs_anchor
     struct md_fd_origins *shared=md_fd_origins_fork(files,1); assert(shared==files);
     assert(!md_fd_origins_exclusive(&turn)); md_fd_origins_release(shared);
     assert(md_fd_origins_exclusive(&turn));
+    /* Count possible readiness, not its current callback result. Dynamic
+     * activation must not turn a previously admitted table into a bypass. */
+    static const struct md_fd_object_type ready_type={.destroy=borrowed_file_destroy,.readiness=borrowed_readiness};
+    struct md_fd_object ready; md_fd_object_init(&ready,&ready_type);
+    assert(!md_fd_origins_prepare_object(files,&ready,FD_CLOEXEC,&update));
+    assert(md_fd_origins_native_poll(&turn));
+    md_fd_origins_finish(&update,20);
+    assert(!md_fd_origins_native_poll(&turn));
+    allocation_budget=0;
+    assert(md_fd_origins_native_poll_vector(&turn,vector,4));
+    assert(md_fd_origins_native_poll_vector(&turn,NULL,0));
+    assert(!md_fd_origins_native_poll_vector(&turn,NULL,1));
+    vector[2].fd=20;
+    assert(!md_fd_origins_native_poll_vector(&turn,vector,4));
+    vector[2].events=0; /* HUP/ERR still make this descriptor relevant. */
+    assert(!md_fd_origins_native_poll_vector(&turn,vector,4));
+    vector[2].fd=-20;
+    assert(md_fd_origins_native_poll_vector(&turn,vector,4));
+    allocation_budget=-1;
+    assert(!md_fd_origins_prepare_copy(files,20,0,&update));
+    md_fd_origins_finish(&update,21);
+    struct md_fd_origins *copy=md_fd_origins_fork(files,0); assert(copy);
+    struct md_fd_order copied={0};
+    assert(md_fd_order_begin(copy,&copied,NULL)==1 && !md_fd_order_start(&copied));
+    assert(!md_fd_origins_native_poll(&copied));
+    assert(!md_fd_origins_close_range(files,20,20,0));
+    assert(!md_fd_origins_native_poll(&turn));
+    vector[2].fd=20;
+    assert(md_fd_origins_native_poll_vector(&turn,vector,4));
+    vector[2].fd=21;
+    assert(!md_fd_origins_native_poll_vector(&turn,vector,4));
+    put(files,21,file,0);
+    assert(md_fd_origins_native_poll(&turn) && !md_fd_origins_native_poll(&copied));
+    md_fd_origins_exec(copy);
+    assert(!md_fd_origins_native_poll(&copied));
+    assert(!md_fd_origins_close_range(copy,0,UINT_MAX,0));
+    assert(md_fd_origins_native_poll(&copied));
+    assert(!md_fd_order_complete(&copied)); md_fd_origins_release(copy);
+    assert(!md_fd_origins_prepare_object(files,&ready,0,&update));
+    md_fd_origins_finish(&update,-EMFILE);
+    assert(md_fd_origins_native_poll(&turn));
+    md_fd_object_release(&ready);
     assert(!md_fd_origins_close_range(files,8,8,0));
     assert(!md_fd_origins_native_regular(&turn,8));
     assert(!md_fd_order_complete(&turn));

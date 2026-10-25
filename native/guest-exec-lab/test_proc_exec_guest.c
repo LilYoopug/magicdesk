@@ -68,6 +68,24 @@ static void execute(const char *path,int base,int protected) {
     assert(WIFEXITED(status) && WEXITSTATUS(status)==37);
 }
 static void exercise(const char *proc,const char *directory) {
+    int root=open("/",O_PATH|O_DIRECTORY|O_CLOEXEC); assert(root>=0);
+    for (unsigned scope=0;scope<2;++scope) {
+        const char *relative=scope ? proc+1 : proc;
+        struct open_how how={.flags=O_PATH|O_DIRECTORY|O_CLOEXEC,
+            .resolve=(scope ? RESOLVE_BENEATH : RESOLVE_IN_ROOT)|RESOLVE_NO_MAGICLINKS};
+        int fd=syscall(SYS_openat2,root,relative,&how,sizeof(how));
+        if (fd<0) perror("scoped proc root");
+        assert(fd>=0);
+        struct stat st,expected;
+        assert(!fstat(fd,&st) && !stat(proc,&expected));
+        assert(st.st_dev==expected.st_dev && st.st_ino==expected.st_ino);
+        close(fd);
+        how.resolve|=RESOLVE_NO_XDEV;
+        errno=0;
+        assert(syscall(SYS_openat2,root,relative,&how,sizeof(how))==-1 && errno==EXDEV);
+    }
+    close(root);
+    puts("PASS scoped proc root opens retain mount-crossing policy");
     image_metadata(proc);
     char path[256],alias[256];
     const char *nonlinks[]={"", "/sys", "/uptime"};

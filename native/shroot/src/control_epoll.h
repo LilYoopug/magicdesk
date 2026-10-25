@@ -16,6 +16,9 @@ struct md_control_epoll *md_control_epoll_new(void);
 void md_control_epoll_release(struct md_control_epoll *);
 struct md_fd_object *md_control_epoll_object(struct md_control_epoll *);
 struct md_control_epoll *md_control_epoll_from_object(struct md_fd_object *);
+/* Under the caller's file-table turn: no admitted or preparing virtual wait.
+ * Unknown/non-epoll descriptions retain native kernel validation. */
+int md_control_epoll_native_wait(struct md_fd_object *);
 /* Readiness hint, not an application epoll: collect revalidates providers.
  * -1 before successful virtual admission. Once published, this borrowed FD
  * stays valid until owner release, including after the last interest's DEL.

@@ -77,18 +77,11 @@ void md_socket_vectors_close(struct md_socket_vectors *vectors) {
     release(vectors->items,vectors->local,vectors->bytes);
 }
 long md_socket_payload_prepare(struct md_ipc_io_message *io, const struct msghdr *m, int sending) {
-    if (m->msg_iovlen>1024) return -EMSGSIZE;
-    if (m->msg_namelen>sizeof(io->address)) return -EINVAL;
-    io->size=0; io->control_size=m->msg_controllen;
-    io->address_size=m->msg_name ? m->msg_namelen : 0; io->flags=0;
-    for (size_t i=0;i<m->msg_iovlen;++i) {
-        struct iovec v=m->msg_iov[i];
-        if (v.iov_len>INT_MAX-io->size) return -EMSGSIZE;
-        io->size+=v.iov_len;
-    }
+    long error=md_socket_payload_layout(io,m);
+    if (error) return error;
     /* Inline messages need no host allocation or intermediate acknowledgement.
      * Admission and IO share the commit; large/batch transfers retain staging. */
-    long error=md_ipc_io_inline(io) ? 0 : md_guest_buffer_control(MD_FS_BUFFER_IPC_IO_PREPARE,0,0);
+    error=md_ipc_io_inline(io) ? 0 : md_guest_buffer_control(MD_FS_BUFFER_IPC_IO_PREPARE,0,0);
     if (error) return error;
     if (!sending) return 0;
     size_t offset=0;
@@ -357,42 +350,59 @@ static long publish(const struct md_fs *fs, int socket, const struct msghdr *ori
     if (!copied) copied=md_write_memory(&target->msg_controllen,&used,sizeof(used));
     return copied;
 }
-static size_t native_capacity(size_t capacity) {
-    size_t extra=CMSG_SPACE(sizeof(int))+CMSG_SPACE(sizeof(struct ucred));
-    return capacity > 16*1024*1024-extra ? 0 : CMSG_ALIGN(capacity+extra);
+static long receive_capture(struct md_task_receive_frame *frame) {
+    return md_socket_capture_inputs(md_guest_buffer_control(MD_FS_BUFFER_TASK_RECEIVE,0,0),
+        &frame->capture,&frame->input.socket,1);
 }
+/* Bounded scratch fits in the existing 512 KiB adapter stack. Empty receives
+ * then own no mappings to retire after the native result is known. */
+enum { INLINE_RECEIVE_BATCH=128 };
 static long receive_batch_owned(struct md_task_receive_frame *frame, int *accepted) {
     struct md_task_receive *input=&frame->input;
     struct mmsghdr *messages=(void *)input->messages;
     struct entry { struct md_socket_vectors vectors; struct msghdr view; int opened; };
-    struct entry local[4];
+    struct entry local[INLINE_RECEIVE_BATCH];
     size_t size=input->count*sizeof(struct entry);
     struct entry *entries=buffer(size,local,sizeof(local));
-    if (!entries) return -ENOMEM;
     struct md_ipc_io_message *io=&frame->io;
     io->timed=input->timeout!=0; io->timeout=(struct timespec){0};
-    long result=input->timeout ? md_read_memory(&io->timeout,(void *)input->timeout,sizeof(io->timeout)) : 0;
+    long result=!entries ? -ENOMEM : input->timeout
+        ? md_read_memory(&io->timeout,(void *)input->timeout,sizeof(io->timeout)) : 0;
     unsigned prepared=0;
     while (!result && prepared<input->count) {
         struct entry *entry=&entries[prepared];
         *entry=(struct entry){0};
         entry->view=messages[prepared].msg_hdr;
-        result=(int)entry->view.msg_namelen<0 ? -EINVAL : md_socket_vectors_open(&entry->vectors,&entry->view);
-        io->batch_count=input->count; io->batch_index=prepared;
-        io->vector_error=(int)result;
+        result=(int)entry->view.msg_namelen<0 ? -EINVAL
+            : md_socket_vectors_open(&entry->vectors,&entry->view);
+        struct md_ipc_io_layout *layout=&io->layouts[prepared];
         if (result==-EFAULT || result==-EMSGSIZE || result==-EINVAL) {
-            io->size=io->control_size=io->address_size=0;
-            result=md_guest_buffer_control(MD_FS_BUFFER_IPC_IO_PREPARE,0,0);
+            *layout=(struct md_ipc_io_layout){.vector_error=(int)result}; result=0;
             ++prepared; break;
         }
         if (result) break;
         entry->opened=1; ++prepared;
-        result=md_socket_payload_prepare(io,&entry->view,0);
+        result=md_socket_payload_layout(io,&entry->view);
+        if (!result) *layout=(struct md_ipc_io_layout){.size=io->size,
+            .control_size=io->control_size,.address_size=io->address_size};
     }
     if (!result) {
-        result=md_guest_buffer_control(MD_FS_BUFFER_IPC_RECEIVE,0,0); *accepted=1;
+        io->batch_count=input->count;
+        input->batch_prepared=prepared; input->inline_receive=1;
+    }
+    input->finish_error &= entries==local;
+    for (unsigned i=0;i<prepared;++i)
+        if (entries[i].opened && entries[i].vectors.items!=entries[i].vectors.local)
+            input->finish_error=0;
+    /* Capture still arbitrates descriptor errors and the private-table fallback.
+     * A brokered capture admits the whole layout and starts one native receive. */
+    long captured=receive_capture(frame);
+    if (!captured) { *accepted=1; result=frame->result; }
+    else if (captured!=MD_IPC_TASK_IO) result=captured;
+    else if (!result) {
+        result=frame->io_completed ? frame->result : -EPROTO; *accepted=frame->io_completed;
         unsigned completed=io->batch_count;
-        if (completed>input->count) result=-EPROTO;
+        if (!frame->io_completed || completed>prepared) result=-EPROTO;
         else for (unsigned i=0;i<completed;++i) {
             io->batch_index=i;
             long length=md_guest_buffer_control(MD_FS_BUFFER_IPC_IO_SELECT,0,0);
@@ -409,17 +419,43 @@ static long receive_batch_owned(struct md_task_receive_frame *frame, int *accept
     for (unsigned i=0;i<prepared;++i) if (entries[i].opened) md_socket_vectors_close(&entries[i].vectors);
     release(entries,local,size); return result;
 }
-static long receive_owned(struct md_task_receive input, int *accepted) {
+static long receive_owned(struct md_task_receive input, int *accepted, int *retained,unsigned long prepared) {
     *accepted=0;
-    long address=md_adapter_buffer_take();
+    long address=prepared ? (long)prepared : md_adapter_buffer_take();
     if (address<0) return address;
     struct md_task_receive_frame *frame=(void *)address;
+    struct msghdr inline_view={0};
+    struct iovec inline_vectors[8];
+    long result;
+    if (!input.batch && prepared && frame->prepared) {
+        frame->prepared=0;
+        *accepted=1;
+        result=md_socket_payload_scatter(&frame->io,(void *)input.messages,frame->result,0);
+        goto completed;
+    }
+    frame->io_completed=0;
+    frame->io.batch_count=0;
+    if (!input.batch) {
+        inline_view=*(struct msghdr *)input.messages;
+        /* Prepare small receives before capture so its completion can also
+         * perform IO. Invalid/large vectors keep the existing admission path. */
+        if (inline_view.msg_iovlen<=sizeof(inline_vectors)/sizeof(*inline_vectors)
+                && !md_read_memory(inline_vectors,inline_view.msg_iov,
+                    inline_view.msg_iovlen*sizeof(*inline_vectors))) {
+            inline_view.msg_iov=inline_vectors;
+            input.inline_receive=!md_socket_payload_layout(&frame->io,&inline_view) && md_ipc_io_inline(&frame->io);
+        }
+    }
     frame->input=input;
-    long result=md_socket_capture_inputs(md_guest_buffer_control(MD_FS_BUFFER_TASK_RECEIVE,0,0),
-        &frame->capture,&frame->input.socket,1);
-    if (result==MD_IPC_TASK_IO) {
-        if (input.batch) result=receive_batch_owned(frame,accepted);
-        else {
+    result=input.batch ? receive_batch_owned(frame,accepted) : receive_capture(frame);
+    if (!input.batch && result==MD_IPC_TASK_IO) {
+        if (frame->io_completed) {
+            *accepted=1;
+            result=md_socket_payload_scatter(&frame->io,&inline_view,frame->result,0);
+            struct msghdr *m=(void *)input.messages;
+            m->msg_namelen=inline_view.msg_namelen; m->msg_controllen=inline_view.msg_controllen;
+            m->msg_flags=inline_view.msg_flags;
+        } else {
             struct msghdr *m=(void *)input.messages;
             struct msghdr view=*m;
             struct md_socket_vectors vectors;
@@ -436,54 +472,72 @@ static long receive_owned(struct md_task_receive input, int *accepted) {
                 md_socket_vectors_close(&vectors);
             }
         }
-    } else if (!result) { *accepted=1; result=frame->result; }
+    } else if (!input.batch && !result) { *accepted=1; result=frame->result; }
+    /* Batch timeout errors may follow committed messages. Retain only when no
+     * ancillary/name publication can need another buffer during outer cleanup. */
+completed:;
+    int terminal=input.batch ? result<0 && ((struct mmsghdr *)input.messages)->msg_len==UINT_MAX
+        : result<0 || (!((struct msghdr *)input.messages)->msg_controllen
+            && !((struct msghdr *)input.messages)->msg_name);
+    if (retained && terminal) {
+        *retained=1; return result;
+    }
     long released=md_adapter_buffer_release();
     return result<0 ? result : released ? released : result;
 }
-long md_socket_ancillary_receive(const struct md_fs *fs, const char *exe, const unsigned long *a) {
+long md_socket_ancillary_receive(const struct md_fs *fs, const char *exe, const unsigned long *a,unsigned long prepared) {
     struct msghdr original;
-    long r=md_read_memory(&original,(void *)a[1],sizeof(original));
+    struct md_task_receive_frame *frame=(void *)prepared;
+    int captured=frame && frame->prepared;
+    long r=0;
+    if (captured) original=frame->original;
+    else r=md_read_memory(&original,(void *)a[1],sizeof(original));
     if (r < 0 || !fs->endpoint[0])
         return md_socket_address_call(fs,exe,SYS_recvmsg,a);
     if ((int)original.msg_namelen<0) return -EINVAL;
     size_t capacity=original.msg_control?original.msg_controllen:0;
-    size_t size=native_capacity(capacity);
+    size_t size=md_task_receive_capacity(capacity);
     if (!size) return -ENOBUFS;
     _Alignas(struct cmsghdr) char local[2048]; void *storage=buffer(size,local,sizeof(local));
     if (!storage) return -ENOMEM;
     memset(storage,0,size);
     struct msghdr m=original; m.msg_control=storage; m.msg_controllen=size;
+    if (captured) m.msg_iov=frame->vectors;
     struct sockaddr_storage address={0};
     if (original.msg_name) { m.msg_name=&address; m.msg_namelen=sizeof(address); }
-    int accepted=0;
+    int accepted=0, retained=0;
     r=receive_owned((struct md_task_receive){.socket=(int)a[0],.messages=(uintptr_t)&m,
-        .flags=(int)a[2],.count=1},&accepted);
+        .flags=(int)a[2],.count=1,.finish_error=storage==local},&accepted,&retained,prepared);
     if (accepted && r >= 0) {
         long error=publish(fs,(int)a[0],&original,m,(void *)a[1],(unsigned)a[2]);
         if (error < 0) r=error;
     }
-    release(storage,local,size); return r;
+    release(storage,local,size);
+    return retained ? md_adapter_buffer_finish(0,r) : r;
 }
-long md_socket_ancillary_batch(const struct md_fs *fs, const unsigned long *a) {
+long md_socket_ancillary_batch(const struct md_fs *fs, const unsigned long *a,unsigned long input_buffer) {
     unsigned count=(unsigned)a[2];
     if (!count || !fs->endpoint[0]) return md_raw(SYS_recvmmsg,a[0],a[1],a[2],a[3],a[4],0);
-    if (count > 1024) count=1024;
+    if (count > MD_IPC_IO_BATCH) count=MD_IPC_IO_BATCH;
     struct item {
         struct msghdr original; void *buffer; size_t size;
         struct sockaddr_storage address;
         _Alignas(struct cmsghdr) char local[256];
     };
     size_t size=count*(sizeof(struct item)+sizeof(struct mmsghdr));
-    _Alignas(struct mmsghdr) char local[4096]; void *memory=buffer(size,local,sizeof(local));
+    _Alignas(struct mmsghdr) char local[INLINE_RECEIVE_BATCH*(sizeof(struct item)+sizeof(struct mmsghdr))];
+    void *memory=buffer(size,local,sizeof(local));
     if (!memory) return -ENOMEM;
     memset(memory,0,size);
     struct mmsghdr *messages=memory;
     struct item *items=(void *)(messages+count);
     long error=0; unsigned prepared=0;
+    int finish_error=memory==local;
     for (; prepared<count; prepared++) {
         struct item *item=&items[prepared];
         messages[prepared].msg_len=UINT_MAX;
-        error=md_read_memory(&messages[prepared].msg_hdr,(void *)(a[1]+prepared*sizeof(*messages)),sizeof(struct msghdr));
+        error=md_read_memory(&messages[prepared].msg_hdr,
+            (void *)(a[1]+prepared*sizeof(*messages)),sizeof(struct msghdr));
         if (error < 0) {
             /* Keep failed input validation inside the native batch, after its
              * successful prefix and before consuming the faulting message. */
@@ -493,10 +547,11 @@ long md_socket_ancillary_batch(const struct md_fs *fs, const unsigned long *a) {
         item->original=messages[prepared].msg_hdr;
         if ((int)item->original.msg_namelen<0) { ++prepared; break; }
         size_t capacity=item->original.msg_control?item->original.msg_controllen:0;
-        item->size=native_capacity(capacity);
+        item->size=md_task_receive_capacity(capacity);
         if (!item->size) { error=-ENOBUFS; break; }
         item->buffer=buffer(item->size,item->local,sizeof(item->local));
         if (!item->buffer) { error=-ENOMEM; break; }
+        if (item->buffer!=item->local) finish_error=0;
         messages[prepared].msg_hdr.msg_control=item->buffer;
         messages[prepared].msg_hdr.msg_controllen=item->size;
         if (item->original.msg_name) {
@@ -508,9 +563,11 @@ long md_socket_ancillary_batch(const struct md_fs *fs, const unsigned long *a) {
      * does not undo receives; msg_len commits each private, writable entry.
      * User-header faults within a batch still need kernel/publication interlock
      * (rights-batch-fault), not preflight memory writes or message replay. */
-    int accepted=0;
+    int accepted=0, retained=0;
     long result=prepared ? receive_owned((struct md_task_receive){.socket=(int)a[0],
-        .messages=(uintptr_t)messages,.count=prepared,.batch=1,.flags=(int)a[3],.timeout=a[4]},&accepted) : error;
+        .messages=(uintptr_t)messages,.count=prepared,.batch=1,.flags=(int)a[3],.timeout=a[4],
+        .finish_error=finish_error},
+        &accepted,&retained,input_buffer) : error;
     unsigned completed=0;
     while (accepted && completed<prepared && messages[completed].msg_len!=UINT_MAX) ++completed;
     for (unsigned i=0;i<completed;i++) {
@@ -523,5 +580,6 @@ long md_socket_ancillary_batch(const struct md_fs *fs, const unsigned long *a) {
         }
     }
     for (unsigned i=0;i<count;i++) release(items[i].buffer,items[i].local,items[i].size);
-    release(memory,local,size); return result;
+    release(memory,local,size);
+    return retained ? md_adapter_buffer_finish(0,result) : result;
 }

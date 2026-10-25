@@ -8,7 +8,7 @@
 static inline int md_socket_payload_native(long nr, unsigned long address) {
     return !address && (nr==SYS_sendto || nr==SYS_recvfrom);
 }
-long md_socket_call(const struct md_fs *, const char *, long, const unsigned long *);
+long md_socket_call(const struct md_fs *, const char *, long, const unsigned long *,unsigned long);
 long md_socket_pair(const struct md_fs *, const unsigned long *, int offline);
 long md_socket_offline_error(long nr, const unsigned long *);
 #endif

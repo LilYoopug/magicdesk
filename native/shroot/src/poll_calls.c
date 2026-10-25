@@ -5,11 +5,6 @@
 #include <errno.h>
 #include <limits.h>
 
-static long clock_now(void) {
-    struct timespec time;
-    long error=RAW2(clock_gettime,CLOCK_MONOTONIC,&time);
-    return error ? error : time.tv_sec*1000000000LL+time.tv_nsec;
-}
 static long input(struct md_poll_frame *f,const unsigned long *a) {
     if (!f->select) {
         long error=md_read_memory(f->items,(void *)(a[0]+f->offset*sizeof(struct pollfd)),
@@ -55,12 +50,12 @@ static long output(struct md_poll_frame *f,const unsigned long *a,long *selected
     }
     return 0;
 }
-long md_poll_call(long nr,const unsigned long *a) {
+long md_poll_call(long nr,const unsigned long *a,unsigned long prepared) {
     int select=nr==SYS_pselect6;
     unsigned long count=select ? a[0] : a[1];
     if (count>INT_MAX) return -EINVAL;
     long result=0;
-    long memory=md_guest_buffer_control(MD_BUFFER_TAKE,md_poll_bytes(count),0);
+    long memory=prepared ? (long)prepared : md_guest_buffer_control(MD_BUFFER_TAKE,md_poll_bytes(count),0);
     if (memory<0) return memory;
     struct md_poll_frame *f=(void *)memory;
     memset(f,0,sizeof(*f)); f->select=select; f->total=count;
@@ -81,8 +76,9 @@ long md_poll_call(long nr,const unsigned long *a) {
         if (!result && (f->wait.timeout.tv_sec<0 || f->wait.timeout.tv_nsec<0
                 || f->wait.timeout.tv_nsec>=1000000000)) result=-EINVAL;
     }
-    long started=clock_now();
     struct timespec original=f->wait.timeout;
+    f->count=count>MD_POLL_CHUNK ? MD_POLL_CHUNK : count;
+    if (!result) result=input(f,a);
     if (!result) result=md_guest_buffer_control(MD_BUFFER_POLL_BEGIN,0,0);
     while (result==MD_POLL_LOAD) {
         result=input(f,a);
@@ -98,8 +94,8 @@ long md_poll_call(long nr,const unsigned long *a) {
         }
         if (select && result>=0) result=selected;
     }
-    if (result!=MD_EPOLL_NATIVE && (result>=0 || result==-EINTR) && timeout && started>=0) {
-        long now=clock_now(),elapsed=now>=started ? now-started : 0;
+    if (result!=MD_EPOLL_NATIVE && (result>=0 || result==-EINTR) && timeout) {
+        int64_t elapsed=f->elapsed;
         struct timespec remaining=original;
         remaining.tv_sec-=elapsed/1000000000LL; remaining.tv_nsec-=elapsed%1000000000LL;
         if (remaining.tv_nsec<0) { --remaining.tv_sec; remaining.tv_nsec+=1000000000; }
@@ -107,7 +103,5 @@ long md_poll_call(long nr,const unsigned long *a) {
         /* Like the native syscall, an unwritable timeout does not lose ready events. */
         md_write_memory((void *)timeout,&remaining,sizeof(remaining));
     }
-    long released=md_adapter_buffer_release();
-    if (result==MD_EPOLL_NATIVE) return released ? released : MD_CALL_NATIVE;
-    return result ? result : released;
+    return md_adapter_buffer_finish(0,result==MD_EPOLL_NATIVE ? MD_CALL_NATIVE : result);
 }

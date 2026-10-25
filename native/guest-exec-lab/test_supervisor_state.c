@@ -8,6 +8,81 @@
 static int accounting_enabled, accounting_requested, adoption_error, adoption_calls;
 static pid_t wait_result=123;
 static struct md_fs_buffer_open adopted={.fd=-1};
+static void svc_client_lifetime(void) {
+    struct md_interception_memory *memory=md_memory_new(); assert(memory);
+    struct md_interception_memory *other=md_memory_new(); assert(other);
+    struct thread t={.pid=111,.memory=memory};
+    unsigned bucket=(unsigned)t.pid%THREAD_BUCKETS;
+    assert(!thread_index[bucket]); thread_index[bucket]=&t;
+    assert(svc_client_alive(t.pid,memory) && !svc_client_alive(t.pid,other));
+    t.resume_lost=1;
+    assert(svc_client_alive(t.pid,memory));
+    t.terminal_stop=1;
+    assert(!svc_client_alive(t.pid,memory));
+    thread_index[bucket]=NULL;
+    assert(!svc_client_alive(t.pid,memory));
+    md_memory_release(other); md_memory_release(memory);
+    puts("PASS SVC client lifetime: exact mm, lost stop retains owner, terminal event and reap retire it");
+}
+static void receive_layouts(void) {
+    struct md_ipc_io_message *io=calloc(1,sizeof(*io)); assert(io);
+    struct md_ipc_io op={0};
+    int sockets[2]; assert(!socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0,sockets));
+    io->batch_count=MD_IPC_IO_BATCH;
+    assert(md_ipc_io_prepare_batch(&op,io,sockets[0],MSG_DONTWAIT,0)==-EINVAL);
+    assert(md_ipc_io_prepare_batch(&op,io,sockets[0],MSG_DONTWAIT,MD_IPC_IO_BATCH+1)==-EINVAL);
+    for (unsigned i=0;i<MD_IPC_IO_BATCH;++i)
+        io->layouts[i]=(struct md_ipc_io_layout){.size=i+1,.control_size=32};
+    assert(!md_ipc_io_prepare_batch(&op,io,sockets[0],MSG_DONTWAIT,MD_IPC_IO_BATCH));
+    assert(op.capacity==MD_IPC_IO_BATCH && op.control_capacity==32 && op.nonblocking);
+    assert(md_ipc_io_prepare_batch(&op,io,sockets[0],MSG_DONTWAIT,1)==-EINVAL);
+    md_ipc_io_release(&op);
+    io->layouts[0].vector_error=-EFAULT;
+    assert(md_ipc_io_prepare_batch(&op,io,sockets[0],MSG_DONTWAIT,2)==-EINVAL && !op.initialized);
+    io->layouts[0].vector_error=0; io->layouts[1].vector_error=-EFAULT;
+    assert(!md_ipc_io_prepare_batch(&op,io,sockets[0],MSG_DONTWAIT,2));
+    md_ipc_io_release(&op);
+    io->layouts[0].size=SIZE_MAX;
+    assert(md_ipc_io_prepare_batch(&op,io,sockets[0],MSG_DONTWAIT,1)==-EINVAL && !op.initialized);
+    close(sockets[0]); close(sockets[1]); free(io);
+    puts("PASS receive batch layouts: bounded shared vector, one admission, late fault and invalid metadata");
+}
+static void native_capture(void) {
+    int file=memfd_create("native-capture",MFD_CLOEXEC);
+    assert(file>=0 && write(file,"ab",2)==2 && !lseek(file,0,SEEK_SET));
+    int numbers[]={file,file};
+    struct md_received_fds *received=NULL;
+    assert(md_fd_capture_native(getpid(),numbers,2,&received)==1 && received->count==2);
+    char byte;
+    assert(read(received->fds[0],&byte,1)==1 && byte=='a');
+    assert(read(received->fds[1],&byte,1)==1 && byte=='b');
+    assert(lseek(file,0,SEEK_CUR)==2);
+    int next=received->fds[0];
+    md_received_fds_release(received); received=NULL;
+    numbers[1]=-1;
+    for (unsigned i=0;i<64;++i)
+        assert(md_fd_capture_native(getpid(),numbers,2,&received)==-EBADF && !received);
+    int copy=fcntl(file,F_DUPFD_CLOEXEC,0);
+    assert(copy==next); close(copy);
+    pid_t parent=getpid(),child=fork(); assert(child>=0);
+    if (!child) {
+        struct sock_filter code[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_pidfd_getfd,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EPERM),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+        };
+        struct sock_fprog policy={sizeof(code)/sizeof(*code),code};
+        assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+        assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&policy));
+        assert(!md_fd_capture_native(parent,numbers,1,&received) && !received);
+        _exit(0);
+    }
+    int status;
+    assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    close(file);
+    puts("PASS native capture: exact OFD, duplicate slots, partial rollback and denied-copy fallback");
+}
 int __wrap_md_debugger_active(struct md_debugger *d) {
     (void)d; return accounting_enabled;
 }
@@ -138,6 +213,45 @@ static void control_deadlines(void) {
     assert(!retry_queues[1].lists[0].first && !retry_queues[1].lists[1].first);
     puts("PASS control deadlines: active continuations only, both generations, reschedule and exact cancellation");
 }
+static void pid_collection_waiters(void) {
+    const enum phase phases[]={PROCESS_OBSERVING,PROCESS_INFO_LOAD,PROCESS_INFO_STORE,
+        DEBUG_WAIT_ENTRY,DEBUG_WAIT_EXIT};
+    const pid_t retired=INT_MAX;
+    struct md_identity identity={0};
+    struct thread first={.pid=123},last={.pid=124};
+    first.next=&last; threads=&first;
+    tasks=md_task_registry_create(); assert(tasks && pid_gone(retired));
+    for (unsigned i=0;i<sizeof(phases)/sizeof(*phases);++i) {
+        assert(!md_task_registry_publish(tasks,retired,retired,&identity,NULL));
+        md_task_registry_retire(tasks,retired,&identity);
+        first.phase=IDLE; last.pid=124; last.phase=phases[i];
+        pid_collection_pending=1; pid_collect();
+        assert(pid_collection_pending && pid_collection_blocker==&last);
+        assert(md_task_registry_has_retired(tasks));
+        /* An earlier waiter must not replace a still-valid hint on each event. */
+        first.phase=PROCESS_INFO_LOAD;
+        for (unsigned event=0;event<1000;++event) {
+            pid_collect(); assert(pid_collection_blocker==&last);
+        }
+        last.phase=IDLE; pid_collect();
+        assert(pid_collection_pending && pid_collection_blocker==&first);
+        /* An exited slot is not a waiter, but a reused live slot can be one. */
+        first.pid=0; last.pid=125; last.phase=phases[i]; pid_collect();
+        assert(pid_collection_pending && pid_collection_blocker==&last);
+        last.pid=0; pid_collect();
+        assert(!pid_collection_pending && !pid_collection_blocker);
+        assert(!md_task_registry_has_retired(tasks));
+        first.pid=123;
+    }
+    assert(!md_task_registry_publish(tasks,retired,retired,&identity,NULL));
+    md_task_registry_retire(tasks,retired,&identity);
+    first.phase=DEBUG_WAIT_EXIT; pid_collection_pending=1; pid_collect();
+    assert(pid_collection_blocker==&first);
+    md_task_registry_reap(tasks,retired); pid_collect();
+    assert(!pid_collection_pending && !pid_collection_blocker);
+    md_task_registry_destroy(tasks); tasks=NULL; threads=NULL;
+    puts("PASS PID collection: retained waiter, phase changes, exit, slot reuse and explicit reap");
+}
 struct completion_probe { struct thread *task; size_t copied; unsigned commits; };
 static void *completion_retain(void *p) { return p; }
 static void completion_release(void *p) { (void)p; }
@@ -182,7 +296,7 @@ static void terminal_buffer_completion(void) {
         if (mode==4) t.outgoing=&busy;
         long copied=mode==1 ? 2 : mode==2 ? -EFAULT : 4;
         if (terminal) {
-            long result=proc_io_complete(&t,copied,copied);
+            long result=buffer_result_finish(&t,copied,copied);
             assert(result==(mode==3 ? -EINVAL : mode==4 ? -EBUSY : copied));
         } else {
             struct buffer_completion result=buffer_finish(&t,copied);
@@ -209,9 +323,16 @@ static void terminal_buffer_completion(void) {
         long expected=seek ? 7 : 4;
         assert(md_proc_file_io_execute(&t.proc_io,&t.identity,NULL,span.data,span.size,4096)==expected);
         assert(!md_proc_file_io_offer(&t.proc_io));
-        assert(proc_io_complete(&t,0,expected)==expected);
+        assert(buffer_result_finish(&t,0,expected)==expected);
         assert(!probe.commits && !t.proc_io.file && !t.buffer.pool);
         md_proc_file_release(file);
+    }
+    for (unsigned mode=0;mode<3;++mode) {
+        struct thread t={.buffer_open.fd=-1,.proc_image_fd=-1,.control_mapping_fd=-1};
+        assert(!md_buffers_take(pool,&t.buffer));
+        long result=mode==0 ? -EAGAIN : mode==1 ? 32 : MD_CALL_NATIVE;
+        assert(buffer_result_finish(&t,0,result)==result && !t.buffer.pool);
+        assert(!md_buffers_take(pool,&t.buffer) && !md_buffer_release(&t.buffer));
     }
     md_buffers_release(pool);
     puts("PASS terminal buffer completion: commit before release, partial copy, EFAULT, failed finish and independent cleanup error");
@@ -234,6 +355,54 @@ static void buffered_io_pressure(void) {
     assert(!md_buffer_release(&held));
     md_memory_release(t.memory);
     puts("PASS buffered IO pressure: no OFD turn before buffer admission and cancelled continuation stays retired");
+}
+static void prepared_input(void) {
+    struct thread t={.memory=md_memory_new(),.buffer_open.fd=-1,
+        .proc_image_fd=-1,.control_mapping_fd=-1};
+    struct md_identity identity=md_identity_new(1000,1000);
+    struct md_process_limits limits;
+    assert(!md_process_limits_read(&limits));
+    t.resources.process=md_process_member_new(&identity,&limits);
+    assert(t.memory && t.resources.process);
+    assert(!md_memory_buffers_prepare(t.memory,1,sizeof(union md_adapter_frame),0,0));
+    struct md_interception_buffers *pool=md_memory_buffers(t.memory);
+    t.original.regs[8]=SYS_recvmsg;
+    assert(!dispatch_input(&t,0) && !t.buffer.pool && !t.dispatch_prepared);
+    assert(!md_memory_buffers_mapped(t.memory,0x100000,md_buffers_size(pool)));
+    unsigned calls[]={SYS_recvmsg,SYS_recvmmsg,SYS_ppoll,SYS_pselect6};
+    for (unsigned i=0;i<sizeof(calls)/sizeof(*calls);++i) {
+        t.original.regs[8]=calls[i]; t.original.regs[0]=t.original.regs[1]=8;
+        assert(!dispatch_input(&t,MD_DISPATCH_NETWORK_DATA) && !t.buffer.pool);
+        assert(dispatch_input(&t,0)==0x100000 && t.dispatch_prepared);
+        struct md_interception_buffer held={0};
+        assert(md_buffers_take(pool,&held)==-EAGAIN);
+        struct md_buffer_span span;
+        assert(!md_buffer_span(&t.buffer,&span));
+        memset(span.data,0xa5,span.size);
+        /* An entry-prepared receive keeps its exact input/result frame when
+         * the guest publication continuation acquires its adapter stack. */
+        assert(dispatch_input(&t,0)==0x100000 && t.dispatch_prepared);
+        for (size_t byte=0;byte<span.size;++byte)
+            assert(((unsigned char *)span.data)[byte]==0xa5);
+        assert(md_buffers_take(pool,&held)==-EAGAIN);
+        /* Early validation failure and ordinary FINISH share exact cleanup. */
+        assert(!buffer_cleanup(&t) && !t.dispatch_prepared && !t.buffer.pool);
+        assert(!md_buffers_take(pool,&held));
+        assert(!dispatch_input(&t,0) && !t.dispatch_prepared && !t.buffer.pool);
+        assert(!md_buffer_release(&held));
+    }
+    t.original.regs[8]=SYS_ppoll;
+    t.original.regs[1]=md_process_native_nofile(t.resources.process)+1;
+    assert(!dispatch_input(&t,0) && !t.buffer.pool);
+    t.original.regs[8]=SYS_pselect6; t.original.regs[0]=ULONG_MAX;
+    assert(!dispatch_input(&t,0) && !t.buffer.pool);
+    t.original.regs[0]=INT_MAX;
+    assert(!dispatch_input(&t,0) && !t.buffer.pool);
+    t.original.regs[8]=SYS_write;
+    assert(!dispatch_input(&t,0) && !t.buffer.pool);
+    md_process_member_release(t.resources.process);
+    md_identity_release(&identity); md_memory_release(t.memory);
+    puts("PASS prepared input: recv/poll admission, native limits, unmapped and exhausted pool, early cleanup");
 }
 static void captured_writes(void) {
     struct thread t={.pid=getpid(),.memory=md_memory_new()};
@@ -368,7 +537,42 @@ static void repair_retirement(void) {
     close(fd_ready); fd_ready=previous;
     puts("PASS memory repair yields unmodified mapping to exact FD retirement, retains exit/accounting and never replays mprotect");
 }
+static long birth_trace(int request,pid_t pid,void *address,void *data) {
+    assert(request==PTRACE_GETEVENTMSG && pid==123 && !address);
+    *(unsigned long *)data=456;
+    return 0;
+}
+static void quiescent_birth(void) {
+    unsigned events[]={PTRACE_EVENT_CLONE,PTRACE_EVENT_FORK,PTRACE_EVENT_VFORK};
+    struct thread child={.pid=456,.kernel_stopped=1};
+    unsigned bucket=child.pid%THREAD_BUCKETS;
+    assert(!thread_index[bucket]); thread_index[bucket]=&child;
+    long (*saved_trace)(int,pid_t,void *,void *)=checkpoints.trace;
+    checkpoints.trace=birth_trace;
+    for (unsigned i=0;i<sizeof(events)/sizeof(*events);++i) {
+        for (int early=0;early<2;++early) {
+            child.initial_stop=early;
+            struct md_task_quiesce *q=md_task_quiesce_new(birth_trace); assert(q);
+            int status=(events[i]<<16)|(SIGTRAP<<8)|0x7f;
+            struct rusage usage={.ru_maxrss=17},replayed;
+            assert(!md_task_quiesce_add(q,123,1,0));
+            assert(!quiesce_event(q,123,status,&usage));
+            assert(md_task_quiesce_ready(q)==early);
+            if (!early) assert(!quiesce_event(q,456,(PTRACE_EVENT_STOP<<16)|(SIGTRAP<<8)|0x7f,NULL));
+            assert(md_task_quiesce_ready(q) && !md_task_quiesce_release(q));
+            int observed;
+            assert(md_task_quiesce_take(q,&observed,&replayed)==123 && observed==status && replayed.ru_maxrss==17);
+            if (!early) assert(md_task_quiesce_take(q,&observed,NULL)==456);
+            assert(!md_task_quiesce_take(q,&observed,NULL));
+            md_task_quiesce_destroy(q);
+        }
+    }
+    checkpoints.trace=saved_trace; thread_index[bucket]=NULL;
+    puts("PASS quiescent birth: initial child stop predates barrier, every birth event, late stop and exact replay");
+}
 static void event_accounting(void) {
+    int source[2],previous_signal_fd=signal_fd;
+    assert(!pipe2(source,O_NONBLOCK|O_CLOEXEC)); signal_fd=source[0];
     struct rusage usage,zero={0}; int status;
     for (unsigned round=0;round<3;++round) {
         accounting_enabled=round==1;
@@ -387,6 +591,12 @@ static void event_accounting(void) {
     }
     accounting_enabled=0;
     assert(kernel_event(&status,NULL)==wait_result && !accounting_requested);
+    struct signalfd_siginfo hint={.ssi_signo=SIGCHLD,.ssi_pid=456};
+    assert(write(source[1],&hint,sizeof(hint))==sizeof(hint));
+    assert(kernel_event(&status,NULL)==wait_result && task_wait.count==1
+        && task_wait.hints[task_wait.first]==456);
+    task_wait=(struct md_task_wait){0};
+    close(source[0]); close(source[1]); signal_fd=previous_signal_fd;
     puts("PASS supervisor accounting: absent, present, detach and deferred events survive debugger changes");
 }
 static volatile sig_atomic_t received;
@@ -519,7 +729,10 @@ static void provider_wait_boundaries(void) {
 }
 int main(void) {
     alarm(30);
-    barrier_admission(); readiness_admission_order(); entry_fence_ownership(); control_deadlines(); terminal_buffer_completion(); buffered_io_pressure(); captured_writes(); repair_events(); repair_retirement(); event_accounting();
+    svc_client_lifetime();
+    receive_layouts();
+    native_capture();
+    barrier_admission(); readiness_admission_order(); entry_fence_ownership(); control_deadlines(); pid_collection_waiters(); terminal_buffer_completion(); buffered_io_pressure(); prepared_input(); captured_writes(); repair_events(); repair_retirement(); quiescent_birth(); event_accounting();
     for (unsigned mode=0;mode<4;++mode) {
         completed_open(mode,SIGUSR1); completed_open(mode,SIGRTMAX);
     }

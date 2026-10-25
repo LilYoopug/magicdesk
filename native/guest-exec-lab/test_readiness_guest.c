@@ -43,6 +43,9 @@ static void poll_sandbox(int protected) {
     int fd=open("/proc/sys/kernel/hostname",O_RDONLY|O_CLOEXEC);
     int event=eventfd(1,EFD_CLOEXEC),sockets[2];
     assert(fd>=0 && event>=0 && !socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0,sockets));
+    int ep=epoll_create1(EPOLL_CLOEXEC); assert(ep>=0);
+    struct epoll_event interest={.events=EPOLLIN,.data.u64=91},result;
+    assert(!epoll_ctl(ep,EPOLL_CTL_ADD,event,&interest));
     trap_socket=sockets[0];
     struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE,&limit));
     limit.rlim_cur=64; assert(!setrlimit(RLIMIT_NOFILE,&limit));
@@ -52,6 +55,8 @@ static void poll_sandbox(int protected) {
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_prlimit64,0,1),
         BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRAP),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_clock_gettime,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_PROCESS),
         BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
     };
     struct sock_fprog policy={sizeof(code)/sizeof(*code),code};
@@ -63,14 +68,34 @@ static void poll_sandbox(int protected) {
     if (empty) fprintf(stderr,"poll sandbox empty=%ld errno=%d\n",empty,errno);
     assert(!empty);
     assert(syscall(SYS_ppoll,NULL,65,&zero,NULL,8)==-1 && errno==EINVAL);
+    /* A virtual provider elsewhere in the table must not change a native-only
+     * selection. Exercise classification/terminal cleanup, not the empty-table shortcut. */
+    struct pollfd native={event,POLLIN,0};
+    assert(syscall(SYS_ppoll,&native,1,&zero,NULL,8)==1 && (native.revents&POLLIN));
+    fd_set set; FD_ZERO(&set); FD_SET(event,&set);
+    assert(syscall(SYS_pselect6,event+1,&set,NULL,NULL,&zero,NULL)==1 && FD_ISSET(event,&set));
+    /* The early epoll path still uses the caller's kernel wait and validates
+     * original pointers/arguments, even with another virtual provider present. */
+    assert(syscall(SYS_epoll_pwait,ep,&result,1,0,NULL,8)==1 && result.data.u64==91);
+    assert(syscall(SYS_epoll_pwait2,ep,&result,1,&zero,NULL,8)==1 && result.data.u64==91);
+    assert(syscall(SYS_epoll_pwait,ep,&result,0,0,NULL,8)==-1 && errno==EINVAL);
+    assert(syscall(SYS_epoll_pwait,-1,&result,1,0,NULL,8)==-1 && errno==EBADF);
+    assert(syscall(SYS_epoll_pwait,ep,NULL,1,0,NULL,8)==-1 && errno==EFAULT);
+    assert(syscall(SYS_epoll_pwait2,ep,&result,1,(void *)1,NULL,8)==-1 && errno==EFAULT);
+    assert(!limit_traps);
     assert(!sethostname("poll-sandbox",12));
     struct pollfd polls[]={{fd,0,0},{event,POLLIN,0}};
     assert(syscall(SYS_ppoll,polls,2,&zero,NULL,8)==2);
     assert((polls[0].revents&POLLERR) && (polls[1].revents&POLLIN) && !limit_traps);
+    uint64_t one;
+    assert(read(event,&one,sizeof(one))==sizeof(one));
+    struct timespec timeout={0,10000000};
+    assert(!syscall(SYS_ppoll,polls,2,&timeout,NULL,8));
+    assert(!timeout.tv_sec && !timeout.tv_nsec);
     assert(syscall(SYS_prlimit64,0,RLIMIT_NOFILE,NULL,&limit)==-1 && errno==EPERM);
     assert(limit_traps==1);
     char byte; assert(read(sockets[1],&byte,1)==1 && byte=='x');
-    close(fd); close(event); close(sockets[0]); close(sockets[1]);
+    close(ep); close(fd); close(event); close(sockets[0]); close(sockets[1]);
     puts("PASS poll sandbox: native/virtual readiness, caller nofile limit and application SIGSYS preserved");
 }
 
@@ -369,6 +394,14 @@ static void mixed(int filtered,int shared) {
     if (filtered) deny_seccomp();
     int fd=open("/proc/sys/kernel/hostname",O_RDONLY|O_CLOEXEC); assert(fd>=0);
     int ep=epoll_create1(EPOLL_CLOEXEC),event=eventfd(0,EFD_CLOEXEC); assert(ep>=0 && event>=0);
+    struct pollfd chunks[513];
+    for (unsigned i=0;i<513;++i) chunks[i]=(struct pollfd){-1,0,0};
+    chunks[0]=(struct pollfd){event,POLLIN,0};
+    chunks[512]=(struct pollfd){fd,0,0};
+    assert(!poll(chunks,513,0));
+    assert(!sethostname("poll-chunks",11));
+    assert(poll(chunks,513,0)==1 && (chunks[512].revents&POLLERR));
+    assert(!poll(chunks,513,0));
     struct epoll_event e={.events=0,.data.u64=42},out[4];
     puts("READY virtual ADD");
     assert(!epoll_ctl(ep,EPOLL_CTL_ADD,fd,&e));

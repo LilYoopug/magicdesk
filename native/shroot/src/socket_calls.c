@@ -114,7 +114,7 @@ static long send_batch(const struct md_fs *fs, const char *exe, const unsigned l
         long r = -EFAULT;
         if (pointer >= a[1] && pointer <= UINTPTR_MAX - sizeof(struct mmsghdr)) {
             unsigned long args[6] = {a[0], pointer, a[3]};
-            r = md_socket_call(fs, exe, SYS_sendmsg, args);
+            r = md_socket_call(fs, exe, SYS_sendmsg, args,0);
             if (r >= 0) {
                 unsigned length = (unsigned)r;
                 r = md_write_memory((void *)(pointer + offsetof(struct mmsghdr, msg_len)),
@@ -226,10 +226,10 @@ long md_socket_address_call(const struct md_fs *fs, const char *exe, long nr, co
     if (fd >= 0) RAW1(close, fd);
     return r;
 }
-long md_socket_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a) {
+long md_socket_call(const struct md_fs *fs, const char *exe, long nr, const unsigned long *a,unsigned long prepared) {
     long r = nr == SYS_sendmsg ? md_socket_ancillary_send(fs, exe, a)
         : nr == SYS_sendto ? md_socket_ancillary_sendto(fs,exe,a)
-        : nr == SYS_recvmsg ? md_socket_ancillary_receive(fs, exe, a)
+        : nr == SYS_recvmsg ? md_socket_ancillary_receive(fs, exe, a,prepared)
         : md_socket_address_call(fs, exe, nr, a);
     if (!r && nr==SYS_bind && fs->endpoint[0] && domain((int)a[0])==AF_UNIX) {
         long error=md_socket_identity_call(fs,MD_IPC_BIND,(int)a[0],-1,0,NULL,0);

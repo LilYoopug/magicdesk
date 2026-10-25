@@ -69,7 +69,8 @@ enum { MD_INTERCEPT_CLOSE=0x8000, MD_INTERCEPT_CLOSE_MAX=0x7fff };
  * supervisor reads this descriptor at each image handshake, not linker symbols. */
 struct md_interception_abi {
     uint64_t magic, size;
-    /* dispatch: x0 syscall, x1..x6 arguments, x9 policy and retained control kind.
+    /* dispatch: x0 syscall, x1..x6 arguments, x9 policy and retained control kind,
+     * x10 optional operation-owned input buffer (ninth C argument).
      * x7 is reserved by the kernel at ARM64 syscall stops. */
     uintptr_t ready, done, allocate, allocated, dispatch, export_fd, exported;
     uintptr_t done_entry, exported_entry;

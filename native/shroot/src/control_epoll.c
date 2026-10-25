@@ -131,6 +131,10 @@ struct md_fd_object *md_control_epoll_object(struct md_control_epoll *q) {
 struct md_control_epoll *md_control_epoll_from_object(struct md_fd_object *object) {
     return object && object->type==&type ? (void *)object : NULL;
 }
+int md_control_epoll_native_wait(struct md_fd_object *object) {
+    return !md_control_epoll_from_object(object)
+        || !(md_fd_object_selectors(object)&(1U<<MD_FD_SELECTOR_EPOLL));
+}
 void md_control_epoll_release(struct md_control_epoll *q) {
     md_fd_object_release(md_control_epoll_object(q));
 }

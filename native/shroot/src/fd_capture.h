@@ -20,6 +20,9 @@ struct md_fd_capture {
     unsigned count, offset;
     int endpoint, checking;
 };
+/* Under the same table turn: 1 transfers exact native custody, 0 needs the
+ * task-affine export, negative errno fails. A partial vector never escapes. */
+int md_fd_capture_native(pid_t,const int *,unsigned,struct md_received_fds **);
 int md_fd_capture_progress(struct md_fd_capture *, struct md_fd_origins *, pid_t,
         unsigned count, struct md_fd_capture_frame *);
 int md_fd_capture_observed(struct md_fd_capture *, struct md_fd_origins *, const struct md_fd_capture_frame *);

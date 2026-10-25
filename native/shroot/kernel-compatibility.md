@@ -612,6 +612,20 @@ export splits into existing 253-right packets. `--case fd-observation` checks
 protected callers, source-table replacement, quotas, filter denial and partial
 export cancellation. It adds no post-5.15 requirement or startup probe.
 
+Scalar receive capture optionally uses pidfd_open/pidfd_getfd (available before
+5.15) in `fd_capture.c`. The exact thread identity and file-table turn select the
+OFD; EPERM/EACCES/ENOSYS and unsupported forms retain task-affine export. Partial
+capture closes every duplicate. `supervisor-state` covers shared OFD offsets,
+duplicate slots, EBADF rollback and a denied pidfd_getfd fallback; the IPC-origin
+suite exercises both native capture and forced protected/export custody.
+Early nonblocking receive preparation uses the existing process_vm_readv and
+pidfd_getfd facilities opportunistically. Failed snapshots/capture retain the
+task-affine adapter without performing IO; this adds no kernel minimum or probe.
+`receive-entry` and `receive-vectors` compare native results and protected fallback.
+Native-only poll admission, input-buffer handoff and combined FINISH add no
+kernel dependency. Readiness tests cover application clock denial, mixed vectors,
+NOFILE and signal delivery; limits come from the existing process owner.
+
 ### Network Configuration
 
 Offline network namespaces, private devpts views and permissive cgroups require
@@ -934,6 +948,11 @@ re-enter natively with their original IP and arguments and remain subject to
 seccomp. A synthetic PTRACE_INTERRUPT exposes the real x7 before publishing a
 marker, because ARM64 syscall stops borrow that register. Application handlers
 and guest debugger execution never inherit this service scope.
+The scalar TAKE marker can publish at syscall entry because its C ABI does not
+retain x7. FINISH and full-context operations still require the post-syscall
+interrupt. Checkpoint fixtures cover TRACE/SYSEMU, dumpability and blocked SIGTRAP
+for both forms. Supervisor-state covers clone/fork/vfork stops already consumed
+before a cold barrier begins, including exact event and rusage replay.
 The shared C-facing assembly gates explicitly supply gettid as the skipped
 number. An inherited x8=-1 would overwrite x0 before tracing even on 5.15;
 saving registers after that stop cannot recover the argument. Gate entry and

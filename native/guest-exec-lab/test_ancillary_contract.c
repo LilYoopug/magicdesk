@@ -1,16 +1,19 @@
 #define _GNU_SOURCE
 #include "test_ancillary_contract.h"
+#include <stdlib.h>
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/epoll.h>
 #include <sys/inotify.h>
 #include <sys/socket.h>
+#include <sys/resource.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -143,6 +146,74 @@ static void rights_fault(void) {
         result,error,byte=='x',count,live);
     assert(read(pipefd[0],&byte,1)==0 && !munmap(message,page));
     assert(!close(pipefd[0]) && !close(sockets[0]) && !close(sockets[1]));
+}
+static void receive_large_batch(void) {
+    const unsigned counts[]={1,4,127,128,129,1024};
+    for (unsigned test=0;test<sizeof(counts)/sizeof(*counts);++test) for (unsigned nonblocking=0;nonblocking<2;++nonblocking)
+            for (unsigned large_control=0;large_control<2;++large_control) {
+        unsigned count=counts[test];
+        int sockets[2],pipefd[2];
+        assert(!socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC|(nonblocking?SOCK_NONBLOCK:0),0,sockets));
+        assert(!pipe2(pipefd,O_NONBLOCK|O_CLOEXEC));
+        struct mmsghdr *messages=calloc(count,sizeof(*messages));
+        struct iovec *vectors=calloc(count,sizeof(*vectors));
+        char *bytes=calloc(count,1); union control *control=calloc(count,sizeof(*control));
+        assert(messages && vectors && bytes && control);
+        for (unsigned i=0;i<count;++i) {
+            vectors[i]=(struct iovec){bytes+i,1};
+            messages[i].msg_hdr=(struct msghdr){.msg_iov=vectors+i,.msg_iovlen=1,
+                .msg_control=control[i].bytes,.msg_controllen=large_control ? sizeof(*control) : CMSG_SPACE(sizeof(int))};
+            messages[i].msg_len=123;
+        }
+        for (unsigned attempt=0;attempt<(count<=128 ? 32u : 1u);++attempt)
+            assert(recvmmsg(sockets[1],messages,count,MSG_DONTWAIT,NULL)==-1 && errno==EAGAIN);
+        for (unsigned i=0;i<count;++i) assert(messages[i].msg_len==123 && !bytes[i]);
+        send_rights(sockets[0],pipefd[1],1); close(pipefd[1]);
+        struct timespec timeout={.tv_sec=1};
+        assert(recvmmsg(sockets[1],messages,count,MSG_WAITFORONE|MSG_CMSG_CLOEXEC,&timeout)==1);
+        assert(messages[0].msg_len==1 && bytes[0]=='x');
+        close_descriptors(&messages[0].msg_hdr,1);
+        for (unsigned i=1;i<count;++i) assert(messages[i].msg_len==123 && !bytes[i]);
+        char byte; assert(read(pipefd[0],&byte,1)==0);
+        close(pipefd[0]); close(sockets[0]); close(sockets[1]);
+        free(messages); free(vectors); free(bytes); free(control);
+        printf("OBS receive-large-batch count=%u nonblocking=%u large-control=%u empty=EAGAIN received=1 rights=1 untouched=1\n",
+            count,nonblocking,large_control);
+    }
+}
+static void receive_batch_snapshot(void) {
+    enum { COUNT=64 };
+    size_t page=(size_t)sysconf(_SC_PAGESIZE);
+    for (unsigned fault=0;fault<4;++fault) {
+        int sockets[2]; assert(!socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0,sockets));
+        char *guard=mmap(NULL,3*page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+        assert(guard!=MAP_FAILED && !mprotect(guard+2*page,page,PROT_NONE));
+        struct mmsghdr local[COUNT]={0},*messages=local;
+        struct iovec vectors[COUNT][9]={0}; char bytes[COUNT]={0};
+        unsigned count=COUNT, good=fault ? 32 : COUNT;
+        if (fault==2) messages=(void *)(guard+2*page-good*sizeof(*messages));
+        if (fault==3) {
+            messages=(void *)(guard+2*page-sizeof(struct msghdr)); count=1; good=0;
+            messages->msg_hdr=(struct msghdr){0};
+        }
+        for (unsigned i=0;i<(fault==2 ? good : count);++i) {
+            unsigned n=i%3==0 ? 1 : i%3==1 ? 8 : 9;
+            vectors[i][n-1]=(struct iovec){bytes+i,1};
+            messages[i].msg_hdr=(struct msghdr){.msg_iov=vectors[i],.msg_iovlen=n};
+            if (fault!=3) messages[i].msg_len=123;
+        }
+        if (fault==1) messages[good].msg_hdr.msg_iov=(void *)(guard+2*page);
+        for (unsigned i=0;i<good;++i) assert(send(sockets[0],"x",1,0)==1);
+        errno=0;
+        int result=recvmmsg(sockets[1],messages,count,MSG_DONTWAIT,NULL);
+        int error=result<0 ? errno : 0;
+        assert(result==(good ? (int)good : -1) && (good || error==EAGAIN));
+        for (unsigned i=0;i<good;++i) assert(bytes[i]=='x' && messages[i].msg_len==1);
+        for (unsigned i=good;i<COUNT;++i) assert(!bytes[i]);
+        if (fault==1) assert(messages[good].msg_len==123);
+        assert(!munmap(guard,3*page) && !close(sockets[0]) && !close(sockets[1]));
+        printf("OBS receive-batch-snapshot fault=%u result=%d errno=%d prefix=exact\n",fault,result,error);
+    }
 }
 static void rights_control_fault(void) {
     const size_t writable[]={0,CMSG_LEN(0),CMSG_LEN(sizeof(int)),CMSG_LEN(2*sizeof(int)),CMSG_LEN(0)};
@@ -490,11 +561,153 @@ static void rights_watch_fault(void) {
         int status; assert(waitpid(receiver,&status,0)==receiver && WIFEXITED(status) && !WEXITSTATUS(status));
     }
 }
+static void receive_full_table(void) {
+    struct rlimit saved; assert(!getrlimit(RLIMIT_NOFILE,&saved));
+    struct rlimit limited=saved; limited.rlim_cur=64;
+    int sockets[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,sockets));
+    assert(write(sockets[0],"x",1)==1 && !setrlimit(RLIMIT_NOFILE,&limited));
+    int filled[64],count=0,fd;
+    while ((fd=fcntl(sockets[0],F_DUPFD_CLOEXEC,0))>=0) {
+        assert(count<64); filled[count++]=fd;
+    }
+    if (errno!=EMFILE || !count) fprintf(stderr,"receive-full-table filled=%d error=%d socket=%d\n",count,errno,sockets[0]);
+    assert(errno==EMFILE && count);
+    char byte=0; struct iovec vector={&byte,1};
+    struct msghdr message={.msg_iov=&vector,.msg_iovlen=1};
+    assert(recvmsg(sockets[1],&message,MSG_DONTWAIT)==1 && byte=='x');
+    assert(recvmsg(sockets[1],&message,MSG_DONTWAIT)==-1 && errno==EAGAIN);
+    for (int i=0;i<count;++i) assert(!close(filled[i]));
+    assert(!close(sockets[0]) && !close(sockets[1]) && !setrlimit(RLIMIT_NOFILE,&saved));
+    puts("OBS receive-full-table payload=x empty=EAGAIN");
+}
+static void receive_vectors(void) {
+    const unsigned counts[]={1,8,9};
+    const unsigned sizes[]={31,65536,65537};
+    for (unsigned c=0;c<sizeof(counts)/sizeof(*counts);++c)
+        for (unsigned s=0;s<sizeof(sizes)/sizeof(*sizes);++s) {
+            int sockets[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,sockets));
+            unsigned count=counts[c],size=sizes[s];
+            char *input=malloc(size),*output=malloc(size); assert(input && output);
+            memset(input,'x',size); memset(output,0,size);
+            assert(write(sockets[0],input,size)==(ssize_t)size);
+            struct iovec vectors[9]; unsigned offset=0;
+            for (unsigned i=0;i<count;++i) {
+                unsigned length=(size-offset)/(count-i);
+                vectors[i]=(struct iovec){output+offset,length}; offset+=length;
+            }
+            char control[64];
+            struct msghdr message={.msg_iov=vectors,.msg_iovlen=count,
+                .msg_control=control,.msg_controllen=sizeof(control)};
+            assert(recvmsg(sockets[1],&message,MSG_DONTWAIT)==(ssize_t)size);
+            assert(!memcmp(input,output,size) && !message.msg_controllen && !message.msg_flags);
+            char empty_control[4096];
+            const unsigned capacities[]={64,2048,4096};
+            for (unsigned i=0;i<sizeof(capacities)/sizeof(*capacities);++i) {
+                message.msg_control=empty_control; message.msg_controllen=capacities[i];
+                message.msg_flags=0x123;
+                struct msghdr before; memcpy(&before,&message,sizeof(before));
+                errno=0; assert(recvmsg(sockets[1],&message,MSG_DONTWAIT)==-1 && errno==EAGAIN);
+                assert(!memcmp(&before,&message,sizeof(message)));
+            }
+            message.msg_iov=(void *)-1;
+            errno=0; assert(recvmsg(sockets[1],&message,MSG_DONTWAIT)==-1 && errno==EFAULT);
+            assert(!close(sockets[0]) && !close(sockets[1])); free(input); free(output);
+            printf("OBS receive-vectors count=%u size=%u empty=EAGAIN invalid=EFAULT\n",count,size);
+        }
+}
+static void receive_entry(void) {
+    const int types[]={SOCK_STREAM,SOCK_DGRAM,SOCK_SEQPACKET};
+    size_t page=(size_t)sysconf(_SC_PAGESIZE);
+    for (unsigned type=0;type<3;++type) for (unsigned mode=0;mode<3;++mode)
+            for (unsigned fault=0;fault<2;++fault) {
+        int sockets[2],pipefd[2],one=1;
+        int flags=MSG_CMSG_CLOEXEC|(mode==1 ? MSG_DONTWAIT : 0);
+        assert(!socketpair(AF_UNIX,types[type]|SOCK_CLOEXEC|(mode==2 ? SOCK_NONBLOCK : 0),0,sockets));
+        assert(!setsockopt(sockets[1],SOL_SOCKET,SO_PASSCRED,&one,sizeof(one)));
+        assert(!pipe2(pipefd,O_NONBLOCK|O_CLOEXEC));
+        struct msghdr *message=mmap(NULL,page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+        assert(message!=MAP_FAILED);
+        union { struct cmsghdr align; char bytes[128]; } control={0};
+        char byte=0; struct iovec vectors[8]={{0}}; vectors[7]=(struct iovec){&byte,1};
+        *message=(struct msghdr){.msg_iov=vectors,.msg_iovlen=8,.msg_control=control.bytes,
+            .msg_controllen=sizeof(control)};
+        send_rights(sockets[0],pipefd[1],2); assert(!close(pipefd[1]));
+        if (fault) assert(!mprotect(message,page,PROT_READ));
+        errno=0; ssize_t result=recvmsg(sockets[1],message,flags); int error=result<0 ? errno : 0;
+        assert(result==(fault ? -1 : 1) && error==(fault ? EFAULT : 0) && byte=='x');
+        struct msghdr published=*message;
+        if (fault) published.msg_controllen=CMSG_SPACE(sizeof(struct ucred))+CMSG_SPACE(2*sizeof(int));
+        unsigned rights=0,credentials=0;
+        for (struct cmsghdr *c=CMSG_FIRSTHDR(&published);c;c=CMSG_NXTHDR(&published,c)) {
+            assert(c->cmsg_level==SOL_SOCKET);
+            if (c->cmsg_type==SCM_CREDENTIALS) {
+                struct ucred sender; assert(c->cmsg_len==CMSG_LEN(sizeof(sender)));
+                memcpy(&sender,CMSG_DATA(c),sizeof(sender));
+                assert(sender.pid==getpid() && sender.uid==getuid() && sender.gid==getgid()); ++credentials;
+            } else {
+                assert(c->cmsg_type==SCM_RIGHTS && c->cmsg_len==CMSG_LEN(2*sizeof(int)));
+                int fds[2]; memcpy(fds,CMSG_DATA(c),sizeof(fds));
+                for (unsigned i=0;i<2;++i) {
+                    assert(fcntl(fds[i],F_GETFD)==FD_CLOEXEC && !close(fds[i])); ++rights;
+                }
+            }
+        }
+        assert(rights==2 && credentials==1 && read(pipefd[0],&byte,1)==0);
+        assert(!mprotect(message,page,PROT_READ|PROT_WRITE));
+        message->msg_controllen=sizeof(control); message->msg_flags=0x123;
+        struct msghdr before; memcpy(&before,message,sizeof(before));
+        assert(recvmsg(sockets[1],message,flags|MSG_DONTWAIT)==-1 && errno==EAGAIN);
+        assert(!memcmp(&before,message,sizeof(before)));
+        close(sockets[0]);
+        if (types[type]!=SOCK_DGRAM) assert(recvmsg(sockets[1],message,flags|MSG_DONTWAIT)==0);
+        assert(!close(sockets[1]) && !close(pipefd[0]) && !munmap(message,page));
+        printf("OBS receive-entry type=%d mode=%u fault=%u rights=2 credentials=1 empty=EAGAIN eof=1\n",
+            types[type],mode,fault);
+    }
+}
+static volatile sig_atomic_t receive_signals;
+static void receive_signal(int signal) {
+    assert(signal==SIGUSR1);
+    ++receive_signals;
+}
+static void receive_entry_signals(void) {
+    struct sigaction action={.sa_handler=receive_signal},previous;
+    sigemptyset(&action.sa_mask);
+    assert(!sigaction(SIGUSR1,&action,&previous));
+    sigset_t blocked,saved,current;
+    sigemptyset(&blocked); sigaddset(&blocked,SIGUSR1);
+    assert(!sigprocmask(SIG_BLOCK,&blocked,&saved));
+    int sockets[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM|SOCK_NONBLOCK,0,sockets));
+    char byte; struct iovec vector={&byte,1};
+    struct msghdr message={.msg_iov=&vector,.msg_iovlen=1};
+    for (unsigned i=0;i<64;++i) {
+        assert(!raise(SIGUSR1));
+        assert(recvmsg(sockets[1],&message,0)==-1 && errno==EAGAIN);
+        assert(!sigprocmask(SIG_SETMASK,NULL,&current) && sigismember(&current,SIGUSR1)==1);
+        assert(receive_signals==(sig_atomic_t)i);
+        assert(!sigprocmask(SIG_UNBLOCK,&blocked,NULL));
+        assert(receive_signals==(sig_atomic_t)i+1);
+        assert(write(sockets[0],"x",1)==1);
+        assert(recvmsg(sockets[1],&message,0)==1 && byte=='x');
+        assert(!sigprocmask(SIG_SETMASK,NULL,&current) && sigismember(&current,SIGUSR1)==0);
+        assert(!sigprocmask(SIG_BLOCK,&blocked,NULL));
+    }
+    close(sockets[0]); close(sockets[1]);
+    assert(!sigprocmask(SIG_SETMASK,&saved,NULL));
+    assert(!sigaction(SIGUSR1,&previous,NULL));
+    puts("OBS receive-entry-signals pending=64 delivered=64 mask=preserved");
+}
 int md_test_ancillary_contract(const char *name) {
+    if (!strcmp(name,"receive-entry-signals")) { receive_entry_signals(); return 1; }
+    if (!strcmp(name,"receive-entry")) { receive_entry(); return 1; }
+    if (!strcmp(name,"receive-vectors")) { receive_vectors(); return 1; }
+    if (!strcmp(name,"receive-full-table")) { receive_full_table(); return 1; }
     if (!strcmp(name,"rights-peek")) rights_peek();
     else if (!strcmp(name,"rights-truncate")) rights_truncate();
     else if (!strcmp(name,"rights-limit")) rights_limit();
     else if (!strcmp(name,"rights-batch")) rights_batch();
+    else if (!strcmp(name,"receive-large-batch")) receive_large_batch();
+    else if (!strcmp(name,"receive-batch-snapshot")) receive_batch_snapshot();
     else if (!strcmp(name,"rights-fault")) rights_fault();
     else if (!strcmp(name,"rights-control-fault")) rights_control_fault();
     else if (!strcmp(name,"rights-header-outputs")) rights_header_outputs();

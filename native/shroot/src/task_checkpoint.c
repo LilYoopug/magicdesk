@@ -35,6 +35,13 @@ static struct md_task_checkpoint *find(struct md_task_checkpoints *m,pid_t pid,i
 static int trace(struct md_task_checkpoints *m,int request,pid_t pid,void *address,void *data) {
     return m->trace(request,pid,address,data)<0 ? -errno : 0;
 }
+int md_task_checkpoint_displaced(struct md_task_checkpoints *m,pid_t pid) {
+    siginfo_t info={0};
+    int error=trace(m,PTRACE_GETSIGINFO,pid,NULL,&info);
+    if (error) return error==-ESRCH ? 1 : error;
+    return info.si_signo==SIGTRAP && (info.si_code==(SIGTRAP|(PTRACE_EVENT_EXIT<<8))
+        || info.si_code==(SIGTRAP|(PTRACE_EVENT_EXEC<<8)));
+}
 static int regs(struct md_task_checkpoints *m,pid_t pid,int request,struct user_pt_regs *r) {
     struct iovec io={r,sizeof(*r)};
     return trace(m,request,pid,(void *)NT_PRSTATUS,&io);
@@ -88,7 +95,7 @@ long md_task_checkpoint_trace(struct md_task_checkpoints *m,int request,pid_t pi
     return m->trace(request,pid,address,data);
 }
 static int marker(struct md_task_checkpoints *m,struct md_task_checkpoint *c,pid_t pid,
-        uintptr_t pc,int emulated) {
+        uintptr_t pc,unsigned long command,int emulated,int *status) {
     if (!emulated) {
         /* A TRACE checkpoint is already past filter evaluation. -1 is the
          * documented post-TRACE cancellation, not a new filtered syscall. */
@@ -96,12 +103,17 @@ static int marker(struct md_task_checkpoints *m,struct md_task_checkpoint *c,pid
         int error=trace(m,PTRACE_SETREGSET,pid,(void *)NT_ARM_SYSTEM_CALL,&io);
         if (error) return error;
     }
+    if (m->entry_marker && m->entry_marker(pc,command)) {
+        c->stage=0;
+        *status=(MD_TASK_CHECKPOINT_EVENT<<16)|(SIGTRAP<<8)|0x7f;
+        return 0;
+    }
     c->marker=pc; c->stage=MARKER_INTERRUPT;
     int error=trace(m,PTRACE_INTERRUPT,pid,NULL,NULL);
     if (!error) error=trace(m,PTRACE_CONT,pid,NULL,NULL);
     return error ? error : 1;
 }
-int md_task_checkpoint_event(struct md_task_checkpoints *m,pid_t pid,int *status) {
+static int checkpoint_event(struct md_task_checkpoints *m,pid_t pid,int *status) {
     if (WIFEXITED(*status) || WIFSIGNALED(*status)) { forget(m,pid); return 0; }
     struct md_task_checkpoint *c=find(m,pid,0);
     if (c) c->registers_valid=c->event_valid=0;
@@ -130,7 +142,7 @@ int md_task_checkpoint_event(struct md_task_checkpoints *m,pid_t pid,int *status
             return 0;
         }
         c=find(m,pid,1); if (!c) return -ENOMEM;
-        return marker(m,c,pid,info.instruction_pointer,0);
+        return marker(m,c,pid,info.instruction_pointer,info.seccomp.args[0],0,status);
     }
     if (!c || !c->stage) return 0;
     if (c->stage==MARKER_INTERRUPT) {
@@ -159,7 +171,8 @@ int md_task_checkpoint_event(struct md_task_checkpoints *m,pid_t pid,int *status
         if (info.op!=PTRACE_SYSCALL_INFO_ENTRY) return -EPROTO;
         /* Exact registered sites distinguish markers from native calls, even
          * when x8 is a register-copy payload rather than a syscall number. */
-        if (m->marker(info.instruction_pointer)) return marker(m,c,pid,info.instruction_pointer,1);
+        if (m->marker(info.instruction_pointer))
+            return marker(m,c,pid,info.instruction_pointer,info.entry.args[0],1,status);
         struct user_pt_regs r;
         error=regs(m,pid,PTRACE_GETREGSET,&r); if (error) return error;
         r.pc-=4;
@@ -168,6 +181,14 @@ int md_task_checkpoint_event(struct md_task_checkpoints *m,pid_t pid,int *status
         error=trace(m,PTRACE_SYSCALL,pid,NULL,NULL);
     }
     return error ? error : 1;
+}
+int md_task_checkpoint_event(struct md_task_checkpoints *m,pid_t pid,int *status) {
+    int result=checkpoint_event(m,pid,status);
+    if (result==-EPROTO) {
+        int displaced=md_task_checkpoint_displaced(m,pid);
+        if (displaced) return displaced>0 ? -ESRCH : displaced;
+    }
+    return result;
 }
 void md_task_checkpoints_clear(struct md_task_checkpoints *m) {
     for (unsigned i=0;i<MD_TASK_CHECKPOINT_BUCKETS;++i)

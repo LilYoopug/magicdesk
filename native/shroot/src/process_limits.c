@@ -154,6 +154,10 @@ int md_process_member_exec(struct md_process_member *m) {
     m->exec_check=0; return 0;
 }
 struct md_process_limits md_process_limits_value(const struct md_process_member *m) { return m->limits->value; }
+rlim_t md_process_native_nofile(const struct md_process_member *m) {
+    rlim_t soft=m->limits->value.nofile.rlim_cur, ceiling=m->limits->native_nofile_max;
+    return soft<ceiling ? soft : ceiling;
+}
 int md_process_limit(struct md_process_member *m,const struct md_identity *actor,
         const struct md_identity *target,int same_group,unsigned resource,
         const struct rlimit *next,struct rlimit *old,pid_t native_pid) {

@@ -501,6 +501,22 @@ releases only unpublished resources. Ordinary read/write does not use this path.
 For recvmmsg, each private msg_len records kernel completion even if the syscall
 then fails writing the remaining timeout. Such a failure does not suppress
 publication of the completed messages or leak their descriptors.
+Receive layouts (up to the kernel's 1024-message limit) are admitted in one
+shared-buffer exchange, reusing payload storage before IO starts. Preparing an
+empty batch therefore does not require a supervisor checkpoint per message.
+The brokered capture admits the prepared layout and starts that receive in the
+same exchange. Optional dispatch-time buffer admission also serves recvmmsg;
+failed batches without committed messages release their local allocations and
+retire the buffer together with the final result. Partial completion still
+publishes all committed messages before releasing their custody.
+Up to 128 receive entries use bounded scratch on the existing guarded adapter
+stack; larger batches and large ancillary/vector inputs retain allocated storage.
+When no such allocation or committed message remains, the receive completion can
+finish an error directly. Repeated EAGAIN therefore needs neither temporary
+mapping retirement nor a separate adapter acknowledgement. The boundary and its
+fallback are covered by native/guest comparisons, including protected callers.
+The host still performs one native recvmmsg; partial completion, timeout and
+deferred input errors retain that native batch boundary.
 
 Current limits are explicit:
 

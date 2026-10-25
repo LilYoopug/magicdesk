@@ -398,7 +398,7 @@ def main():
         check("guest addressed sends", shlex.join([fixture, "--address-fixture", root + "/libmagicdesk_guest_run.so",
               root + "/ipc-store", root + "/addressed"]), "PASS addressed send custody:")
         check_origin_guest()
-        for receive in range(4):
+        for receive in range(5):
             for protected in range(2):
                 for guest in (False, True):
                     argv = run + ["--custody"] if guest else [fixture, "--custody-native"]
@@ -582,7 +582,9 @@ def main():
                   "PASS task event selection")
             check("live task event collection", root + "/libmagicdesk_guest_task_wait_live.so",
                   "PASS live wait collection")
-            for workload in ("", "descriptors"):
+            check("sparse task event collection", root + "/libmagicdesk_guest_task_wait_live.so --idle",
+                  "PASS live wait collection")
+            for workload in ("", "descriptors", "birth"):
                 check("native event fairness " + workload, root + "/libmagicdesk_guest_event_fairness.so " + workload,
                       "PASS worker completions under continuous ptrace stops")
             check("event fairness source", "mkdir -p " + root + "/fair-source/bin " + root + "/fair-source/tmp")
@@ -593,9 +595,10 @@ def main():
             check("event fairness import", root + "/libmagicdesk_guest_service.so --import "
                   + root + "/fair-source " + root + "/fair-store --preserve-ownership")
             for user in ("0:0", "1000:1000"):
-                for workload in ("", "descriptors"):
+                for workload in ("", "descriptors", "birth", "birth-namespace"):
                     check("guest event fairness " + user + " " + workload, "timeout -k 5 25 " + root
-                          + "/libmagicdesk_guest_run.so --user " + user + " --store "
+                          + "/libmagicdesk_guest_run.so " + ("--diagnostics " if args.diagnostics else "")
+                          + "--user " + user + " --store "
                           + root + "/fair-store --deadline-seconds 20 -- /bin/test " + workload,
                           "PASS worker completions under continuous ptrace stops")
             if args.case == "event-fairness":

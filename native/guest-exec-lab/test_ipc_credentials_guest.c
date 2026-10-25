@@ -610,7 +610,9 @@ struct custody { int socket, receive, protected, guest; };
 static int custody_child(void *argument) {
     struct custody *c=argument;
     CHECK(!prctl(PR_SET_PDEATHSIG,SIGKILL));
-    if (c->protected) CHECK(!prctl(PR_SET_DUMPABLE,0));
+    /* Modes 2/3 exercise a killed export helper, even when native descriptor
+     * custody is available. Mode 4 admits native custody when available. */
+    if (c->protected || c->receive==2 || c->receive==3) CHECK(!prctl(PR_SET_DUMPABLE,0));
     char byte=c->receive ? 0 : 'm'; struct iovec io={&byte,1};
     union { struct cmsghdr align; char data[128]; } control={0};
     struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=control.data,
@@ -644,7 +646,8 @@ static int custody_child(void *argument) {
     CHECK(n==1 || (c->guest && n==-1 && errno==ECANCELED));
     /* The export-kill cases must reach native receive, not merely reject the
      * operation at entry. Its original payload is shared with the helper. */
-    if (c->receive>=2) CHECK(byte=='m' && (!c->guest || n==-1));
+    if (c->receive==2 || c->receive==3) CHECK(byte=='m' && (!c->guest || n==-1));
+    if (c->receive==4 && n==1) CHECK(byte=='m');
     if (c->receive && n==1) for (h=CMSG_FIRSTHDR(&m);h;h=CMSG_NXTHDR(&m,h))
         if (h->cmsg_level==SOL_SOCKET && h->cmsg_type==SCM_RIGHTS) {
             const int *fds=(const void *)CMSG_DATA(h);
@@ -856,7 +859,10 @@ static void origin_send(unsigned mode, int protected) {
 static void origin_receive(unsigned mode, int protected) {
     int filtered=protected&2, warm=protected&4; protected&=1;
     if (warm) warm_shared_channel();
-    CHECK(mode<15); if (protected) CHECK(!prctl(PR_SET_DUMPABLE,0));
+    CHECK(mode<15);
+    /* Mode 9 tests the private helper's in-flight SCM quota, not native pidfd
+     * capture (which sends no input rights). Retain that fallback explicitly. */
+    if (protected || mode==9) CHECK(!prctl(PR_SET_DUMPABLE,0));
     if (filtered) {
         struct sock_filter code[]={
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
@@ -990,6 +996,10 @@ static void addressed_receive(int socket, unsigned mode) {
     CHECK(count==(mode==0 || mode==4 ? 0 : mode==2 ? 253 : 1));
 }
 static void capture_channel_admission(int socket, int full) {
+    /* Force the export transport: native pidfd capture intentionally requires
+     * no channel, so a dumpable caller cannot test channel admission. */
+    int dumpable=prctl(PR_GET_DUMPABLE);
+    CHECK(dumpable>=0 && !prctl(PR_SET_DUMPABLE,0));
     int before[1024];
     for (unsigned i=0;i<1024;++i) before[i]=fcntl(i,F_GETFD);
     char byte; struct iovec io={&byte,1};
@@ -1005,6 +1015,7 @@ static void capture_channel_admission(int socket, int full) {
         ++admitted;
     }
     CHECK(admitted==(full ? 0U : 1U));
+    CHECK(!prctl(PR_SET_DUMPABLE,dumpable));
 }
 static void addressed_send(const char *path, unsigned protected, unsigned full, int local, uid_t uid, gid_t gid) {
     if (!strcmp(path,"addressed")) CHECK(!chdir("/attached"));
@@ -1035,8 +1046,8 @@ static void addressed_send(const char *path, unsigned protected, unsigned full, 
         capture_channel_admission(socket_fd,1);
         CHECK(held_count && !close(held[--held_count]));
     }
-    /* One table-owned infrastructure FD is admitted once. Every subsequent
-     * send must preserve this exact baseline, including a full application table. */
+    /* Any required export channel is admitted once. Every subsequent send
+     * preserves this exact baseline, including a full application table. */
     capture_channel_admission(socket_fd,0);
     for (unsigned mode=0;mode<9;++mode) {
         char byte='a'; struct iovec io={mode==6 ? (void *)1 : &byte,mode==7 ? 0 : 1};

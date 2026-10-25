@@ -67,7 +67,9 @@ static struct md_fs_work *take_submitted(struct md_fs_worker *w, int *stopping) 
     pthread_mutex_unlock(&w->lock);
     return work;
 }
-static int paused(void *);
+static int pause_requested(struct md_fs_worker *w) {
+    return atomic_load_explicit(&w->pause_requested,memory_order_relaxed);
+}
 static void execute_work(struct md_fs_worker *w,struct md_filesystem *fs,
         struct md_fs_work *work,int error) {
     int64_t start=md_cost_begin(w->statistics ? &w->execution : NULL);
@@ -91,7 +93,7 @@ static void resume_ready(struct md_fs_worker *w,struct md_filesystem *fs) {
     while (list) {
         struct md_fs_work *work=list; list=work->next; work->next=NULL;
         int state=0;
-        if (resumed<32 && !paused(w)) state=work->await(work);
+        if (resumed<32 && !pause_requested(w)) state=work->await(work);
         if (state) { ++resumed; execute_work(w,fs,work,state<0 ? state : 0); }
         else { *w->waiting_tail=work; w->waiting_tail=&work->next; }
     }
@@ -115,7 +117,9 @@ static void run_ready(void *context, struct md_filesystem *fs) {
 }
 static int paused(void *context) {
     struct md_fs_worker *w=context;
-    if (!atomic_load_explicit(&w->pause_requested,memory_order_relaxed)) return 0;
+    /* Only the service-loop boundary can acknowledge quiescence. Queue
+     * admission checks must not publish it before remaining callbacks finish. */
+    if (!pause_requested(w)) return 0;
     pthread_mutex_lock(&w->lock);
     int active=w->pause && !w->stopping;
     int acknowledge=active && !w->pause->acknowledged;

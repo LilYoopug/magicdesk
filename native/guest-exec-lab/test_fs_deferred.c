@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <sys/eventfd.h>
 #include <unistd.h>
 
 struct delayed {
@@ -42,7 +43,66 @@ static void fence(struct md_fs_worker *w) {
     while (!d.completed) event(w);
     assert(d.runs==1 && !d.error);
 }
+struct pause_boundary {
+    struct md_fs_work work;
+    struct md_fs_worker_pause pause;
+    atomic_int armed;
+    int started, release, notified, active;
+};
+static int boundary_ready(struct md_fs_work *work) {
+    struct pause_boundary *b=(void *)work;
+    if (!atomic_load(&b->armed)) return 0;
+    uint64_t one=1;
+    b->active=1;
+    assert(write(b->started,&one,sizeof(one))==sizeof(one));
+    /* EVENT_WAIT: owner requests pause during continuation admission. */
+    assert(md_event_wait_fd(b->release,POLLIN,md_event_now()+5000000000LL)>=0);
+    assert(read(b->release,&one,sizeof(one))==sizeof(one));
+    return 0;
+}
+static void boundary_run(struct md_fs_work *work,struct md_filesystem *fs,int error) {
+    if (!error) { assert(fs); work->await=boundary_ready; }
+}
+static int boundary_complete(struct md_fs_work *work) { (void)work; return 0; }
+static int boundary_notification(void *context,struct md_filesystem *fs,short events) {
+    (void)fs; (void)events;
+    struct pause_boundary *b=context;
+    if (b->active) {
+        /* No callback may touch guest memory after the pause is acknowledged. */
+        assert(md_fs_worker_pause_state(&b->pause)==0);
+        b->active=0;
+        uint64_t one=1;
+        assert(write(b->notified,&one,sizeof(one))==sizeof(one));
+    }
+    return 0;
+}
+static void pause_boundary(const char *store) {
+    char endpoint[80]; snprintf(endpoint,sizeof(endpoint),"md-fs-pause-boundary-%d",getpid());
+    struct md_fs_worker *w=NULL;
+    assert(!md_fs_worker_start(store,endpoint,NULL,NULL,NULL,NULL,&w));
+    struct pause_boundary b={.work={.run=boundary_run,.complete=boundary_complete}};
+    b.started=eventfd(0,EFD_NONBLOCK|EFD_CLOEXEC);
+    b.release=eventfd(0,EFD_NONBLOCK|EFD_CLOEXEC);
+    b.notified=eventfd(0,EFD_NONBLOCK|EFD_CLOEXEC);
+    int notification=eventfd(0,EFD_NONBLOCK|EFD_CLOEXEC);
+    assert(b.started>=0 && b.release>=0 && b.notified>=0 && notification>=0);
+    md_fs_worker_notifications(w,notification,&b,boundary_notification,NULL);
+    assert(!md_fs_worker_submit(w,&b.work));
+    struct delayed second; prepare(&second,1);
+    assert(!md_fs_worker_submit(w,&second.work));
+    /* The fence publishes both parked continuations before the wake pass. */
+    fence(w); atomic_store(&b.armed,1); md_fs_worker_wake(w);
+    assert(md_event_wait_fd(b.started,POLLIN,md_event_now()+5000000000LL)>=0);
+    assert(!md_fs_worker_pause_begin(w,&b.pause));
+    uint64_t one=1; assert(write(b.release,&one,sizeof(one))==sizeof(one));
+    assert(md_event_wait_fd(b.notified,POLLIN,md_event_now()+5000000000LL)>=0);
+    while (!md_fs_worker_pause_state(&b.pause)) event(w);
+    assert(!md_fs_worker_stop(w));
+    close(notification); close(b.notified); close(b.release); close(b.started);
+    puts("PASS pause acknowledgement follows all active worker callbacks");
+}
 void md_test_fs_deferred(const char *store) {
+    pause_boundary(store);
     char endpoint[80]; snprintf(endpoint,sizeof(endpoint),"md-fs-deferred-%d",getpid());
     struct md_fs_worker *w=NULL;
     assert(!md_fs_worker_start(store,endpoint,NULL,NULL,NULL,NULL,&w));

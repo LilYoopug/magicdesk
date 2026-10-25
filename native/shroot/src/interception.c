@@ -95,11 +95,11 @@ extern char md_guest_buffer_admitted[];
 #include "poll_calls.h"
 #include "clone_call.h"
 static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, unsigned long a1, unsigned long a2,
-        unsigned long a3, unsigned long a4, unsigned long a5, int control) {
+        unsigned long a3, unsigned long a4, unsigned long a5, int control, unsigned long prepared) {
     unsigned long args[] = {a0, a1, a2, a3, a4, a5};
     if (nr==SYS_clone3) return md_clone3_prepare(a0,a1);
     if (nr==SYS_epoll_ctl || nr==SYS_epoll_pwait || nr==SYS_epoll_pwait2) return md_epoll_call(nr,args);
-    if (nr==SYS_ppoll || nr==SYS_pselect6) return md_poll_call(nr,args);
+    if (nr==SYS_ppoll || nr==SYS_pselect6) return md_poll_call(nr,args,prepared);
     if (nr==SYS_seccomp || nr==SYS_prctl) {
         md_cooperative_revoke();
         return md_fd_filter_prepare_sandbox();
@@ -140,7 +140,7 @@ static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, un
         return md_descriptor_duplicate(fs,nr,args);
     if (nr == SYS_inotify_init1 || nr == SYS_inotify_rm_watch)
         return md_watch_call(fs, nr, args);
-    if (nr == SYS_recvmmsg) return md_socket_ancillary_batch(fs, args);
+    if (nr == SYS_recvmmsg) return md_socket_ancillary_batch(fs, args, prepared);
     switch (nr) {
         case SYS_chroot:
             return md_namespace_call(fs, md_executable, nr, args);
@@ -148,7 +148,7 @@ static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, un
         MD_FILE_CALLS(CALL)
             return md_file_call(fs, md_executable, nr, args);
         MD_SOCKET_CALLS(CALL)
-            return md_socket_call(fs, md_executable, nr, args);
+            return md_socket_call(fs, md_executable, nr, args,prepared);
 #undef CALL
         case SYS_execve: return md_guest_exec(fs, (void *)a0, (void *)a1, (void *)a2);
         case SYS_execveat: return md_guest_execat(fs, a0, (void *)a1, (void *)a2, (void *)a3, a4);
@@ -158,13 +158,13 @@ static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, un
 /* A syscall's filesystem selection is task-local even with CLONE_VM and
  * independently unshared CLONE_FS. Ordinary launches do not copy md_fs. */
 __attribute__((noinline)) static long dispatch_scoped(long nr, unsigned long a0, unsigned long a1,
-        unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5, int control) {
+        unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5, int control,unsigned long prepared) {
     struct md_fs fs = md_files;
     fs.managed_paths = 1;
-    return dispatch_files(&fs, nr, a0, a1, a2, a3, a4, a5, control);
+    return dispatch_files(&fs, nr, a0, a1, a2, a3, a4, a5, control,prepared);
 }
 long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned long a2,
-        unsigned long a3, unsigned long a4, unsigned long a5, unsigned scoped) {
+        unsigned long a3, unsigned long a4, unsigned long a5, unsigned scoped,unsigned long prepared) {
     if (scoped&MD_DISPATCH_DEVICE_EVENTS) {
         unsigned long args[]={a0,a1,a2,a3,a4,a5};
         return nr==SYS_socket ? md_network_open(args) : md_device_event_call(nr,args);
@@ -192,8 +192,8 @@ long md_guest_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned lon
         return md_socket_pair(&fs,args,1);
     }
     int control=md_dispatch_control_kind(scoped);
-    return (scoped&MD_DISPATCH_PATHS) ? dispatch_scoped(nr,a0,a1,a2,a3,a4,a5,control)
-        : dispatch_files(&md_files,nr,a0,a1,a2,a3,a4,a5,control);
+    return (scoped&MD_DISPATCH_PATHS) ? dispatch_scoped(nr,a0,a1,a2,a3,a4,a5,control,prepared)
+        : dispatch_files(&md_files,nr,a0,a1,a2,a3,a4,a5,control,prepared);
 }
 #include "cooperative_native.h"
 #include "svc_runtime.h"

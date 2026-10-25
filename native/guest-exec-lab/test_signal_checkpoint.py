@@ -50,6 +50,8 @@ def main():
             suite.report['passed'] = True
             return
         assert 'PASS checkpoints:' in output and 'uid=2000' in output
+        assert 'PASS terminal stop replacement:' in output
+        assert 'PASS birth stop replacement:' in output
         assert 'PASS SYSEMU strict policy:' in output
         assert 'PASS SYSEMU native admission:' in output
         assert 'PASS SYSEMU pending signals:' in output
@@ -67,6 +69,7 @@ def main():
         assert 'LIMIT regenerated job control:' in output
         assert 'PASS task injection admission:' in output
         assert 'PASS unified checkpoint owner:' in output
+        assert 'PASS scalar checkpoint:' in output
         suite.report['limitations'] = [line for line in output.splitlines() if line.startswith('LIMIT ')]
         assert output.count('1000_rounds_ms=') == 30
         timings = {}

@@ -25,6 +25,7 @@ def main():
                                   ('test_signal_delivery', suite.base + '/signals'),
                                   ('test_cooperative_native', suite.base + '/native-journal'),
                                   ('test_guest_copy', suite.base + '/guest-copy'),
+                                  ('test_freestanding_memory', suite.base + '/freestanding-memory'),
                                   ('test_task_resources', suite.base + '/task-resources'),
                                   ('test_inodes', suite.base + '/inodes'),
                                   ('test_mounts', suite.base + '/mounts'),
@@ -51,6 +52,7 @@ def main():
                            suite.base + '/fuse-store'])
             suite.command(['timeout', '20', suite.base + '/signals'])
             suite.command(['timeout', '15', suite.base + '/guest-copy'])
+            suite.command(['timeout', '15', suite.base + '/freestanding-memory'])
             suite.command(['timeout', '45', suite.base + '/native-journal'])
             suite.command(['timeout', '90', suite.base + '/task-resources'])
             suite.command(['timeout', '60', suite.base + '/inodes', suite.base + '/inode-store'])

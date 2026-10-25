@@ -262,5 +262,17 @@ static void retired_oneshot(void) {
     puts("PASS final release wakes one-shot retirement without a fabricated event");
 }
 void test_control_epoll(void) {
+    struct md_control_epoll *q=md_control_epoll_new(); assert(q);
+    struct md_fd_object *object=md_control_epoll_object(q);
+    assert(md_control_epoll_native_wait(NULL));
+    assert(md_control_epoll_native_wait(object));
+    assert(md_control_epoll_admit_begin(q)==1);
+    assert(!md_control_epoll_native_wait(object));
+    assert(!md_control_epoll_admit_finish(q,0));
+    assert(md_control_epoll_native_wait(object));
+    assert(md_control_epoll_admit_begin(q)==1);
+    assert(!md_control_epoll_admit_finish(q,1));
+    assert(!md_control_epoll_native_wait(object));
+    md_control_epoll_release(q);
     identities(); policies(); mixed(); batch_retirement(); admission_failure(); retired_oneshot();
 }

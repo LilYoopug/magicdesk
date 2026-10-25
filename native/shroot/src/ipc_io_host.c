@@ -118,7 +118,7 @@ int md_ipc_io_prepare(struct md_ipc_io *op, struct md_ipc_io_message *io, int fd
     if (io->size>INT_MAX || io->control_size>INT_MAX
             || io->address_size>sizeof(io->address)) return -EINVAL;
     if (op->initialized) return op->batch ? prepare_entry(op,io) : -EINVAL;
-    if (io->batch_count>1024 || (io->batch_count && (io->batch_index || sending))) return -EINVAL;
+    if (io->batch_count>MD_IPC_IO_BATCH || (io->batch_count && (io->batch_index || sending))) return -EINVAL;
     int type, mode=fcntl(fd,F_GETFL); socklen_t length=sizeof(type);
     if (mode<0 || getsockopt(fd,SOL_SOCKET,SO_TYPE,&type,&length)) return -errno;
     struct timeval timeout={0}; length=sizeof(timeout);
@@ -154,6 +154,19 @@ int md_ipc_io_prepare(struct md_ipc_io *op, struct md_ipc_io_message *io, int fd
         for (unsigned i=0;i<count;++i) batch->messages[i].msg_len=UINT_MAX;
         op->batch=batch; op->native_wait=1;
         return prepare_entry(op,io);
+    }
+    return 0;
+}
+int md_ipc_io_prepare_batch(struct md_ipc_io *op, struct md_ipc_io_message *io, int fd, int flags, unsigned count) {
+    if (op->initialized || !count || count>io->batch_count || io->batch_count>MD_IPC_IO_BATCH)
+        return -EINVAL;
+    for (unsigned i=0;i<count;++i) {
+        struct md_ipc_io_layout layout=io->layouts[i];
+        if (layout.vector_error && i+1!=count) return -EINVAL;
+        io->batch_index=i; io->size=layout.size; io->control_size=layout.control_size;
+        io->address_size=layout.address_size; io->vector_error=layout.vector_error;
+        int error=md_ipc_io_prepare(op,io,fd,flags,0);
+        if (error) return error;
     }
     return 0;
 }

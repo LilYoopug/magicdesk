@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -37,10 +38,12 @@ struct md_fd_origins {
     struct md_fd_origin_entry **buckets;
     struct md_resource_queue order;
     uint64_t generation;
+    unsigned readiness;
     atomic_uint loans;
     struct md_fd_loan_slot *loan_head;
 };
-static void loan_link(struct md_fd_origins *t,struct md_fd_origin_entry *e) {
+static void entry_link(struct md_fd_origins *t,struct md_fd_origin_entry *e) {
+    if (e->object && e->object->type->readiness) ++t->readiness;
     if (!e->loan) return;
     struct md_fd_loan_slot *slot=e->loan;
     slot->entry=e; slot->previous=NULL; slot->next=t->loan_head;
@@ -48,7 +51,8 @@ static void loan_link(struct md_fd_origins *t,struct md_fd_origin_entry *e) {
     t->loan_head=slot;
     atomic_fetch_add_explicit(&t->loans,1,memory_order_release);
 }
-static void loan_unlink(struct md_fd_origins *t,struct md_fd_origin_entry *e) {
+static void entry_unlink(struct md_fd_origins *t,struct md_fd_origin_entry *e) {
+    if (e->object && e->object->type->readiness) --t->readiness;
     if (!e->loan) return;
     struct md_fd_loan_slot *slot=e->loan;
     if (slot->previous) slot->previous->next=slot->next;
@@ -142,7 +146,7 @@ struct md_fd_origins *md_fd_origins_fork(struct md_fd_origins *t, int shared) {
             if (p->loan && !entry->loan) {
                 entry->next=NULL; dispose(entry); error=-ENOMEM; break;
             }
-            loan_link(copy,entry);
+            entry_link(copy,entry);
             entry->next=copy->buckets[i]; copy->buckets[i]=entry;
         }
     }
@@ -192,6 +196,26 @@ int md_fd_origins_native(const struct md_fd_order *turn,int fd,struct md_fd_nati
 int md_fd_origins_native_regular(const struct md_fd_order *turn,int fd) {
     struct md_fd_native native;
     return md_fd_origins_native(turn,fd,&native) && native.kind==S_IFREG;
+}
+int md_fd_origins_native_poll(const struct md_fd_order *turn) {
+    if (!turn || !turn->table || md_fd_order_state(turn)!=MD_RESOURCE_ORDER_RUNNING) return 0;
+    struct md_fd_origins *t=turn->table;
+    pthread_mutex_lock(&t->lock);
+    int native=!t->readiness;
+    pthread_mutex_unlock(&t->lock); return native;
+}
+int md_fd_origins_native_poll_vector(const struct md_fd_order *turn,const struct pollfd *items,size_t count) {
+    if (!turn || !turn->table || (count && !items)
+            || md_fd_order_state(turn)!=MD_RESOURCE_ORDER_RUNNING) return 0;
+    struct md_fd_origins *t=turn->table;
+    pthread_mutex_lock(&t->lock);
+    int native=1;
+    if (t->readiness && t->buckets) for (size_t i=0;i<count;++i) {
+        if (items[i].fd<0) continue;
+        struct md_fd_origin_entry *e=*slot(t,items[i].fd);
+        if (e && e->object && e->object->type->readiness) { native=0; break; }
+    }
+    pthread_mutex_unlock(&t->lock); return native;
 }
 struct md_fd_object *md_fd_origins_object(struct md_fd_origins *t, int fd, unsigned *flags) {
     if (flags) *flags=0;
@@ -393,8 +417,8 @@ static struct md_fd_origin_entry *install(struct md_fd_origins *t,
     changed(t);
     if (!t->buckets) return NULL;
     struct md_fd_origin_entry **p=slot(t,fd), *retired=*p;
-    if (retired) loan_unlink(t,retired);
-    if (entry) loan_link(t,entry);
+    if (retired) entry_unlink(t,retired);
+    if (entry) entry_link(t,entry);
     if (entry) {
         entry->fd=fd; entry->next=retired ? retired->next : NULL; *p=entry;
     } else if (retired) *p=retired->next;
@@ -511,7 +535,7 @@ static void remove_entries(struct md_fd_origins *t,unsigned first,unsigned last,
             int selected=exec ? !e->uncertain && !!(e->flags & FD_CLOEXEC) : (unsigned)e->fd>=first && (unsigned)e->fd<=last;
             if (selected && action==RETIRE_UNCERTAIN && (e->channel || e->loan)) { e->uncertain=1; p=&e->next; continue; }
             if (selected && action!=RETIRE_CLOEXEC) {
-                loan_unlink(t,e); *p=e->next; e->next=retired; retired=e;
+                entry_unlink(t,e); *p=e->next; e->next=retired; retired=e;
             }
             else { if (selected) e->flags|=FD_CLOEXEC; p=&e->next; }
         }

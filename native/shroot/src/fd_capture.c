@@ -1,5 +1,25 @@
 #include "fd_capture.h"
+#include "task_descriptor.h"
 #include <errno.h>
+#include <unistd.h>
+
+int md_fd_capture_native(pid_t actor,const int *numbers,unsigned count,struct md_received_fds **out) {
+    if (!numbers || !count || count>254 || !out || *out) return -EINVAL;
+    struct md_received_fds *received=NULL;
+    int error=md_received_fds_reserve(&received,count),process=-1;
+    for (unsigned i=0;!error && i<count;++i) {
+        int fd=md_task_descriptor_copy(actor,numbers[i],&process);
+        if (fd<0) error=fd;
+        else received->fds[received->count++]=fd;
+    }
+    if (process>=0) close(process);
+    if (error) {
+        md_received_fds_release(received);
+        return md_task_descriptor_needs_export(error) ? 0 : error;
+    }
+    *out=received;
+    return 1;
+}
 
 void md_fd_capture_cancel(struct md_fd_capture *c) {
     md_fd_channel_capture_cancel(&c->packet);

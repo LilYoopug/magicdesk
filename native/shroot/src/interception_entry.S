@@ -20,7 +20,11 @@ md_guest_dispatch_entry:
     /* The kernel restores x7 after ARM64 syscall stops. Supervisor policy
      * arrives in x9; only userspace turns it into the eighth C argument. */
     mov x7, x9
-    b md_guest_dispatch
+    stp x10, x30, [sp, #-16]!
+    bl md_guest_dispatch
+    ldr x30, [sp, #8]
+    add sp, sp, #16
+    ret
 .size md_guest_dispatch_entry, .-md_guest_dispatch_entry
 .global md_guest_task_call
 .global md_guest_task_collect

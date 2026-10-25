@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "task_call.h"
 #include "task_checkpoint.h"
+#include "task_birth.h"
 #include "signal_delivery.h"
 #include <assert.h>
 #include <elf.h>
@@ -1042,6 +1043,75 @@ extern char unified_native[],md_guest_buffer_control_checkpoint[];
 __asm__(".text\n.balign 4\n.global unified_native\nunified_native:\nsvc #0\n"
     "str x0,[x23]\nmov x8,x25\nb md_guest_buffer_control\n");
 static int checkpoint_site(uintptr_t pc) { return pc==(uintptr_t)md_guest_buffer_control_checkpoint+4; }
+extern char entry_scalar_gate[],entry_scalar_return[],md_guest_done_checkpoint[];
+__asm__(".text\n.balign 4\n.global entry_scalar_gate\nentry_scalar_gate:\n"
+    "mov x0,#42\nbl md_guest_buffer_control\n"
+    ".global entry_scalar_return\nentry_scalar_return:\nstr x0,[x23]\nb md_guest_done\n");
+static int scalar_site(uintptr_t pc) {
+    return checkpoint_site(pc) || pc==(uintptr_t)md_guest_done_checkpoint+4;
+}
+static int scalar_entry(uintptr_t pc,unsigned long command) {
+    return checkpoint_site(pc) && command==42;
+}
+static void scalar_checkpoint(int protected,int restricted) {
+    volatile uint64_t *output=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
+    assert(output!=MAP_FAILED);
+    int start[2]; assert(!pipe(start));
+    pid_t pid=fork(); assert(pid>=0);
+    if (!pid) {
+        char byte; assert(read(start[0],&byte,1)==1);
+        if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+        struct sigaction action={.sa_handler=SIG_IGN}; assert(!sigaction(SIGTRAP,&action,NULL));
+        sigset_t set; sigemptyset(&set); sigaddset(&set,SIGTRAP);
+        assert(!sigprocmask(SIG_BLOCK,&set,NULL));
+        assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+        struct sock_filter code[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_gettid,0,1),
+            BPF_STMT(BPF_RET|BPF_K,restricted ? SECCOMP_RET_KILL_PROCESS : SECCOMP_RET_TRACE|MD_INTERCEPT_CHECKPOINT),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+        };
+        struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+        assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+        assert(!sysemu_pause((pid_t)syscall(SYS_getpid),SIGSTOP,output+1));
+        assert(output[0]==0x9876 && output[1]==0x4321);
+        assert(!sigaction(SIGTRAP,NULL,&action) && action.sa_handler==SIG_IGN);
+        assert(!sigprocmask(SIG_SETMASK,NULL,&set) && sigismember(&set,SIGTRAP));
+        _exit(0);
+    }
+    assert(!ptrace(PTRACE_SEIZE,pid,NULL,(void *)(PTRACE_O_TRACESYSGOOD|PTRACE_O_TRACESECCOMP|PTRACE_O_EXITKILL)));
+    assert(write(start[1],"s",1)==1 && stopped(pid)==SIGSTOP);
+    struct user_pt_regs saved=registers(pid),gate=saved;
+    gate.pc=(uintptr_t)entry_scalar_gate; gate.regs[23]=(uintptr_t)output;
+    checkpoint_restricted=restricted;
+    struct md_task_checkpoints runtime={.trace=checkpoint_trace,.restricted=checkpoint_policy,
+        .marker=scalar_site,.entry_marker=scalar_entry,.begin=1,.end=UINTPTR_MAX};
+    struct iovec io={&gate,sizeof(gate)};
+    assert(!md_task_checkpoint_trace(&runtime,PTRACE_SETREGSET,pid,(void *)NT_PRSTATUS,&io));
+    assert(!md_task_checkpoint_trace(&runtime,PTRACE_CONT,pid,NULL,NULL));
+    unsigned seen=0,stops=0; int status;
+    while (seen<2) {
+        assert(++stops<5 && waitpid(pid,&status,0)==pid && WIFSTOPPED(status));
+        int owned=md_task_checkpoint_event(&runtime,pid,&status); assert(owned>=0);
+        if (owned) continue;
+        assert((unsigned)status>>16==MD_TASK_CHECKPOINT_EVENT);
+        gate=registers(pid);
+        if (!seen++) {
+            assert(stops==1 && gate.pc==(uintptr_t)md_guest_buffer_control_checkpoint+4 && gate.regs[0]==42);
+            gate.regs[0]=0x9876;
+        } else {
+            assert(stops==3 && gate.pc==(uintptr_t)md_guest_done_checkpoint+4 && output[0]==0x9876);
+            gate=saved; runtime.begin=runtime.end=0;
+        }
+        io=(struct iovec){&gate,sizeof(gate)};
+        assert(!md_task_checkpoint_trace(&runtime,PTRACE_SETREGSET,pid,(void *)NT_PRSTATUS,&io));
+        assert(!md_task_checkpoint_trace(&runtime,PTRACE_CONT,pid,NULL,NULL));
+    }
+    assert(waitpid(pid,&status,0)==pid && WIFEXITED(status) && !WEXITSTATUS(status));
+    assert(!md_task_checkpoint_event(&runtime,pid,&status));
+    md_task_checkpoints_clear(&runtime);
+    assert(!munmap((void *)output,4096)); close(start[0]); close(start[1]);
+}
 static void unified_checkpoint(int protected,int restricted,int denied,int invalid_number) {
     volatile long *output=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
     assert(output!=MAP_FAILED);
@@ -1544,9 +1614,165 @@ static void retained_continue(int protected,int process) {
     md_signal_delivery_clear(&queue);
     close(start[0]); close(start[1]);
 }
+static void *terminal_race_worker(void *argument) {
+    int clone=argument!=NULL;
+    struct sock_filter code[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,clone ? SYS_clone : SYS_getpid,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|73),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)};
+    struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+    assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+    assert(!prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&program));
+    syscall(clone ? SYS_clone : SYS_getpid,CLONE_THREAD,0,0,0,0);
+    _exit(91);
+}
+static void *birth_waiter(void *unused) {
+    (void)unused;
+    for (;;) pause();
+    return NULL;
+}
+static void *birth_worker(void *argument) {
+    int kind=(int)(intptr_t)argument;
+    if (!kind) {
+        pthread_t child; assert(!pthread_create(&child,NULL,birth_waiter,NULL));
+    } else {
+        pid_t child=kind==1 ? fork() : vfork(); assert(child>=0);
+        if (!child) _exit(17);
+    }
+    return birth_waiter(NULL);
+}
+static void birth_terminal_race(int kind,int protected,int code) {
+    int channel[2]; assert(!pipe2(channel,O_CLOEXEC));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        assert(!ptrace(PTRACE_TRACEME,0,NULL,NULL)); raise(SIGSTOP);
+        if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+        pthread_t thread; assert(!pthread_create(&thread,NULL,birth_worker,(void *)(intptr_t)kind));
+        char byte; assert(read(channel[0],&byte,1)==1);
+        _exit(code);
+    }
+    int status; assert(waitpid(child,&status,__WALL)==child && WIFSTOPPED(status));
+    assert(!ptrace(PTRACE_SETOPTIONS,child,NULL,(void *)(PTRACE_O_TRACECLONE|PTRACE_O_TRACEFORK
+        |PTRACE_O_TRACEVFORK|PTRACE_O_TRACEEXIT|PTRACE_O_EXITKILL)));
+    resume(child,PTRACE_CONT,0);
+    pid_t actor=0,held=0; unsigned long newborn=0;
+    unsigned event=kind==1 ? PTRACE_EVENT_FORK : kind==2 ? PTRACE_EVENT_VFORK : PTRACE_EVENT_CLONE;
+    while (!newborn) {
+        pid_t pid=waitpid(-1,&status,__WALL); assert(pid>0 && WIFSTOPPED(status));
+        if (pid==child && (unsigned)status>>16==PTRACE_EVENT_CLONE) {
+            unsigned long id; assert(!ptrace(PTRACE_GETEVENTMSG,pid,NULL,&id)); actor=(pid_t)id;
+            if (held==actor) { resume(actor,PTRACE_CONT,0); held=0; }
+        } else if (pid==actor && (unsigned)status>>16==event) {
+            assert(!ptrace(PTRACE_GETEVENTMSG,pid,NULL,&newborn) && newborn>0);
+            int terminal=-1;
+            assert(md_task_birth_read(task_trace,actor,event,SYS_clone,&terminal)==(long)newborn && !terminal);
+            break;
+        }
+        if (pid==child || pid==actor) resume(pid,PTRACE_CONT,0);
+        else { assert(!held); held=pid; }
+    }
+    if (!held) assert(waitpid((pid_t)newborn,&status,__WALL)==(pid_t)newborn && WIFSTOPPED(status));
+    else assert(held==(pid_t)newborn);
+    assert(write(channel[1],"x",1)==1);
+    /* EVENT_WAIT: group exit replaces the collected birth stop; no child is
+     * resumed after group exit. The alarm bounds all three terminal events. */
+    unsigned exits=0;
+    while (exits<(kind ? 2U : 3U)) {
+        pid_t pid=waitpid(-1,&status,__WALL);
+        assert(pid==child || pid==actor || pid==(pid_t)newborn);
+        assert(WIFSTOPPED(status));
+        if ((unsigned)status>>16==PTRACE_EVENT_EXIT) ++exits;
+    }
+    unsigned long message=1;
+    assert(!ptrace(PTRACE_GETEVENTMSG,actor,NULL,&message) && message==(unsigned)code<<8);
+    int terminal=0;
+    assert(md_task_birth_read(task_trace,actor,event,SYS_clone,&terminal)==(long)newborn && terminal);
+    assert(md_task_birth_terminal(task_trace,actor,SYS_clone,ULONG_MAX)==(long)newborn);
+    struct md_task_checkpoints runtime={.trace=task_trace};
+    assert(md_task_checkpoint_displaced(&runtime,actor)==1);
+    /* A separate process survives its creator's group death. */
+    resume((pid_t)newborn,PTRACE_CONT,0);
+    resume(actor,PTRACE_CONT,0); resume(child,PTRACE_CONT,0);
+    unsigned reaped=0; pid_t pid;
+    while ((pid=waitpid(-1,&status,__WALL))>0) {
+        assert(pid==child || pid==actor || pid==(pid_t)newborn);
+        if (WIFSTOPPED(status)) {
+            assert(kind && pid==(pid_t)newborn);
+            resume(pid,PTRACE_CONT,0); continue;
+        }
+        assert(WIFEXITED(status) && WEXITSTATUS(status)==(kind && pid==(pid_t)newborn ? 17 : code));
+        ++reaped;
+    }
+    assert(errno==ECHILD && reaped==3);
+    close(channel[0]); close(channel[1]);
+}
+static void terminal_race(int protected,int entry) {
+    int channel[2]; assert(!pipe2(channel,O_CLOEXEC));
+    pid_t child=fork(); assert(child>=0);
+    if (!child) {
+        assert(!ptrace(PTRACE_TRACEME,0,NULL,NULL)); raise(SIGSTOP);
+        if (protected) assert(!prctl(PR_SET_DUMPABLE,0));
+        pthread_t thread; assert(!pthread_create(&thread,NULL,terminal_race_worker,(void *)(intptr_t)(entry==2)));
+        char byte; assert(read(channel[0],&byte,1)==1);
+        _exit(0);
+    }
+    int status; assert(waitpid(child,&status,__WALL)==child && WIFSTOPPED(status));
+    assert(!ptrace(PTRACE_SETOPTIONS,child,NULL,(void *)(PTRACE_O_TRACECLONE|PTRACE_O_TRACESECCOMP|PTRACE_O_TRACESYSGOOD
+        |PTRACE_O_TRACEEXIT|PTRACE_O_EXITKILL)));
+    resume(child,PTRACE_CONT,0);
+    pid_t actor=0;
+    while (!actor) {
+        pid_t pid=waitpid(-1,&status,__WALL); assert(pid>0 && WIFSTOPPED(status));
+        if ((unsigned)status>>16==PTRACE_EVENT_SECCOMP) actor=pid;
+        else resume(pid,PTRACE_CONT,0);
+    }
+    struct md_task_checkpoints runtime={.trace=task_trace,.restricted=checkpoint_policy,.marker=checkpoint_site};
+    int original=status;
+    assert(!md_task_checkpoint_displaced(&runtime,actor));
+    assert(!md_task_checkpoint_event(&runtime,actor,&status) && status==original);
+    if (entry==1) {
+        struct user_pt_regs regs=registers(actor);
+        runtime.begin=regs.pc-4; runtime.end=regs.pc+4;
+        struct iovec io={&regs,sizeof(regs)};
+        assert(!md_task_checkpoint_trace(&runtime,PTRACE_SETREGSET,actor,(void *)NT_PRSTATUS,&io));
+        checkpoint_restricted=1;
+        assert(!md_task_checkpoint_trace(&runtime,PTRACE_CONT,actor,NULL,NULL));
+        assert(waitpid(actor,&original,__WALL)==actor && WSTOPSIG(original)==(SIGTRAP|0x80));
+        assert(!md_task_checkpoint_displaced(&runtime,actor));
+    }
+    assert(write(channel[1],"x",1)==1);
+    /* EVENT_WAIT: exit_group replaces the sibling's already-collected entry;
+     * the process alarm bounds this exact terminal observation. */
+    assert(waitpid(child,&status,__WALL)==child && (unsigned)status>>16==PTRACE_EVENT_EXIT);
+    assert(waitpid(actor,&status,__WALL)==actor && (unsigned)status>>16==PTRACE_EVENT_EXIT);
+    unsigned long cookie=1;
+    assert(!ptrace(PTRACE_GETEVENTMSG,actor,NULL,&cookie) && !cookie);
+    assert(md_task_checkpoint_displaced(&runtime,actor)==1);
+    if (entry==2) {
+        assert(!md_task_birth_terminal(task_trace,actor,SYS_clone,CLONE_THREAD));
+    }
+    assert(md_task_checkpoint_event(&runtime,actor,&original)==-ESRCH);
+    resume(actor,PTRACE_CONT,0); resume(child,PTRACE_CONT,0);
+    unsigned reaped=0; pid_t pid;
+    while ((pid=waitpid(-1,&status,__WALL))>0) {
+        assert((pid==child || pid==actor) && WIFEXITED(status) && !WEXITSTATUS(status));
+        ++reaped;
+    }
+    assert(errno==ECHILD && reaped==2);
+    md_task_checkpoints_clear(&runtime); close(channel[0]); close(channel[1]);
+}
 int main(int argc,char **argv) {
     setvbuf(stdout,NULL,_IOLBF,0);
     alarm(60);
+    for (int kind=0;kind<3;++kind)
+        for (int protected=0;protected<2;++protected)
+            for (int code=0;code<2;++code) birth_terminal_race(kind,protected,code ? 77 : 0);
+    puts("PASS birth stop replacement: 12 controls; clone/fork/vfork, dumpable=0, zero/nonzero exit, surviving children");
+    for (int protected=0;protected<2;++protected)
+        for (int entry=0;entry<3;++entry) terminal_race(protected,entry);
+    puts("PASS terminal stop replacement: exit_group, collected seccomp/SYSEMU, dumpable=0, exact terminal reaping");
+    if (argc==2 && !strcmp(argv[1],"--terminal-race")) return 0;
     if (argc==2 && !strcmp(argv[1],"--copy-fault")) {
         for (int protected=0;protected<2;++protected) {
             for (int fault=1;fault<4;++fault) sysemu_register_copy(protected,fault,0);
@@ -1566,6 +1792,9 @@ int main(int argc,char **argv) {
         puts("PASS retained job control");
         return 0;
     }
+    for (int protected=0;protected<2;++protected)
+        for (int restricted=0;restricted<2;++restricted) scalar_checkpoint(protected,restricted);
+    puts("PASS scalar checkpoint: 4 cases; entry-only C return, full-register completion, strict seccomp and blocked SIGTRAP");
     for (int protected=0;protected<2;++protected)
         for (int restricted=0;restricted<2;++restricted)
             for (int denied=0;denied<2;++denied) for (int invalid=0;invalid<2;++invalid)

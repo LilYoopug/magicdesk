@@ -437,15 +437,15 @@ static void context_execute(struct md_fs_context *context,
     fs->store->boundary=previous_boundary;
     if (out->error==-EREMOTE && !fs->store->landlock)
         md_fs_native_boundary(fs,&boundary,q,out,output);
-    if (out->error==-EREMOTE && boundary.native_directory && q->resolve) {
+    if (out->error==-EREMOTE && (boundary.mount_root || boundary.native_directory) && q->resolve) {
         /* The logical walker admitted this native root. Resolve the remaining
          * suffix under that root in one kernel operation, never discard the
          * application's openat2 constraints in a plain-open fallback. Crossing
          * back out of the native provider requires a logical walk, so fails. */
-        int root=open("/dev",O_PATH|O_DIRECTORY|O_CLOEXEC);
+        int root=open(boundary.mount_root ? boundary.path : "/dev",O_PATH|O_DIRECTORY|O_CLOEXEC);
         if (root<0) out->error=-errno;
         else {
-            const char *relative=boundary.path+4;
+            const char *relative=boundary.mount_root ? "." : boundary.path+4;
             while (*relative=='/') ++relative;
             struct open_how how={.flags=q->flags|O_CLOEXEC,.mode=q->mode,
                 .resolve=(q->resolve&~RESOLVE_IN_ROOT)|RESOLVE_BENEATH};

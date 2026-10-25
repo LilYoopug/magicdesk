@@ -76,7 +76,7 @@ timeout 45 "$work/test-import" "$importroot/tests"
 "$cc" -iquote "$runtime" -std=c17 -O2 -Wall -Wextra -Werror -Wframe-larger-than=16384 \
     -ffreestanding -fno-builtin -fno-stack-protector -DMD_NO_START -nostdlib -r \
     "$runtime/fs_client.c" "$runtime/fs_buffer_client.c" "$runtime/adapter_buffer.c" "$runtime/fs_wire.c" "$runtime/fd_client.c" "$runtime/interception_entry.S" "$runtime/guest_copy.S" \
-    "$runtime/event_wait.c" "$runtime/raw.c" "$runtime/raw.S" \
+    "$runtime/event_wait.c" "$runtime/raw.c" "$runtime/freestanding_memory.c" "$runtime/raw.S" \
     -o "$work/fs-client-freestanding.o"
 if [ -n "$(llvm-nm -u "$work/fs-client-freestanding.o")" ]; then
     printf 'Filesystem RPC client has unresolved runtime dependencies\n' >&2
