@@ -23,7 +23,15 @@ work without any privileged service or managed Desktop.
 [Support bot](https://t.me/MagicDeskSupportBot)
 
 This README describes the selected branch. The stable APK may not include every
-feature below; its release notes describe that version.
+feature below; use its release notes for that version and the development APK
+to try unreleased changes. See [downloads and channels](#downloads).
+
+[Desktop](#native-android-desktop) |
+[Terminals and tools](#tools-without-desktop) |
+[Linux and Shroot](#linux-applications) |
+[Displays](#displays-and-portable-workspaces) |
+[Setup](#requirements-and-setup) |
+[Support](#community-and-support)
 
 [Watch the demo (1080p60)](https://youtu.be/zAHU_0M1ShU): Android and Linux apps
 running locally on a REDMAGIC phone over HDMI, including Freeciv from
@@ -38,7 +46,8 @@ Ubuntu/PRoot and a full Xfce desktop.
 - **Android and Linux together:** native Android tasks, individual X11/Wayland
   applications, whole Linux desktops and terminals share the workspace.
 - **Tools without Desktop:** open Files, Start, terminals and Linux applications
-  as ordinary Android windows without acquiring HOME or provisioning Desktop.
+  as ordinary Android windows without replacing your launcher or setting up
+  managed Desktop.
 - **Shared content:** use a real Desktop folder, clipboard, drag and drop,
   Android sharing and MIME-aware command launchers.
 - **Customization:** per-app scale, native JSON themes, configurable panels,
@@ -171,11 +180,11 @@ compatibility still depends on its display and input policy.
 
 ### Installed Apps In Start
 
-Enable Termux external commands, grant MagicDesk `RUN_COMMAND`, and install
-`xkeyboard-config` plus your graphical applications. Start discovers installed
-`.desktop` files; no manual shortcut is needed when a package supplies one.
-Shroot entries are discovered from registered environments. Use **Refresh**
-after installing packages.
+Start discovers installed `.desktop` files; no manual shortcut is needed when
+a package supplies one. Shroot entries come from registered environments.
+For Termux applications, enable Termux external commands, grant MagicDesk
+`RUN_COMMAND`, and install `xkeyboard-config` plus your graphical applications.
+Use **Refresh** after installing packages.
 
 Choose the destination and window mode as for Android applications. Launching an
 existing entry returns to its window; **New window** requests another instance,
@@ -194,7 +203,17 @@ See [desktop entries](docs/desktop-entries.md), [audio](docs/audio.md),
 
 **Linux graphics** manages retained sessions and their viewers. X11 hosts a
 window manager and screen; Wayland hosts a nested compositor. Closing a desktop
-viewer retains the Linux session; **Stop** ends it.
+viewer retains the Linux session; **Stop** ends it. When a Linux desktop lives on
+a virtual display, return through its display viewer in Android Recents rather
+than a duplicate internal graphics window. Retained sessions are not saved
+across MagicDesk process death or a phone reboot.
+
+For a whole Linux desktop outside managed Desktop, select its display with
+**Control input**. With MagicDesk's Accessibility key filter enabled, physical
+keyboard chords such as **Alt+Tab**, **Alt+F4** and **Super/Win** go to Linux.
+**Ctrl+Alt+Tab** remains the host display switch; power and volume remain Android
+controls. Individual Linux windows inside managed Desktop keep MagicDesk's
+window shortcuts.
 
 **New command app** can create application, terminal or desktop launchers for
 Termux/PRoot, Shroot, or an explicitly prepared root chroot. Custom entry scripts
@@ -217,8 +236,9 @@ Verified scenarios include:
 | --- | --- |
 | Distributions | glibc/musl, package managers, independent environments, OCI layers and copy-on-write storage |
 | Services | systemd as guest PID 1, user managers, socket/timer activation, OpenRC and runit lifecycle |
-| Containers | Real Docker Engine and Podman, overlay storage, supported nftables bridge/NAT, TCP/UDP publication and peers |
+| Containers | Docker Engine and Podman, overlay storage, supported nftables bridge/NAT, IPv4/IPv6, TCP/UDP publication and peers |
 | Application sandboxes | Stock Chromium and Bubblewrap workflows with their filters retained, not `--no-sandbox` |
+| Packaged applications | Selected Flatpak and Snap browser workflows, FUSE-backed document portals; Snap runs with reduced confinement, not strict AppArmor isolation |
 | Filesystem restrictions | Supported Landlock ABI 1 policies, including pacman's filesystem sandbox |
 | Development | Compilers, GDB/LLDB/gdbserver, strace and graphical editors |
 
@@ -228,38 +248,71 @@ not a guarantee that every service or package works. Docker and Podman have
 Logical resource limits remain subject to Android's physical ceilings.
 
 Shroot's default lazy SVC entry accelerates eligible calls in unmodified ARM64
-programs, including stock libc and Go. **No libc compilation, loader replacement
-or extra container layer is needed.** Shroot Base handles unsupported sites and
+programs, including stock glibc, musl and Go binaries, without changing their
+files. **No libc compilation, loader replacement or extra container layer is
+needed.** Shroot Base is the seccomp/ptrace fallback for unsupported sites and
 application-filtered execution, and can be selected explicitly for diagnosis.
-See [acceleration](docs/shroot.md#syscall-acceleration).
+See [acceleration](docs/shroot.md#syscall-acceleration) and the
+[Alpine chroot/PRoot/Shroot comparison](docs/shroot-benchmarks.md), including
+SQLite compilation and the workloads where Shroot still trails PRoot.
 
 The minimum kernel is **Linux 5.15**, with actual capability checks under the
 selected executor. Failure leaves independent MagicDesk tools available.
 
-To install Linux, run in MagicDesk's **Shell** console:
+**Shroot is experimental, not a security boundary for untrusted code.** Guest
+permissions, mount policies, supported Landlock rules and process/IPC separation
+enforce real restrictions, and application seccomp filters remain in the kernel.
+Unadapted calls and inherited descriptors retain host authority; logical cgroups
+do not enforce native CPU, memory or device limits. Snap's reduced-confinement
+mode is not AppArmor enforcement. Use trusted images and programs.
+See [coverage and limits](docs/shroot.md#coverage-and-limits).
+
+#### Install Linux
+
+Run in MagicDesk's **Shell** console. Use `main` with the stable APK, or change
+`channel` to `develop` with the development APK:
 
 ```sh
-magicdesk download https://raw.githubusercontent.com/mekhontsev/magicdesk/main/scripts/install_linux.sh ~/install_linux.sh
+channel=main
+magicdesk download "https://raw.githubusercontent.com/mekhontsev/magicdesk/$channel/scripts/install_linux.sh" ~/install_linux.sh
 sh ~/install_linux.sh
 ```
 
-Recipes cover Debian, Ubuntu, Alpine, Fedora, Arch Linux ARM, openSUSE, openKylin,
-Deepin, Manjaro ARM, Void, Armtix, NixOS and SteamOS ARM64. Choose an environment,
-applications or a desktop, and optional graphics preparation. Compiler
-parallelism defaults to four jobs. Source builds and compatibility vary by
-recipe; NixOS Plasma/Turnip acceptance is still pending.
+For an older APK, use its release tag as `channel` to obtain the matching script.
+Download before executing so the installer can read your answers; do not pipe
+the download into `sh`.
+
+The current branch's recipes cover Debian, Ubuntu, Alpine, Fedora, Arch Linux
+ARM, openSUSE, openKylin, Deepin, Manjaro ARM, Void, Armtix, NixOS and SteamOS
+ARM64. Choose an environment name, applications or a desktop, and optional
+graphics preparation. Compiler parallelism defaults to four jobs. Source builds
+and compatibility vary by recipe.
+
+NixOS prepares and activates a NixOS system generation. Its Plasma X11 and Wayland
+launchers have HDMI checks with Zink/Turnip, keyboard input and close/reopen;
+broader application coverage remains incomplete. SteamOS uses Valve's ARM64
+recovery userspace, not a guest kernel; this does not imply compatibility with
+every Steam game. See the [recipes and image sources](docs/shroot.md#linux-installer)
+and [per-distribution evidence](native/guest-exec-lab/validation-matrix.md).
 
 After installation, use **Apps** for individual programs and installed desktop
 entries, or **Terminal sessions > New session > Shroot environments** for a
 login shell. You can also run `shroot login NAME`. No managed Desktop or repeated
 installation is required. See [installation and resume](docs/shroot.md#linux-installer).
 
-**Shroot is experimental, not a security boundary for untrusted code.** Guest
-permissions, mount policies, supported Landlock rules and process/IPC separation
-enforce real restrictions, and application seccomp filters remain in the kernel.
-Unadapted calls and inherited descriptors retain host authority; permissive
-cgroups do not enforce native CPU, memory or device limits. Use trusted images.
-See [coverage and limits](docs/shroot.md#coverage-and-limits).
+### Linux Graphics Acceleration
+
+The optional Turnip recipe builds Mesa inside the Linux environment for
+supported Adreno GPUs with accessible KGSL. Zink supplies OpenGL over Vulkan;
+the embedded X11/Wayland host presents the result through Android. This does
+not replace Android's graphics driver or require managed Desktop.
+
+Software rendering remains available. GPU admission uses capability probes,
+not just the GPU name or kernel version. An APK update does not rebuild an
+installed environment's Mesa: use the installer's resume option when updating
+that stack. Hardware composition, video decoding and game compatibility are
+separate capabilities. See [GPU setup](docs/shroot.md#graphics-drivers) and
+[graphics integration](docs/graphics.md).
 
 ### Linux Shell Components
 
@@ -326,8 +379,9 @@ Parking is not persistence across app death. Do not use **Close desktop**,
 
 **Show another display...** shows a retained source on an output.
 **Display Viewer** can also open as an ordinary application window.
-During Desktop, **Ctrl+Alt+Tab** switches picture and input together without
-moving applications. Ordinary viewer opening does not claim input.
+With the Accessibility key filter active, **Ctrl+Alt+Tab** switches picture and
+input together without moving applications. Ordinary viewer opening does not
+claim input.
 
 | Action | What remains |
 | --- | --- |
@@ -359,7 +413,8 @@ See [automation](docs/automation.md) and [external commands](docs/run-command.md
   numbered APKs and their version-specific notes.
 - [Development APK](https://github.com/mekhontsev/magicdesk/releases/download/development/MagicDesk-development.apk):
   rolling `develop` build published after required CI passes. It uses the normal
-  package/signing identity, not MagicDeskTest, and can be less stable.
+  package/signing identity, not MagicDeskTest, and can be less stable. It updates
+  the installed MagicDesk rather than installing a separate application.
 
 Development and external PRs target `develop`; verified releases use `main`.
 See [contribution workflow](CONTRIBUTING.md#branches-and-releases).
@@ -393,7 +448,8 @@ The optional phone touchpad supplies a relative mouse; the normal Android IME
 handles text. **Show keyboard on app display** requests the IME beside the app,
 subject to firmware and keyboard support.
 
-Desktop shortcuts use a key-only Accessibility service during the session.
+Desktop shortcuts and independent Linux-desktop key forwarding use the shared
+key-only Accessibility service while their selected input target is active.
 Android 14 external mouse routing needs a usable input viewport and matching
 system pointer target; a visible cast display alone does not prove input support.
 
@@ -423,7 +479,8 @@ unrelated tools.
 | `Win+/` | All shortcuts |
 
 Pointer equivalents are available in taskbar/window context menus and Quick
-controls.
+controls. These are managed Desktop bindings; an independently controlled
+[whole Linux desktop](#whole-linux-desktops-too) receives its own window shortcuts.
 
 ## Security
 
