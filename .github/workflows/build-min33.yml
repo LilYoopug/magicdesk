@@ -63,14 +63,17 @@ jobs:
           "$RUNNER_TEMP/wayland-tools/bin/pip" install meson==1.9.1
           printf '%s\n' "$RUNNER_TEMP/wayland-tools/bin" >> "$GITHUB_PATH"
 
-      - name: Provide SDK 37 and NDK 27
+      - name: Confirm SDK 37 and NDK 27 are present
         shell: bash
         run: |
-          sdkmanager="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$sdkmanager" --licenses > /dev/null 2>&1 || true
-          "$sdkmanager" "platforms;android-37" "build-tools;37.0.0" "ndk;27.3.13750724"
+          # The ubuntu-24.04 image already ships platform 37, build-tools 37.0.0 and
+          # NDK 27.3.13750724; upstream CI relies on the same image. sdkmanager cannot
+          # re-resolve platform 37 from the default channel, so verify instead.
           test -f "$ANDROID_SDK_ROOT/platforms/android-37/android.jar"
-          test -x "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang"
+          test -x "$ANDROID_SDK_ROOT/build-tools/37.0.0/aapt2"
+          test -d "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+          ls "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/" \
+            | grep -E "^aarch64-linux-android3[0-9]-clang$" | sort
 
       - name: Audit what API 33 cannot reach (informational)
         continue-on-error: true
