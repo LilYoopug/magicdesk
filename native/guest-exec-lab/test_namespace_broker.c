@@ -138,6 +138,60 @@ static void unexpected_delegate(const struct seccomp_notif *request) {
     fprintf(stderr,"unexpected broker fallback: nr=%d pid=%u\n",request->data.nr,request->pid);
     assert(0);
 }
+static void unexpected_completion(pid_t pid,struct md_broker_completion *result) {
+    fprintf(stderr,"unexpected open recovery: pid=%d error=%d\n",pid,result->result.error);
+    assert(0);
+}
+static void failed_opens(const char *store) {
+    unsigned before=descriptors();
+    int sockets[2]; assert(!socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,sockets));
+    pid_t parent=getpid(),child=fork(); assert(child>=0);
+    if (!child) {
+        assert(!prctl(PR_SET_PDEATHSIG,SIGKILL) && getppid()==parent);
+        alarm(25); close(sockets[0]);
+        int fd=listener(SYS_openat); send_listener(sockets[1],fd); close(fd);
+        char byte;
+        /* EVENT_WAIT: parent publishes the broker before issuing real opens. */
+        assert(read(sockets[1],&byte,1)==1 && byte=='r');
+        for (unsigned i=0;i<8;++i) {
+            assert(open("/missing",O_RDONLY|O_CLOEXEC)==-1 && errno==ENOENT);
+            assert(open("/entries/entry-000/child",O_RDONLY)==-1 && errno==ENOTDIR);
+            assert(open("/entries",O_WRONLY)==-1 && errno==EISDIR);
+            assert(open("/entries/entry-000",O_CREAT|O_EXCL|O_RDWR,0600)==-1 && errno==EEXIST);
+        }
+        assert(write(sockets[1],"d",1)==1); _exit(0);
+    }
+    close(sockets[1]); int fd=receive_listener(sockets[0]);
+    struct md_task_registry *tasks=md_task_registry_create(); assert(tasks);
+    struct md_fs_worker *worker=NULL;
+    char endpoint[80]; snprintf(endpoint,sizeof(endpoint),"md-open-errors-%d-%d",parent,child);
+    assert(!md_fs_worker_start(store,endpoint,NULL,tasks,NULL,NULL,&worker));
+    struct md_task_resources resources={.fs=md_domain_new(),.files=md_fd_origins_new(),
+        .mounts=md_fs_worker_mounts(worker)};
+    assert(resources.fs && resources.files);
+    struct md_identity id=md_identity_new(0,0);
+    assert(!md_task_registry_publish(tasks,child,child,&id,&resources));
+    struct md_namespace_broker *broker=md_broker_create(worker,1,unexpected_delegate); assert(broker);
+    md_broker_completion_handler(broker,unexpected_completion);
+    assert(!md_broker_task(broker,child,MD_BROKER_READ|MD_BROKER_OPEN,0,0,NULL));
+    md_broker_listen(broker,fd);
+    assert(write(sockets[0],"r",1)==1);
+    for (;;) {
+        struct pollfd events[]={{sockets[0],POLLIN,0},{md_fs_worker_fd(worker),POLLIN,0}};
+        /* EVENT_WAIT: direct replies complete without a supervisor recovery. */
+        assert(poll(events,2,5000)>0);
+        if (events[1].revents) assert(!md_fs_worker_dispatch(worker));
+        if (events[0].revents) break;
+    }
+    char byte; assert(read(sockets[0],&byte,1)==1 && byte=='d');
+    int status; assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    assert(!md_fs_worker_error(worker)); md_broker_forget(broker,child);
+    assert(!md_fs_worker_stop(worker)); md_broker_destroy(broker);
+    md_task_registry_destroy(tasks); md_identity_release(&id);
+    md_domain_release(resources.fs); md_fd_origins_release(resources.files);
+    close(fd); close(sockets[0]); assert(descriptors()==before);
+    puts("PASS failed open replies: ENOENT/ENOTDIR/EISDIR/EEXIST, no ptrace or task recovery, no FD leak");
+}
 static void run(const char *store,const char *native,int directory,int cancel) {
     unsigned before=descriptors();
     assert(lseek(directory,0,SEEK_SET)==0);
@@ -391,6 +445,7 @@ static void managed_proc_reads(const char *store) {
     md_domain_release(resources.fs); md_identity_release(&id);
     md_fd_object_release(&typed); assert(native_provider_released==1);
     md_inode_store_close(s);
+    failed_opens(store);
     assert(descriptors()==before);
     puts("PASS managed proc observations: socket identity, descriptor reuse, credentials, busy table and typed provider fallback, no FD leak");
 }

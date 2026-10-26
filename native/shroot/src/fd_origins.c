@@ -197,6 +197,14 @@ int md_fd_origins_native_regular(const struct md_fd_order *turn,int fd) {
     struct md_fd_native native;
     return md_fd_origins_native(turn,fd,&native) && native.kind==S_IFREG;
 }
+int md_fd_origins_close_untracked(const struct md_fd_order *turn,int number) {
+    if (!md_fd_origins_exclusive(turn)) return 0;
+    struct md_fd_origins *t=turn->table;
+    pthread_mutex_lock(&t->lock);
+    int empty=number<0 || !t->buckets || !*slot(t,number);
+    if (empty) changed(t);
+    pthread_mutex_unlock(&t->lock); return empty;
+}
 int md_fd_origins_native_poll(const struct md_fd_order *turn) {
     if (!turn || !turn->table || md_fd_order_state(turn)!=MD_RESOURCE_ORDER_RUNNING) return 0;
     struct md_fd_origins *t=turn->table;

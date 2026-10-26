@@ -98,6 +98,16 @@ void md_test_notification_result(void) {
     assert(md_notification_result_offer(&result,listener,6,NULL)==MD_NOTIFICATION_WAIT);
     assert(!md_notification_result_clear(&result) && !md_fd_order_complete(&busy));
     assert(installs==3 && sends==2 && !released && fcntl(source,F_GETFD)>=0);
+    assert(!md_notification_result_status(&result,&call,-ENOENT));
+    expired=1;
+    assert(md_notification_result_offer(&result,listener,7,NULL)==MD_NOTIFICATION_STATUS);
+    assert(md_notification_result_reply(&result)==MD_NOTIFICATION_CANCELLED);
+    assert(result.active && !result.pending && !result.delivered && result.value==-ENOENT);
+    expired=0;
+    assert(md_notification_result_offer(&result,listener,8,NULL)==MD_NOTIFICATION_STATUS);
+    assert(md_notification_result_reply(&result)==MD_NOTIFICATION_DELIVERED);
+    assert(result.value==-ENOENT && installs==3 && sends==4);
+    assert(!md_notification_result_clear(&result));
     md_fd_object_release(&origin); assert(released==1);
     md_fd_origins_release(files);
     assert(!close(listener) && !close(source)); listener=-1;

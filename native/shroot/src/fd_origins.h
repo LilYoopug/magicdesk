@@ -41,7 +41,8 @@ enum md_resource_order_state md_fd_order_state(const struct md_fd_order *);
 int md_fd_order_start(struct md_fd_order *);
 /* Cancel returns 1 if kernel completion is still required, otherwise 0.
  * A newly ready successor wakes its owner without exposing its request pointer.
- * Complete is called only after the kernel result AND its metadata publication. */
+ * Complete follows the kernel result AND its metadata publication, except an
+ * exclusive metadata-neutral operation admitted for unobserved native execution. */
 int md_fd_order_cancel(struct md_fd_order *);
 int md_fd_order_complete(struct md_fd_order *);
 
@@ -116,6 +117,10 @@ int md_fd_origins_has_loans(struct md_fd_origins *);
 /* Supervisor task ownership, queried under a running table turn. A sole
  * sleeping owner cannot create another CLONE_FILES holder or replace a slot. */
 int md_fd_origins_exclusive(const struct md_fd_order *);
+/* Admit an unobserved native close only in an exclusive table with no slot
+ * metadata. Invalidates optimistic discovery; does not claim kernel success
+ * or remove an origin. Filters and the kernel retain the actual result. */
+int md_fd_origins_close_untracked(const struct md_fd_order *,int number);
 /* Borrow value-only native authority under a RUNNING turn. Unknown,
  * provisional and uncertain slots, including typed objects with path origins,
  * are not native authority. Does not retain an object or capture a data OFD.

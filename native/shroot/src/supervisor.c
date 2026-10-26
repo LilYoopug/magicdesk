@@ -168,6 +168,7 @@ struct interception_statistics {
     uint64_t notification_rebounds, notification_readmissions_retired;
     uint64_t direct_status, direct_open, direct_fallback, direct_admit, direct_retry, compact_close, native_io;
     uint64_t captured_writes, captured_receives, entry_receives;
+    uint64_t untracked_close, unchanged_fd_flags;
     struct md_cost rpc, event_collect, event_sleep;
     struct { uint64_t trace, notification; } calls[512];
 };
@@ -3255,6 +3256,20 @@ static void fd_start(struct thread *t) {
 }
 static void fd_native_start(struct thread *t) {
     struct user_pt_regs *r=&t->fd_registers;
+    if (!t->fd_job && !t->fd_cwd && !t->fd_capture && t->phase==IDLE
+            && r->regs[8]==SYS_fcntl && (unsigned)r->regs[1]==F_SETFD
+            && !t->debug_options && !t->debug_call_active && !t->debug_step_call
+            && !md_debugger_traced(debugger,t->pid) && md_fd_origins_exclusive(&t->fd_order)) {
+        struct md_fd_native native;
+        if (md_fd_origins_native(&t->fd_order,(int)r->regs[0],&native)
+                && (r->regs[2]&FD_CLOEXEC)==native.flags) {
+            /* Kernel denial or success leaves the same metadata. No peer can
+             * change this private table before the admitted call executes. */
+            CHECK(!md_fd_order_complete(&t->fd_order));
+            if (statistics) ++statistics->unchanged_fd_flags;
+            resume(t->pid,0); return;
+        }
+    }
     int admission=0;
     if (md_clone_call(r->regs[8]) && !t->process_reservation) {
         admission=md_process_member_fork(t->resources.process,&t->identity,t->cloning,&t->process_reservation);
@@ -3452,6 +3467,11 @@ static int fd_close_compact(struct thread *t,unsigned long cookie,const struct p
     CHECK(ready>=0);
     if (!ready) { CHECK(!md_fd_order_cancel(&t->fd_order)); return 0; }
     CHECK(!md_fd_order_start(&t->fd_order));
+    if (md_fd_origins_close_untracked(&t->fd_order,number)) {
+        CHECK(!md_fd_order_complete(&t->fd_order));
+        if (statistics) { ++statistics->untracked_close; ++statistics->calls[SYS_close].trace; }
+        resume(t->pid,0); return 1;
+    }
     /* No register rewrite or helper is needed. Keep the same table turn until
      * the actual close result, including EBADF and late writeback errors. */
     t->fd_registers=(struct user_pt_regs){0};
@@ -10218,6 +10238,8 @@ static void report_statistics(void) {
             (unsigned long long)statistics->event_sleep.calls,(unsigned long long)statistics->event_sleep.nanoseconds);
         fprintf(stderr,"MD_QUIESCENCE interrupts=%llu memoryRepairs=%llu\n",
             (unsigned long long)statistics->quiesce_interrupts,(unsigned long long)statistics->memory_repairs);
+        fprintf(stderr,"MD_FD_NATIVE untrackedClose=%llu unchangedFlags=%llu\n",
+            (unsigned long long)statistics->untracked_close,(unsigned long long)statistics->unchanged_fd_flags);
         fprintf(stderr,"MD_ENTRY_FENCE transitions=%llu drains=%llu\n",
             (unsigned long long)statistics->entry_fence_transitions,(unsigned long long)statistics->entry_fence_drains);
         fprintf(stderr,"MD_NOTIFICATION rebounds=%llu readmissionsRetired=%llu\n",

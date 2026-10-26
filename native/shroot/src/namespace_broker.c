@@ -758,20 +758,22 @@ static int reply(struct operation *op, const void *data) {
     }
     struct seccomp_notif_resp response = {.id = op->notification.id, .error = op->result.error};
     if (op->owned_open && op->executed) {
-        if (op->result.error || op->result.fd<0) {
-            recover(op); return 0;
-        }
-        if (!op->result.error && op->result.fd>=0 && (op->result.open_completion.kind!=MD_OPEN_READY
+        if (!op->result.error && (op->result.fd<0 || op->result.open_completion.kind!=MD_OPEN_READY
                 || md_fd_object_selectors(op->output_object))) {
             recover(op); return 0;
         }
-        int error=md_notification_result_fd(&op->completion,&op->notification.data,op->context.task.files,
+        /* An executed failure is a retained result too. Deliver it without
+         * entering the task; cancellation still transfers the exact outcome. */
+        int error=op->result.error ? md_notification_result_status(&op->completion,
+                &op->notification.data,op->result.error)
+            : md_notification_result_fd(&op->completion,&op->notification.data,op->context.task.files,
                 op->result.fd,op->output_object ? op->output_object : md_fs_anchor_object(op->output_origin),
                 op->request.flags&O_CLOEXEC);
         if (error) return error;
         int result=md_notification_result_offer(&op->completion,op->listener,op->notification.id,op->owner->wakeup);
+        if (result==MD_NOTIFICATION_STATUS) result=md_notification_result_reply(&op->completion);
         result_observed(op->owner,result);
-        if (result==MD_NOTIFICATION_CANCELLED || result==MD_NOTIFICATION_STATUS) { recover(op); return 0; }
+        if (result==MD_NOTIFICATION_CANCELLED) { recover(op); return 0; }
         if (result==MD_NOTIFICATION_WAIT) return 2;
         if (result==MD_NOTIFICATION_DELIVERED) op->result.error=op->completion.value<0 ? (int)op->completion.value : 0;
         return result<0 ? result : 1;
@@ -1241,11 +1243,12 @@ static int progress(struct md_namespace_broker *b,struct md_execution_window *wi
         if (op->native_plan==2 || op->native_plan==3) { at=&op->waiting; continue; }
         if (op->completion.active) {
             int done=md_notification_result_progress(&op->completion);
+            if (done==MD_NOTIFICATION_STATUS) done=md_notification_result_reply(&op->completion);
             result_observed(b,done);
             if (done<0) return done;
             if (done==MD_NOTIFICATION_WAIT) { at=&op->waiting; continue; }
             *at=op->waiting; op->waiting=NULL;
-            if (done==MD_NOTIFICATION_CANCELLED || done==MD_NOTIFICATION_STATUS) {
+            if (done==MD_NOTIFICATION_CANCELLED) {
                 recover(op); md_fs_worker_publish(b->worker,&op->work);
             } else {
                 int error=recycle(b,op); if (error) return error;

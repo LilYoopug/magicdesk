@@ -235,8 +235,10 @@ static void native_io_proofs(struct md_mount_namespace *view,struct md_fs_anchor
     put(files,8,file,0); put(files,9,directory,0);
     assert(!md_fd_origins_native_poll(&turn));
     assert(!md_fd_origins_native_regular(&turn,8));
+    assert(!md_fd_origins_close_untracked(&turn,127));
     assert(md_fd_order_begin(files,&turn,NULL)==1);
     assert(!md_fd_origins_native_regular(&turn,8));
+    assert(!md_fd_origins_close_untracked(&turn,127));
     assert(!md_fd_order_start(&turn));
     assert(md_fd_origins_native_poll(&turn));
     assert(md_fd_origins_native_poll_vector(&turn,vector,4));
@@ -249,6 +251,14 @@ static void native_io_proofs(struct md_mount_namespace *view,struct md_fs_anchor
     assert(!md_fd_origins_native_regular(&turn,9));
     assert(!md_fd_origins_native_regular(&turn,10));
     assert(!md_fd_origins_native_regular(&turn,-1));
+    struct md_fd_observation before_close;
+    assert(!md_fd_origins_observe(files,127,&before_close));
+    assert(!md_fd_origins_close_untracked(&turn,8));
+    assert(!md_fd_origins_close_untracked(&turn,9));
+    assert(!md_fd_origins_validate(&turn,before_close.generation));
+    assert(md_fd_origins_close_untracked(&turn,127));
+    assert(md_fd_origins_validate(&turn,before_close.generation)==-EAGAIN);
+    assert(md_fd_origins_close_untracked(&turn,-1));
     allocation_budget=-1;
     static const struct md_fd_object_type type={.destroy=borrowed_file_destroy,.origin=borrowed_file_origin};
     struct borrowed_file typed={.origin=file}; md_fd_object_init(&typed.object,&type);
@@ -257,19 +267,25 @@ static void native_io_proofs(struct md_mount_namespace *view,struct md_fs_anchor
     md_fd_origins_finish(&update,10);
     assert(!md_fd_origins_native(&turn,10,&native));
     assert(!md_fd_origins_native_regular(&turn,10));
+    assert(!md_fd_origins_close_untracked(&turn,10));
     struct md_fd_loan *loan=md_fd_loan_new(files); assert(loan);
     assert(!md_fd_origins_prepare(files,file,0,&update));
     assert(!md_fd_origins_prepare_custody(&update,loan,&turn));
     md_fd_origins_finish(&update,11);
     assert(!md_fd_origins_native(&turn,11,&native));
     assert(!md_fd_origins_native_regular(&turn,11));
+    assert(!md_fd_origins_close_untracked(&turn,11));
+    assert(!md_fd_origins_abandon_range(files,11,11));
+    assert(!md_fd_origins_close_untracked(&turn,11));
     assert(!md_fd_origins_abandon_range(files,8,8));
     assert(!md_fd_origins_native(&turn,8,&native));
     assert(!md_fd_origins_native_regular(&turn,8));
     put(files,8,file,FD_CLOEXEC); assert(md_fd_origins_native_regular(&turn,8));
     assert(md_fd_origins_native(&turn,8,&native) && native.flags==FD_CLOEXEC);
     struct md_fd_origins *shared=md_fd_origins_fork(files,1); assert(shared==files);
-    assert(!md_fd_origins_exclusive(&turn)); md_fd_origins_release(shared);
+    assert(!md_fd_origins_exclusive(&turn));
+    assert(!md_fd_origins_close_untracked(&turn,127));
+    md_fd_origins_release(shared);
     assert(md_fd_origins_exclusive(&turn));
     /* Count possible readiness, not its current callback result. Dynamic
      * activation must not turn a previously admitted table into a bypass. */

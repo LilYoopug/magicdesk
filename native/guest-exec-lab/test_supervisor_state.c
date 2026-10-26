@@ -4,6 +4,7 @@
 #include "../shroot/src/supervisor.c"
 #undef main
 #include <assert.h>
+#include "fs_mount_internal.h"
 
 static int accounting_enabled, accounting_requested, adoption_error, adoption_calls;
 static pid_t wait_result=123;
@@ -289,6 +290,64 @@ static void duplicate_retirement_order(void) {
 static long no_trace(int request,pid_t pid,void *address,void *data) {
     (void)request; (void)pid; (void)address; (void)data;
     assert(!"deferring a repair must not stop unrelated tasks"); return -1;
+}
+static int fd_expected_resume, fd_resume_calls, fd_test_operation, fd_test_mode;
+static long fd_resume_trace(int request,pid_t pid,void *address,void *data) {
+    if (request!=fd_expected_resume || pid!=123 || address || data)
+        fprintf(stderr,"FD resume op=%d mode=%d expected=%d actual=%d pid=%d address=%p data=%p\n",
+            fd_test_operation,fd_test_mode,fd_expected_resume,request,pid,address,data);
+    assert(request==fd_expected_resume && pid==123 && !address && !data);
+    ++fd_resume_calls; return 0;
+}
+static void fd_native_retirement(void) {
+    struct md_filesystem fs={0};
+    struct md_fs_anchor *origin=NULL;
+    struct md_fs_output output={.origin=&origin};
+    struct md_fs_result result={.fd=memfd_create("fd-retirement",MFD_CLOEXEC)};
+    assert(result.fd>=0);
+    md_view_capture(&fs,NULL,NULL,&result,&output);
+    assert(!result.error && origin); close(result.fd);
+    for (unsigned operation=0;operation<2;++operation) for (unsigned mode=0;mode<6;++mode) {
+        struct thread t={.pid=123,.phase=IDLE};
+        struct md_fd_origins *files=md_fd_origins_new(),*peer=NULL; assert(files);
+        t.resources.files=files;
+        int tracked=operation || (mode>=2 && mode!=5);
+        if (tracked) {
+            struct md_fd_origin_update update;
+            assert(!md_fd_origins_prepare(files,origin,FD_CLOEXEC,&update));
+            md_fd_origins_finish(&update,5);
+        }
+        if (mode==1) peer=md_fd_origins_fork(files,1);
+        if (mode==3) assert(!md_fd_origins_abandon_range(files,5,5));
+        if (mode==4 && operation) t.debug_options=PTRACE_O_TRACEEXEC;
+        if (mode==5) t.application_filter=1;
+        /* Abandoning an ordinary origin removes it; it is not an uncertain
+         * infrastructure slot. Close remains metadata-free, flags do not. */
+        int direct=mode==0 || mode==5 || (!operation && mode==3);
+        fd_test_operation=operation; fd_test_mode=mode;
+        fd_expected_resume=direct ? PTRACE_CONT : PTRACE_SYSCALL;
+        fd_resume_calls=0; checkpoints.trace=fd_resume_trace;
+        thread_index[t.pid%THREAD_BUCKETS]=&t;
+        if (operation) {
+            t.fd_registers.regs[8]=SYS_fcntl; t.fd_registers.regs[0]=5;
+            t.fd_registers.regs[1]=(UINT64_C(1)<<32)|F_SETFD;
+            t.fd_registers.regs[2]=mode==2 ? 0 : FD_CLOEXEC;
+            assert(md_fd_order_begin(files,&t.fd_order,NULL)==1 && !md_fd_order_start(&t.fd_order));
+            fd_native_start(&t);
+        } else {
+            struct ptrace_syscall_info info={.op=PTRACE_SYSCALL_INFO_SECCOMP,.arch=AUDIT_ARCH_AARCH64,
+                .seccomp={.nr=SYS_close,.args={5}}};
+            assert(fd_close_compact(&t,MD_INTERCEPT_FD,&info));
+        }
+        assert(fd_resume_calls==1 && !t.resume_lost && t.fd_running==!direct);
+        assert(!!t.fd_order.table==!direct);
+        if (!direct) fd_finish(&t,-EPERM);
+        checkpoints.trace=checkpoint_native_trace;
+        thread_index[t.pid%THREAD_BUCKETS]=NULL;
+        md_fd_origins_release(peer); md_fd_origins_release(files);
+    }
+    md_fs_anchor_release(origin);
+    puts("PASS native FD retirement: real syscall continuation, metadata-free close, shared/changed/debugged observation, filtered no-op and wide command");
 }
 static void entry_fence_ownership(void) {
     struct thread a={.pid=123,.entry_fence_waiting=1,.entry_fence_status=17},
@@ -898,6 +957,7 @@ int main(void) {
     receive_layouts();
     native_capture();
     duplicate_retirement_order();
+    fd_native_retirement();
     barrier_admission(); readiness_admission_order(); entry_fence_ownership(); control_deadlines(); pid_collection_waiters(); terminal_buffer_completion(); buffered_io_pressure(); prepared_input(); captured_writes(); repair_events(); repair_retirement(); quiescent_birth(); event_accounting();
     for (unsigned mode=0;mode<4;++mode) {
         completed_open(mode,SIGUSR1); completed_open(mode,SIGRTMAX);
