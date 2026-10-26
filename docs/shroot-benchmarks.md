@@ -5,6 +5,104 @@ execution environments, not equivalent isolation or a universal speed ranking.
 Lower elapsed time is better; **chroot = 1.00x** in each row. Ratios are elapsed
 time relative to chroot, not speedups.
 
+## Base Exec Locality Study
+
+The next investigation targets a 2.5x improvement, not another small reduction
+in stop counts. The staged Base candidate has lazy SVC entry disabled and
+includes direct delivery of executed open errors and native completion of
+metadata-free closes/unchanged descriptor flags. These do not establish a
+general elapsed-time gain. The installed APK was not replaced.
+
+Five rotating measured rounds, plus one excluded warmup per mode, used the
+same stock ELF files and the same runtime binary across both CPU masks:
+
+| 128 fork/exec/wait cycles | Base, CPU 0-1 | Base, CPU 0 | PRoot, CPU 0-1 | PRoot, CPU 0 |
+| --- | ---: | ---: | ---: | ---: |
+| Packaged `/bin/true` | 1,001.01 ms | 352.73 ms | 537.18 ms | 214.46 ms |
+| Minimal static fixture | 233.05 ms | 96.73 ms | 55.52 ms | 43.99 ms |
+
+The 2.84x change for Base's standard workload is a **placement experiment**,
+not an implemented code optimization or PRoot parity. On one CPU, Base remains
+1.64x slower than PRoot. The CPU 0-5 policy also ran at a higher envelope-weighted
+frequency in one-core runs (median 1,539 versus 972 MHz for Base `/bin/true`).
+Do not attribute the whole gain to cross-core synchronization or normalize the
+times using these policy-wide observations.
+
+A separate, gated direct-supervisor series kept the guest eligible for CPU 0-1
+while pinning only service threads to CPU 0. Medians were 1,046 ms unchanged,
+1,034 ms with the supervisor pinned, 1,007 ms with the worker pinned and
+1,084 ms with both pinned; pinning the entire tree measured 380 ms. Service-only
+pinning therefore does not reproduce the large gain. These samples are not
+substituted into the runner table above.
+
+The follow-up holds the guest at a pipe gate, places the existing supervisor,
+worker and guest separately, then releases the same 128-cycle workload. Five
+rotating rounds exclude one warmup per placement. CPU 0 and 1 share the same
+CPU 0-5 frequency policy:
+
+| Supervisor CPUs | Worker CPUs | Guest CPUs, inherited by children | Median |
+| --- | --- | --- | ---: |
+| 0-1 | 0-1 | 0-1 | 838.93 ms |
+| 0 | 0 | 0 | 349.22 ms |
+| 1 | 1 | 1 | 331.91 ms |
+| 0 | 0 | 1 | 936.37 ms |
+| 0 | 1 | 0 | 719.80 ms |
+| 1 | 0 | 0 | 1,044.12 ms |
+| 0-1 | 0-1 | 0 | 1,009.57 ms |
+
+A separate instrumented series uses 1,024 cycles, three rotating measured
+rounds and one warmup. Root `simpleperf stat` attaches only to the UID-2000
+test tree, including its future children; it does not elevate the workload or
+change governor/thermal settings. It starts before releasing the guest gate:
+
+| Placement | Elapsed | Instructions | CPU cycles | Cycles / active CPU time |
+| --- | ---: | ---: | ---: | ---: |
+| All on CPU 0 | 2.47 s | 7.36 billion | 5.90 billion | 2.65 GHz |
+| Services on CPU 0, guest on CPU 1 | 11.44 s | 7.74 billion | 6.32 billion | 0.75 GHz |
+| Supervisor/guest on CPU 0, worker on CPU 1 | 7.05 s | 7.47 billion | 5.98 billion | 1.02 GHz |
+
+The separated-guest case performs only 5.1% more instructions and 7.0% more
+CPU cycles, despite taking 4.63x as long in this instrumented series. It has
+essentially no migrations and fewer context switches (193,211 versus 261,208).
+The large change is therefore not explained by migration count, switch count
+or several times more executed work. The effective cycle rate and host
+frequency observations show a substantial DVFS contribution. Dividing the
+serial work between cores is consistent with reduced per-core utilization
+under this phone's WALT governor, but its exact utilization decision has not
+been traced. Summed task-clock is not a critical-path wait measurement; these
+figures do not isolate all wakeup latency or predict fixed-frequency timings.
+
+A syscall-only control compares 16,384 identical seccomp/ptrace stops without
+Shroot's filesystem or worker. Blocking `wait4` measured 174.80 ms on CPU 0
+and 386.55 ms on CPU 0-1; `signalfd`/`ppoll` measured 197.85 and 324.59 ms.
+Thus replacing polling with blocking `wait4` alone did **not** reproduce the
+desired improvement. The production multi-source wait remains unchanged.
+
+A final interleaved runner series checks whether the two-core benchmark mask
+alone creates the problem. Allowing all eight CPUs does not fix it:
+
+| Allowed CPUs | Base | PRoot |
+| --- | ---: | ---: |
+| 0-7 | 1,141.24 ms | 322.56 ms |
+| 0-1 | 978.23 ms | 552.16 ms |
+| 0 | 399.27 ms | 249.46 ms |
+
+Tracer-only strace inventories identify a different control path: Base made
+20,818 ptrace calls, 16,326 wait4 calls and 8,348 ppoll calls; PRoot made 17,979
+ptrace calls and 5,584 wait4 calls. These are instrumented inventories, not
+timings or evidence that every extra wait can be removed. Kernel CPU profiles
+include substantial ptrace, polling and notification work, not a single proven
+2.5x bottleneck in ELF parsing or SQLite.
+
+The next architectural experiment should reduce serial guest/supervisor/worker
+rendezvous, not merely replace the wait primitive or pin service threads.
+Application CPU parallelism, cancellation and fair GUI/event servicing must
+remain intact; no production affinity or frequency policy was added.
+The required production gain is still **unproven**. [Complete samples,
+frequencies, counters, reproducible harness sources, runtime hashes and
+inventories](benchmarks/alpine-base-exec-locality-2026-10-26.json)
+retain unfavorable samples as well as the one-core results.
+
 ## Exec Protocol Study
 
 The subsequent 2026-10-26 candidate consolidates exec preparation and image
