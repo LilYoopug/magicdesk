@@ -1,0 +1,102 @@
+name: Build APK (minSdk 33)
+
+# Fork-only workflow: builds MagicDesk for Android 13 (API 33).
+# Upstream requires Android 14 (API 34) and does not accept this configuration.
+# Nothing here is proposed upstream; it exists to produce an installable APK
+# for a device that the upstream floor excludes.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: min33-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/27.3.13750724
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Lower the Android floor to API 33
+        run: python3 patch-min-sdk.py
+
+      - name: Confirm the patched floor
+        shell: bash
+        run: |
+          grep -Hn "minSdk" app/build.gradle */build.gradle | sort
+          if grep -qE "minSdk\s*=?\s*34\b" app/build.gradle */build.gradle; then
+            echo "::error::a module still declares minSdk 34"
+            exit 1
+          fi
+
+      - name: Graphics native host tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bison flex ninja-build patch pkg-config \
+            libexpat1-dev python3-venv
+          python3 -m venv "$RUNNER_TEMP/wayland-tools"
+          "$RUNNER_TEMP/wayland-tools/bin/pip" install meson==1.9.1
+          printf '%s\n' "$RUNNER_TEMP/wayland-tools/bin" >> "$GITHUB_PATH"
+
+      - name: Provide SDK 37 and NDK 27
+        shell: bash
+        run: |
+          sdkmanager="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --licenses > /dev/null 2>&1 || true
+          "$sdkmanager" "platforms;android-37" "build-tools;37.0.0" "ndk;27.3.13750724"
+          test -f "$ANDROID_SDK_ROOT/platforms/android-37/android.jar"
+          test -x "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang"
+
+      - name: Audit what API 33 cannot reach (informational)
+        continue-on-error: true
+        shell: bash
+        run: python3 scripts/audit-android-api.py --min-sdk 33
+
+      - name: Unit tests
+        shell: bash
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
+
+      - name: Build debug APK
+        shell: bash
+        run: ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Report the built APK
+        shell: bash
+        run: |
+          apk=app/build/outputs/apk/debug/app-debug.apk
+          test -f "$apk"
+          "$ANDROID_SDK_ROOT/build-tools/37.0.0/aapt2" dump badging "$apk" \
+            | grep -E "^package:|^sdkVersion:|^targetSdkVersion:|^native-code:"
+          sha256sum "$apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: magicdesk-min33-debug
+          if-no-files-found: error
+          retention-days: 30
+          path: app/build/outputs/apk/debug/*.apk

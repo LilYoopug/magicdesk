@@ -104,6 +104,22 @@ public final class UiBackdropTest {
                 """);
     }
 
+    @Test public void absentBlurMethodOnOlderReleasesDoesNotEscape() throws Exception {
+        verify("""
+                android.os.Build.VERSION.SDK_INT = 33;
+                window.absent = true;
+                UiBackdrop.bind(window, paint);
+                view.attach();
+                UiBackdrop.refreshAll();
+                UiBackdrop.presented(window, false);
+                view.detach(); view.attach();
+                check(window.writes == 0, "blur attempted below API 34");
+                check(window.background == paint, "older release lost its fill");
+                UiBackdrop.unbind(window);
+                check(view.listeners.isEmpty(), "older release blocked cleanup");
+                """);
+    }
+
     @Test public void softwareRenderingAndDisabledStyleRequestNoBlur() throws Exception {
         verify("""
                 UiBackdrop.bind(window, paint);
@@ -173,6 +189,9 @@ public final class UiBackdropTest {
     }
 
     private static final String STUBS = """
+            static class android {
+                static class os { static class Build { static class VERSION { static int SDK_INT = 34; } } }
+            }
             static class Rect {
                 int left,top,right,bottom;
                 void set(int l,int t,int r,int b){left=l;top=t;right=r;bottom=b;}
@@ -253,7 +272,7 @@ public final class UiBackdropTest {
                 Object background;
                 int radius, writes, type;
                 Object callback = new Object();
-                boolean reject, fits = true;
+                boolean reject, absent, fits = true;
                 WindowManager.LayoutParams attributes;
                 View getDecorView() { return decor; }
                 void setCallback(Object value) { callback = value; }
@@ -268,6 +287,7 @@ public final class UiBackdropTest {
                     decor.setPadding(padding.left,padding.top,padding.right,padding.bottom);
                 }
                 void setBackgroundBlurRadius(int value) {
+                    if (absent) throw new NoSuchMethodError("Window.setBackgroundBlurRadius");
                     writes++;
                     if (reject) throw new UnsupportedOperationException();
                     radius = value;

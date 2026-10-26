@@ -70,8 +70,15 @@ final class UiBackdrop {
         }
 
         private void radius(int value) {
+            // Window.setBackgroundBlurRadius arrived in API 34. Below that the method is absent from the
+            // runtime class, so the failure is a LinkageError (NoSuchMethodError), not a RuntimeException.
+            // The SDK check keeps it off the caller entirely; the LinkageError arm covers an older
+            // runtime whose classes were built against a newer SDK.
+            if (android.os.Build.VERSION.SDK_INT < 34) return;
             try { window.setBackgroundBlurRadius(value); }
-            catch (RuntimeException unavailable) { /* Optional system effect leaves the translucent fill intact. */ }
+            catch (RuntimeException | LinkageError unavailable) {
+                /* Optional system effect leaves the translucent fill intact. */
+            }
         }
 
         @Override public void onViewAttachedToWindow(View ignored) { refresh(); }
