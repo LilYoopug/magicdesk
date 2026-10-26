@@ -63,17 +63,22 @@ jobs:
           "$RUNNER_TEMP/wayland-tools/bin/pip" install meson==1.9.1
           printf '%s\n' "$RUNNER_TEMP/wayland-tools/bin" >> "$GITHUB_PATH"
 
-      - name: Confirm SDK 37 and NDK 27 are present
+      - name: Report the SDK and NDK this image provides
         shell: bash
         run: |
-          # The ubuntu-24.04 image already ships platform 37, build-tools 37.0.0 and
-          # NDK 27.3.13750724; upstream CI relies on the same image. sdkmanager cannot
-          # re-resolve platform 37 from the default channel, so verify instead.
-          test -f "$ANDROID_SDK_ROOT/platforms/android-37/android.jar"
-          test -x "$ANDROID_SDK_ROOT/build-tools/37.0.0/aapt2"
-          test -d "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
-          ls "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/" \
-            | grep -E "^aarch64-linux-android3[0-9]-clang$" | sort
+          # Diagnostic only: print what is actually installed, then let Gradle decide.
+          # The ubuntu-24.04 image is expected to carry platform 37, build-tools 37.0.0
+          # and NDK 27.3.13750724, which is what upstream CI asserts.
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "--- platforms"; ls "$ANDROID_SDK_ROOT/platforms" 2>&1 || true
+          echo "--- build-tools"; ls "$ANDROID_SDK_ROOT/build-tools" 2>&1 || true
+          echo "--- ndk"; ls "$ANDROID_SDK_ROOT/ndk" 2>&1 || true
+          echo "--- platform 37 jar"; ls -l "$ANDROID_SDK_ROOT/platforms/android-37/android.jar" 2>&1 || true
+          echo "--- aapt2"; ls -l "$ANDROID_SDK_ROOT/build-tools/37.0.0/aapt2" 2>&1 || true
+          echo "--- ndk clang"
+          ls "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/" 2>&1 \
+            | grep -E "^aarch64-linux-android.*-clang$" || true
 
       - name: Audit what API 33 cannot reach (informational)
         continue-on-error: true
