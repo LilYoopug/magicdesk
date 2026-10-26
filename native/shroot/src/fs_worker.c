@@ -149,59 +149,53 @@ static int prepare_wait(void *context) {
     pthread_mutex_unlock(&w->lock);
     return prepare ? prepare(owner) : 0;
 }
-static void *run(void *context) {
-    struct md_fs_worker *w = context;
-    atomic_store(&w->tid,(int)syscall(SYS_gettid));
-    sigset_t mask;
-    sigemptyset(&mask); sigaddset(&mask, SIGPIPE);
-    pthread_sigmask(SIG_BLOCK, &mask, NULL);
-    struct md_inode_store *store = NULL;
-    struct md_image_catalogue *images = NULL;
-    int listener = -1, error = md_inode_store_open(w->store, 0, &store);
-    if (!error) error = md_inode_runtime_prepare(store);
-    if (!error && w->admit) error = md_image_catalogue_open(store, w->admit, &images);
-    struct md_fs_storage_cache storage={0};
-    struct md_filesystem fs = {.store=store, .storage=&storage, .images=images, .tasks=w->tasks, .exchanges=w->exchanges,
-        .cursors=w->cursors,.ipc_store=w->store};
-    if (!error) error = md_fs_mounts_open(&fs, w->attachments, w->attachment_count);
+/* Resource lifetime is independent of the thread entry and queue transport.
+ * Only the worker thread enters this runtime; close also accepts partial open. */
+struct worker_runtime {
+    struct md_fs_storage_cache storage;
+    struct md_filesystem fs;
+    struct md_input_session *input;
+    struct md_provider_tree *sysfs, *devices;
+    int listener;
+};
+static int runtime_open(struct md_fs_worker *w,struct worker_runtime *runtime) {
+    *runtime=(struct worker_runtime){.listener=-1};
+    struct md_filesystem *fs=&runtime->fs;
+    int error=md_inode_store_open(w->store,0,&fs->store);
+    if (!error) error=md_inode_runtime_prepare(fs->store);
+    if (!error && w->admit) error=md_image_catalogue_open(fs->store,w->admit,&fs->images);
+    fs->storage=&runtime->storage; fs->tasks=w->tasks; fs->exchanges=w->exchanges;
+    fs->cursors=w->cursors; fs->ipc_store=w->store;
+    if (!error) error = md_fs_mounts_open(fs, w->attachments, w->attachment_count);
     if (!error) {
-        error=md_network_resolver_prepare(&fs,w->network);
+        error=md_network_resolver_prepare(fs,w->network);
         if (error) fprintf(stderr,"Shroot resolver: %s; supply --dns IP or prepare /etc/resolv.conf\n",strerror(-error));
     }
     w->network=NULL;
-    struct md_input_session *input=NULL;
-    struct md_provider_tree *sysfs=NULL,*devices=NULL;
-    if (!error) md_fs_render_prepare(&fs);
-    if (!error) error=md_fs_sysfs_prepare(&fs,&sysfs);
-    if (!error) error=md_fs_devices_prepare(&fs,w->input && w->input->endpoint,&devices);
-    fs.devices=devices;
+    if (!error) md_fs_render_prepare(fs);
+    if (!error) error=md_fs_sysfs_prepare(fs,&runtime->sysfs);
+    if (!error) error=md_fs_devices_prepare(fs,w->input && w->input->endpoint,&runtime->devices);
+    fs->devices=runtime->devices;
     if (!error) {
         w->device_events=md_device_events_new();
         if (!w->device_events) error=-errno;
     }
-    fs.device_events=w->device_events;
-    if (!error) error=md_input_session_start(&fs,w->input,w->device_events,sysfs,&input);
+    fs->device_events=w->device_events;
+    if (!error) error=md_input_session_start(fs,w->input,w->device_events,runtime->sysfs,&runtime->input);
     w->input=NULL;
     if (!error && w->inherited && w->inherited->count) {
         struct md_ipc_credentials *authority=NULL;
-        error=md_fs_ipc_authority(&fs,&authority);
+        error=md_fs_ipc_authority(fs,&authority);
         if (!error) error=md_ipc_credentials_inherit(authority,w->inherited);
     }
     w->inherited=NULL;
-    if (!error) { listener = md_fs_listen(w->endpoint); if (listener < 0) error = listener; }
-    pthread_mutex_lock(&w->lock);
-    w->mounts=md_mount_namespace_retain(fs.mounts); w->error=error;
-    pthread_mutex_unlock(&w->lock);
-    md_event_signal(w->ready);
-    struct md_inode_statistics stats = {0};
-    struct md_fs_statistics rpc = {0};
     if (!error) {
-        if (w->statistics) md_inode_measure(store, &stats);
-        struct md_fs_work_source source = {.fd = w->wake.reader, .wakeup=w->wakeup, .context = w, .ready = run_ready,
-            .notification_fd = notification_fd, .notification = notification,
-            .prepare_wait=prepare_wait, .paused=paused};
-        error = md_fs_serve(&fs, listener, w->stop, 5000, w->statistics ? &rpc : NULL, &source);
+        runtime->listener=md_fs_listen(w->endpoint);
+        if (runtime->listener<0) error=runtime->listener;
     }
+    return error;
+}
+static void retire_work(struct md_fs_worker *w,int error) {
     pthread_mutex_lock(&w->lock); w->stopping=1; pthread_mutex_unlock(&w->lock);
     while (w->waiting) {
         struct md_fs_work *work=w->waiting; w->waiting=work->next; work->next=NULL;
@@ -214,16 +208,42 @@ static void *run(void *context) {
         if (!work) break;
         execute_work(w,NULL,work,error ? error : -ESHUTDOWN);
     }
-    if (listener >= 0) close(listener);
-    md_input_session_stop(input);
-    md_provider_tree_release(sysfs);
-    md_provider_tree_release(devices);
-    md_control_file_release(fs.render_device);
-    md_device_events_stop(w->device_events);
-    md_fs_mounts_close(&fs);
-    md_fs_storage_close(&storage);
-    md_ipc_credentials_close(fs.ipc);
-    md_image_catalogue_close(images); md_inode_store_close(store);
+}
+static void runtime_close(struct worker_runtime *runtime) {
+    struct md_filesystem *fs=&runtime->fs;
+    if (runtime->listener>=0) close(runtime->listener);
+    md_input_session_stop(runtime->input);
+    md_provider_tree_release(runtime->sysfs);
+    md_provider_tree_release(runtime->devices);
+    md_control_file_release(fs->render_device);
+    md_device_events_stop(fs->device_events);
+    md_fs_mounts_close(fs);
+    md_fs_storage_close(&runtime->storage);
+    md_ipc_credentials_close(fs->ipc);
+    md_image_catalogue_close(fs->images); md_inode_store_close(fs->store);
+}
+static void *run(void *context) {
+    struct md_fs_worker *w=context;
+    atomic_store(&w->tid,(int)syscall(SYS_gettid));
+    sigset_t mask;
+    sigemptyset(&mask); sigaddset(&mask,SIGPIPE);
+    pthread_sigmask(SIG_BLOCK,&mask,NULL);
+    struct worker_runtime runtime;
+    int error=runtime_open(w,&runtime);
+    pthread_mutex_lock(&w->lock);
+    w->mounts=md_mount_namespace_retain(runtime.fs.mounts); w->error=error;
+    pthread_mutex_unlock(&w->lock);
+    md_event_signal(w->ready);
+    struct md_inode_statistics stats={0};
+    struct md_fs_statistics rpc={0};
+    if (!error) {
+        if (w->statistics) md_inode_measure(runtime.fs.store,&stats);
+        struct md_fs_work_source source={.fd=w->wake.reader,.wakeup=w->wakeup,.context=w,.ready=run_ready,
+            .notification_fd=notification_fd,.notification=notification,.prepare_wait=prepare_wait,.paused=paused};
+        error=md_fs_serve(&runtime.fs,runtime.listener,w->stop,5000,w->statistics ? &rpc : NULL,&source);
+    }
+    retire_work(w,error);
+    runtime_close(&runtime);
     if (w->statistics) {
         const struct md_cost *costs[] = {&stats.prepare, &stats.step, &stats.transaction, &stats.lock,
             &stats.version,&stats.descriptor,&stats.path,&stats.sync_object,&stats.sync_directory,&stats.commit,&stats.checkpoint};

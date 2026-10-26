@@ -23,6 +23,16 @@ separate from successful namespace package-lifecycle checks.
   `fs_worker.c` owns the store and image catalogue on one thread; `fs_service.c`
   multiplexes RPC, notification and stop readiness. A client cannot
   shut down the service or acquire a different execution identity.
+- `md_fs_service_open/prepare/dispatch/close` separate service state from the
+  thread driving it. `md_fs_serve` retains the existing dedicated-worker loop,
+  wait mechanisms, dispatch order and batch limits. A prepared poll snapshot is
+  borrowed until dispatch or the next preparation; only readiness fields are
+  filled by the caller's wait. A confirmed pause exposes only control and stop
+  readiness. Preparation can advance deferred filesystem work and is not a
+  nonblocking-IO guarantee. The supervisor and filesystem worker remain separate
+  threads; this lifecycle does not add a new scheduler or inline execution mode.
+  Worker runtime open/close and pending-work retirement are separate from its
+  pthread entry, with the same startup publication and teardown order.
 - `fs_client.c` is freestanding: no libc, SQLite, heap, mutex, shared socket or
   thread-local errno. Invocation-local scratch and raw syscalls permit nested
   calls from a signal handler. Guest-pointer validation remains the adapter's
@@ -238,6 +248,9 @@ requires zero undefined symbols. Host and actual shell-UID Debian fixtures cover
   missing descriptors fail explicitly without leaking transferred FDs.
 - An idle peer alongside a working client; reply timeout; malformed-reply FD
   cleanup; failure before sending; and service death exactly after commit.
+- Explicit service lifecycle: shared-work readiness, callback order, pause
+  exclusion, stop priority, partial-open cleanup and restoration of borrowed
+  filesystem state without closing caller-owned listener/stop descriptors.
 - A delayed reader receives its reply and FD while other clients make progress;
   the server does not close the connection ahead of the reader. Repeated FD
   metadata exchanges exercise response lifetime under load.

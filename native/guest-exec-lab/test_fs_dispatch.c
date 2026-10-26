@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "fd_selector.h"
 #include "fs_worker.h"
+#include "fs_service.h"
 #include "fs_engine.h"
 #include "task_resources.h"
 #include "event_wait.h"
@@ -618,6 +619,24 @@ static void pause_wait(struct md_fs_worker *worker, struct md_fs_worker_pause *p
         assert(!md_fs_worker_dispatch(worker));
     }
     assert(md_fs_worker_pause_state(pause)==1);
+}
+static void worker_start_failure(const char *store) {
+    unsigned before=all_fds();
+    char endpoint[80],missing[PATH_MAX];
+    snprintf(endpoint,sizeof(endpoint),"md-worker-start-%d",getpid());
+    assert(snprintf(missing,sizeof(missing),"%s/missing-runtime",store)<PATH_MAX);
+    struct md_fs_worker *worker=NULL;
+    assert(md_fs_worker_start(missing,endpoint,NULL,NULL,NULL,NULL,&worker)==-ENOENT);
+    assert(!worker && all_fds()==before);
+    assert(md_fs_worker_start(store,"",NULL,NULL,NULL,NULL,&worker)==-EINVAL);
+    assert(!worker && all_fds()==before);
+    int listener=md_fs_listen(endpoint); assert(listener>=0);
+    assert(md_fs_worker_start(store,endpoint,NULL,NULL,NULL,NULL,&worker)==-EADDRINUSE);
+    assert(!worker && fcntl(listener,F_GETFD)>=0 && all_fds()==before+1);
+    assert(!close(listener));
+    assert(!md_fs_worker_start(store,endpoint,NULL,NULL,NULL,NULL,&worker));
+    assert(!md_fs_worker_stop(worker) && all_fds()==before);
+    puts("PASS worker runtime lifecycle: early/late startup failure, borrowed listener and clean restart");
 }
 static void worker_pause(const char *store) {
     unsigned before=all_fds();
@@ -1914,7 +1933,7 @@ int main(int argc, char **argv) {
     if (argc==3 && !strcmp(argv[1],"--worker-pause")) {
         alarm(30); setbuf(stdout,NULL);
         struct md_inode_store *store=NULL; assert(!md_inode_store_open(argv[2],1,&store));
-        md_inode_store_close(store); worker_pause(argv[2]); md_test_mount_copy_service(argv[2]);
+        md_inode_store_close(store); worker_start_failure(argv[2]); worker_pause(argv[2]); md_test_mount_copy_service(argv[2]);
         md_test_fs_deferred(argv[2]); return 0;
     }
     if (argc==3 && !strcmp(argv[1],"--broker-directory")) { md_test_namespace_broker(argv[2]); return 0; }
@@ -1941,6 +1960,7 @@ int main(int argc, char **argv) {
                     path_request(store,kind,protected,slots,cancelled,shared,exec_image,unsigned_argument);
     }
     queue_failure(store);
+    worker_start_failure(store);
     worker_pause(store);
     md_test_fs_deferred(store);
     md_test_mount_copy_service(store);

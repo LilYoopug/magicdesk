@@ -343,18 +343,34 @@ static void close_peer(struct md_inode_store *s, struct pollfd *fd, struct peer 
     md_fd_exchange_release(peer->exchange); peer->exchange=NULL;
     OBSERVE(MD_FS_CONNECTION_CLOSED, NULL);
 }
-int md_fs_serve(struct md_filesystem *fs, int listener, int stop_fd,
-        unsigned timeout_ms, struct md_fs_statistics *statistics, const struct md_fs_work_source *work) {
+enum { SLOTS = 32, BASE = 9 };
+struct md_fs_service {
+    struct md_filesystem *fs;
+    const struct md_fs_work_source *work;
+    struct md_ofd_orders *owned_cursors;
+    struct md_resource_wakeup *cursor_wake, *previous_wakeup;
+    struct md_fs_statistics *previous_statistics;
+    unsigned timeout_ms;
+    int paused, shared_ready;
+    struct timespec timeout;
+    struct pollfd control[2], fds[BASE+SLOTS];
+    struct peer peers[SLOTS];
+};
+int md_fs_service_open(struct md_filesystem *fs, int listener, int stop_fd,
+        unsigned timeout_ms, struct md_fs_statistics *statistics, const struct md_fs_work_source *work,
+        struct md_fs_service **out) {
     struct md_inode_store *s = fs->store;
     if (!s || listener < 0 || stop_fd < 0 || !timeout_ms || timeout_ms > 60000) return -EINVAL;
-    enum { SLOTS = 32, BASE = 9 };
-    struct pollfd fds[BASE+SLOTS] = {{.fd = listener, .events = POLLIN}, {.fd = stop_fd, .events = POLLIN},
+    /* Fixed capacity, allocated once per service, never per request. */
+    struct md_fs_service *service=calloc(1,sizeof(*service));
+    if (!service) return -ENOMEM;
+    service->fs=fs; service->work=work; service->timeout_ms=timeout_ms;
+    const struct pollfd initial[BASE] = {{.fd = listener, .events = POLLIN}, {.fd = stop_fd, .events = POLLIN},
         {.fd = work ? work->fd : -1, .events = POLLIN}, {.fd = -1, .events = POLLIN},
         {.fd = -1}, {.fd = md_fd_exchanges_pollfd(fs->exchanges), .events = POLLIN}, {.fd=-1,.events=POLLIN},
         {.fd=-1,.events=POLLIN}, {.fd=-1,.events=POLLIN}};
-    /* Fixed capacity, allocated once per service, never per request. */
-    struct peer *peers = calloc(SLOTS, sizeof(*peers));
-    if (!peers) return -ENOMEM;
+    struct pollfd *fds=service->fds;
+    memcpy(fds,initial,sizeof(initial));
     struct md_ofd_orders *owned=NULL;
     struct md_resource_wakeup *cursor_wake=NULL;
     int error=fs->cursors ? 0 : md_ofd_orders_new(&owned);
@@ -370,139 +386,182 @@ int md_fs_serve(struct md_filesystem *fs, int listener, int stop_fd,
     if (error) {
         if (fds[6].fd>=0) close(fds[6].fd);
         if (owned) { fs->cursors=NULL; md_ofd_orders_release(owned); }
-        free(peers); return error;
+        free(service); return error;
     }
-    struct md_fs_statistics *previous=fs->statistics;
-    struct md_resource_wakeup *previous_wakeup=fs->wakeup;
+    service->owned_cursors=owned; service->cursor_wake=cursor_wake;
+    service->previous_statistics=fs->statistics;
+    service->previous_wakeup=fs->wakeup;
     fs->wakeup=cursor_wake;
     md_mount_family_wakeup(fs->mounts,cursor_wake);
     fs->statistics=statistics;
     for (unsigned i = BASE; i < BASE+SLOTS; ++i) fds[i].fd = -1;
+    *out=service; return 0;
+}
+int md_fs_service_prepare(struct md_fs_service *service,struct md_fs_service_poll *wait) {
+    struct md_filesystem *fs=service->fs;
+    struct md_inode_store *s=fs->store;
+    const struct md_fs_work_source *work=service->work;
+    struct pollfd *fds=service->fds;
+    struct peer *peers=service->peers;
+    service->paused=work && work->paused && work->paused(work->context);
+    if (service->paused) {
+        if (work->prepare_wait) work->prepare_wait(work->context);
+        service->control[0]=(struct pollfd){fds[1].fd,POLLIN,0};
+        service->control[1]=(struct pollfd){work->fd,POLLIN,0};
+        *wait=(struct md_fs_service_poll){service->control,2,NULL};
+        return 0;
+    }
+    int error=md_mount_family_collect(fs);
+    if (error) return error;
+    long now=md_event_now(); if (now<0) return (int)now;
+    int64_t nearest=INT64_MAX;
+    int expired_watch=0;
+    for (unsigned i=0;i<SLOTS;++i) if (fds[BASE+i].fd>=0) {
+        if (md_fd_exchange_closed(peers[i].exchange) || peers[i].deadline<=now) {
+            expired_watch|=peers[i].watch_reader>=0;
+            close_peer(s,&fds[BASE+i],&peers[i]);
+        } else {
+            if (peers[i].phase==DEFERRED || (peers[i].phase==DIRECTORY && (!peers[i].cursor.owner
+                    || md_ofd_order_state(&peers[i].cursor)==MD_RESOURCE_ORDER_READY))) {
+                if (service_peer(fs,&fds[BASE+i],&peers[i],service->cursor_wake))
+                    close_peer(s,&fds[BASE+i],&peers[i]);
+            }
+            if (fds[BASE+i].fd>=0 && peers[i].deadline<nearest) nearest=peers[i].deadline;
+        }
+    }
+    if (expired_watch && work && work->notification) {
+        error=work->notification(work->context,fs,0);
+        if (error) return error;
+    }
+    service->timeout=(struct timespec){0};
+    if (nearest!=INT64_MAX) {
+        int64_t left=nearest-now;
+        service->timeout.tv_sec=left/1000000000LL; service->timeout.tv_nsec=left%1000000000LL;
+    }
+    fds[3].fd=work && work->notification_fd ? work->notification_fd(work->context) : -1;
+    fds[4]=(struct pollfd){.fd=md_inode_watch_pollfd(s),.events=POLLIN};
+    fds[7].fd=md_ipc_credentials_pollfd(fs->ipc);
+    fds[8].fd=md_shm_bridge_pollfd(fs->shm_bridge);
+    service->shared_ready=work && work->prepare_wait && work->prepare_wait(work->context);
+    if (service->shared_ready) service->timeout=(struct timespec){0};
+    *wait=(struct md_fs_service_poll){fds,BASE+SLOTS,
+        !service->shared_ready && nearest==INT64_MAX ? NULL : &service->timeout};
+    return 0;
+}
+int md_fs_service_dispatch(struct md_fs_service *service) {
+    struct md_filesystem *fs=service->fs;
+    struct md_inode_store *s=fs->store;
+    const struct md_fs_work_source *work=service->work;
+    struct pollfd *fds=service->fds;
+    struct peer *peers=service->peers;
+    if (service->paused) {
+        if (service->control[0].revents) return 1;
+        if (service->control[1].revents) work->ready(work->context,fs);
+        return 0;
+    }
+    if (fds[1].revents) return 1;
+    int error=0;
+    if (fds[8].revents) {
+        error=md_shm_bridge_dispatch(fs->shm_bridge);
+        if (error) return error;
+    }
+    if (fds[7].revents) {
+        int retired=md_ipc_credentials_dispatch(fs->ipc);
+        if (retired<0) return retired;
+    }
+    if (fds[6].revents) {
+        error=md_event_acknowledge(fds[6].fd);
+        if (error) return error;
+    }
+    if (fds[5].revents) {
+        error=md_fd_exchanges_drain(fs->exchanges);
+        if (error) return error;
+    }
+    int serviced_request=0;
+    if (fds[4].revents) {
+        error=md_inode_watch_pump(s);
+        if (error) return error;
+    }
+    if (work && fds[2].revents) work->ready(work->context,fs);
+    if (work && fds[3].revents) {
+        error=work->notification(work->context,fs,fds[3].revents);
+        if (error) return error;
+    }
+    if (fds[0].revents & (POLLNVAL|POLLERR|POLLHUP)) return -EIO;
+    for (unsigned i=BASE;i<BASE+SLOTS;++i) if (fds[i].fd>=0 && fds[i].revents) {
+        serviced_request|=peers[i-BASE].phase==REQUEST || peers[i-BASE].phase==ACKNOWLEDGE;
+        if (service_peer(fs,&fds[i],&peers[i-BASE],service->cursor_wake)) close_peer(s,&fds[i],&peers[i-BASE]);
+    }
+    if (fds[0].revents & POLLIN) {
+        /* Bound each accept batch so a connecting peer cannot starve shutdown or requests. */
+        for (unsigned n=0;n<SLOTS;++n) {
+            int fd=accept4(fds[0].fd,NULL,NULL,SOCK_CLOEXEC|SOCK_NONBLOCK);
+            if (fd<0) { if (errno==EAGAIN || errno==EINTR) break; return -errno; }
+            if (md_fs_peer(fd)) { close(fd); continue; }
+            struct ucred identity; socklen_t identity_size=sizeof(identity);
+            if (getsockopt(fd,SOL_SOCKET,SO_PEERCRED,&identity,&identity_size)
+                    || identity_size!=sizeof(identity)) { close(fd); continue; }
+            unsigned slot=0; while (slot<SLOTS && fds[BASE+slot].fd>=0) ++slot;
+            if (slot==SLOTS) { close(fd); continue; }
+            long now=md_event_now();
+            if (now<0) { close(fd); return (int)now; }
+            fds[BASE+slot]=(struct pollfd){.fd=fd,.events=POLLIN};
+            peers[slot].phase=REQUEST;
+            peers[slot].process=identity.pid;
+            peers[slot].watch_reader=-1;
+            peers[slot].directory_fd=-1;
+            peers[slot].admitted_wait=0;
+            peers[slot].timeout_ns=(int64_t)service->timeout_ms*1000000;
+            peers[slot].deadline=now+peers[slot].timeout_ns;
+        }
+    }
+    /* Event-driven retry on watch readiness or cancellation. Namespace
+     * commits signal the native journal watch; unrelated stat/open traffic
+     * must not rescan every pending reader. */
+    if (work && work->notification && fds[3].fd>=0
+            && (service->shared_ready || fds[4].revents || fds[2].revents || serviced_request))
+        return work->notification(work->context,fs,0);
+    return 0;
+}
+void md_fs_service_close(struct md_fs_service *service) {
+    if (!service) return;
+    struct md_filesystem *fs=service->fs;
+    struct pollfd *fds=service->fds;
+    for (unsigned i = BASE; i < BASE+SLOTS; ++i)
+        if (fds[i].fd >= 0) close_peer(fs->store, &fds[i], &service->peers[i-BASE]);
+    md_shm_bridge_close(fs->shm_bridge); fs->shm_bridge=NULL;
+    md_mount_family_wakeup(fs->mounts,NULL);
+    md_resource_wakeup_release(service->cursor_wake);
+    if (fds[6].fd>=0) close(fds[6].fd);
+    if (service->owned_cursors) { fs->cursors=NULL; md_ofd_orders_release(service->owned_cursors); }
+    fs->statistics=service->previous_statistics;
+    fs->wakeup=service->previous_wakeup;
+    free(service);
+}
+int md_fs_serve(struct md_filesystem *fs,int listener,int stop_fd,
+        unsigned timeout_ms,struct md_fs_statistics *statistics,const struct md_fs_work_source *work) {
+    struct md_fs_service *service=NULL;
+    int error=md_fs_service_open(fs,listener,stop_fd,timeout_ms,statistics,work,&service);
+    if (error) return error;
     for (;;) {
-        if (work && work->paused && work->paused(work->context)) {
-            if (work->prepare_wait) work->prepare_wait(work->context);
-            struct pollfd control[]={{stop_fd,POLLIN,0},{work->fd,POLLIN,0}};
+        struct md_fs_service_poll wait;
+        error=md_fs_service_prepare(service,&wait);
+        if (error) break;
+        if (service->paused) {
             /* EVENT_WAIT: explicit worker-pause release or shutdown; the
              * supervisor's operation deadline owns cancellation. No namespace
              * transaction or queue lock crosses this wait. */
-            long ready=md_event_wait(control,2,INT64_MAX);
+            long ready=md_event_wait(wait.fds,wait.count,INT64_MAX);
             if (ready<0) { error=(int)ready; break; }
-            if (control[0].revents) break;
-            if (control[1].revents) work->ready(work->context,fs);
-            continue;
+        } else {
+            /* EVENT_WAIT: request/reply/exchange-close/client-close/stop readiness;
+             * peer expiry drops only that connection, without replaying work. */
+            int ready=ppoll(wait.fds,wait.count,wait.timeout,NULL);
+            if (ready<0) { if (errno==EINTR) continue; error=-errno; break; }
         }
-        error=md_mount_family_collect(fs);
+        error=md_fs_service_dispatch(service);
         if (error) break;
-        long now = md_event_now(); if (now < 0) { error = (int)now; break; }
-        int64_t nearest = INT64_MAX;
-        int expired_watch = 0;
-        for (unsigned i = 0; i < SLOTS; ++i) if (fds[BASE+i].fd >= 0) {
-            if (md_fd_exchange_closed(peers[i].exchange) || peers[i].deadline <= now) {
-                expired_watch |= peers[i].watch_reader >= 0;
-                close_peer(s, &fds[BASE+i], &peers[i]);
-            }
-            else {
-                if (peers[i].phase==DEFERRED || (peers[i].phase==DIRECTORY && (!peers[i].cursor.owner
-                        || md_ofd_order_state(&peers[i].cursor)==MD_RESOURCE_ORDER_READY))) {
-                    if (service_peer(fs,&fds[BASE+i],&peers[i],cursor_wake))
-                        close_peer(s,&fds[BASE+i],&peers[i]);
-                }
-                if (fds[BASE+i].fd>=0 && peers[i].deadline < nearest) nearest = peers[i].deadline;
-            }
-        }
-        if (expired_watch && work && work->notification) {
-            error = work->notification(work->context, fs, 0);
-            if (error) break;
-        }
-        struct timespec timeout = {0};
-        if (nearest != INT64_MAX) {
-            int64_t left = nearest-now;
-            timeout.tv_sec = left / 1000000000LL; timeout.tv_nsec = left % 1000000000LL;
-        }
-        /* EVENT_WAIT: request/reply/exchange-close/client-close/stop readiness; the absolute
-         * peer deadline drops only that connection, without replaying work. */
-        fds[3].fd = work && work->notification_fd ? work->notification_fd(work->context) : -1;
-        fds[4] = (struct pollfd){.fd = md_inode_watch_pollfd(s), .events = POLLIN};
-        fds[7].fd=md_ipc_credentials_pollfd(fs->ipc);
-        fds[8].fd=md_shm_bridge_pollfd(fs->shm_bridge);
-        int shared_ready=work && work->prepare_wait && work->prepare_wait(work->context);
-        if (shared_ready) timeout=(struct timespec){0};
-        int r = ppoll(fds, BASE+SLOTS, !shared_ready && nearest == INT64_MAX ? NULL : &timeout, NULL);
-        if (r < 0) { if (errno == EINTR) continue; error = -errno; break; }
-        if (fds[1].revents) break;
-        if (fds[8].revents) {
-            error=md_shm_bridge_dispatch(fs->shm_bridge);
-            if (error) break;
-        }
-        if (fds[7].revents) {
-            int retired=md_ipc_credentials_dispatch(fs->ipc);
-            if (retired<0) { error=retired; break; }
-        }
-        if (fds[6].revents) {
-            error=md_event_acknowledge(fds[6].fd);
-            if (error) break;
-        }
-        if (fds[5].revents) {
-            error=md_fd_exchanges_drain(fs->exchanges);
-            if (error) break;
-        }
-        int serviced_request = 0;
-        if (fds[4].revents) {
-            error = md_inode_watch_pump(s);
-            if (error) break;
-        }
-        if (work && fds[2].revents) work->ready(work->context, fs);
-        if (work && fds[3].revents) {
-            error = work->notification(work->context, fs, fds[3].revents);
-            if (error) break;
-        }
-        if (fds[0].revents & (POLLNVAL | POLLERR | POLLHUP)) { error = -EIO; break; }
-        for (unsigned i = BASE; i < BASE+SLOTS; ++i) if (fds[i].fd >= 0 && fds[i].revents) {
-            serviced_request |= peers[i-BASE].phase == REQUEST || peers[i-BASE].phase == ACKNOWLEDGE;
-            if (service_peer(fs, &fds[i], &peers[i-BASE],cursor_wake)) close_peer(s, &fds[i], &peers[i-BASE]);
-        }
-        if (fds[0].revents & POLLIN) {
-            /* Bound each accept batch so a connecting peer cannot starve shutdown or requests. */
-            for (unsigned n = 0; n < SLOTS; ++n) {
-                int fd = accept4(listener, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
-                if (fd < 0) { if (errno == EAGAIN || errno == EINTR) break; error = -errno; break; }
-                if (md_fs_peer(fd)) { close(fd); continue; }
-                struct ucred identity; socklen_t identity_size = sizeof(identity);
-                if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &identity, &identity_size)
-                        || identity_size != sizeof(identity)) { close(fd); continue; }
-                unsigned slot = 0; while (slot < SLOTS && fds[BASE+slot].fd >= 0) ++slot;
-                if (slot == SLOTS) { close(fd); continue; }
-                now = md_event_now();
-                if (now < 0) { close(fd); error = (int)now; break; }
-                fds[BASE+slot] = (struct pollfd){.fd = fd, .events = POLLIN};
-                peers[slot].phase = REQUEST;
-                peers[slot].process = identity.pid;
-                peers[slot].watch_reader = -1;
-                peers[slot].directory_fd=-1;
-                peers[slot].admitted_wait=0;
-                peers[slot].timeout_ns=(int64_t)timeout_ms*1000000;
-                peers[slot].deadline = now + peers[slot].timeout_ns;
-            }
-            if (error) break;
-        }
-        /* Event-driven retry on watch readiness or cancellation. Namespace
-         * commits signal the native journal watch; unrelated stat/open traffic
-         * must not rescan every pending reader. */
-        if (work && work->notification && fds[3].fd >= 0
-                && (shared_ready || fds[4].revents || fds[2].revents || serviced_request)) {
-            error = work->notification(work->context, fs, 0);
-            if (error) break;
-        }
     }
-    for (unsigned i = BASE; i < BASE+SLOTS; ++i)
-        if (fds[i].fd >= 0) close_peer(s, &fds[i], &peers[i-BASE]);
-    md_shm_bridge_close(fs->shm_bridge); fs->shm_bridge=NULL;
-    free(peers);
-    md_mount_family_wakeup(fs->mounts,NULL);
-    md_resource_wakeup_release(cursor_wake);
-    if (fds[6].fd>=0) close(fds[6].fd);
-    if (owned) { fs->cursors=NULL; md_ofd_orders_release(owned); }
-    fs->statistics=previous;
-    fs->wakeup=previous_wakeup;
-    return error;
+    md_fs_service_close(service);
+    return error==1 ? 0 : error;
 }

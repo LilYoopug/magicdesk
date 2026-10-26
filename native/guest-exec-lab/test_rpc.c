@@ -1161,6 +1161,101 @@ static void result_contract(void) {
     CHECK(!munmap(guard,page));
     puts("PASS common reply contract: mapped/wire payload bounds, paths, metadata, capabilities and descriptor counts");
 }
+struct loop_probe {
+    int paused, shared, wake, notification;
+    unsigned preparations, ready, notices, retries;
+    char order[8];
+    unsigned count;
+};
+static int loop_paused(void *context) { return ((struct loop_probe *)context)->paused; }
+static int loop_prepare(void *context) {
+    struct loop_probe *p=context; ++p->preparations; return p->shared;
+}
+static int loop_notification_fd(void *context) { return ((struct loop_probe *)context)->notification; }
+static void loop_ready(void *context,struct md_filesystem *fs) {
+    struct loop_probe *p=context; uint64_t value;
+    CHECK(fs->store && read(p->wake,&value,sizeof(value))==sizeof(value));
+    ++p->ready; CHECK(p->count<sizeof(p->order)); p->order[p->count++]='w';
+}
+static int loop_notification(void *context,struct md_filesystem *fs,short events) {
+    struct loop_probe *p=context;
+    CHECK(fs->store && !p->paused);
+    if (events) {
+        uint64_t value; CHECK(read(p->notification,&value,sizeof(value))==sizeof(value));
+        ++p->notices; CHECK(p->count<sizeof(p->order)); p->order[p->count++]='n';
+    } else ++p->retries;
+    return 0;
+}
+static void loop_signal(int fd) { uint64_t value=1; CHECK(write(fd,&value,sizeof(value))==sizeof(value)); }
+static void service_lifecycle(void) {
+    int before=fd_count(getpid());
+    char directory[PATH_MAX],endpoint[96];
+    CHECK(snprintf(directory,sizeof(directory),"%s/loop",root)<PATH_MAX);
+    snprintf(endpoint,sizeof(endpoint),"md-fs-loop-%d",getpid());
+    struct md_inode_store *store=NULL;
+    CHECK(!md_inode_store_open(directory,1,&store));
+    int listener=md_fs_listen(endpoint),stop=eventfd(0,EFD_NONBLOCK|EFD_CLOEXEC);
+    struct loop_probe probe={.wake=eventfd(0,EFD_NONBLOCK|EFD_CLOEXEC),
+        .notification=eventfd(0,EFD_NONBLOCK|EFD_CLOEXEC)};
+    CHECK(listener>=0 && stop>=0 && probe.wake>=0 && probe.notification>=0);
+    struct md_resource_wakeup *wakeup=NULL;
+    CHECK(!md_resource_wakeup_create(probe.wake,&wakeup));
+    struct md_fs_statistics previous={0},statistics={0};
+    struct md_filesystem fs={.store=store,.statistics=&previous,.wakeup=wakeup};
+    struct md_fs_work_source work={.fd=probe.wake,.context=&probe,.ready=loop_ready,
+        .notification_fd=loop_notification_fd,.notification=loop_notification,
+        .prepare_wait=loop_prepare,.paused=loop_paused};
+    struct md_fs_service *service=NULL;
+    CHECK(md_fs_service_open(&fs,listener,stop,100,&statistics,&work,&service)==-EINVAL);
+    CHECK(!service && !fs.cursors && fs.wakeup==wakeup && fs.statistics==&previous);
+    work.wakeup=wakeup;
+    CHECK(!md_fs_service_open(&fs,listener,stop,100,&statistics,&work,&service));
+    CHECK(fs.cursors && fs.statistics==&statistics && fs.wakeup==wakeup);
+    struct md_fs_service_poll wait;
+    CHECK(!md_fs_service_prepare(service,&wait) && wait.count>2 && !wait.timeout);
+    CHECK(probe.preparations==1 && !probe.ready && !probe.notices && !probe.retries);
+    probe.shared=1;
+    CHECK(!md_fs_service_prepare(service,&wait));
+    CHECK(wait.timeout && !wait.timeout->tv_sec && !wait.timeout->tv_nsec);
+    CHECK(poll(wait.fds,wait.count,0)>=0 && !md_fs_service_dispatch(service));
+    CHECK(probe.retries==1 && !probe.ready && !probe.notices);
+    probe.shared=0; loop_signal(probe.wake); loop_signal(probe.notification);
+    CHECK(!md_fs_service_prepare(service,&wait));
+    CHECK(poll(wait.fds,wait.count,0)>=2 && !md_fs_service_dispatch(service));
+    CHECK(probe.ready==1 && probe.notices==1 && probe.retries==2);
+    CHECK(probe.count==2 && !memcmp(probe.order,"wn",2));
+    probe.paused=1; loop_signal(probe.notification);
+    CHECK(!md_fs_service_prepare(service,&wait) && wait.count==2 && !wait.timeout);
+    CHECK(poll(wait.fds,wait.count,0)==0 && !md_fs_service_dispatch(service));
+    CHECK(probe.ready==1 && probe.notices==1 && probe.retries==2);
+    loop_signal(probe.wake);
+    CHECK(!md_fs_service_prepare(service,&wait));
+    CHECK(poll(wait.fds,wait.count,0)==1 && !md_fs_service_dispatch(service));
+    CHECK(probe.ready==2 && probe.notices==1 && probe.retries==2);
+    probe.paused=0;
+    CHECK(!md_fs_service_prepare(service,&wait));
+    CHECK(poll(wait.fds,wait.count,0)>=1 && !md_fs_service_dispatch(service));
+    CHECK(probe.notices==2 && probe.count==4 && !memcmp(probe.order,"wnwn",4));
+    for (probe.paused=0;probe.paused<=1;++probe.paused) {
+        loop_signal(stop); loop_signal(probe.wake); loop_signal(probe.notification);
+        CHECK(!md_fs_service_prepare(service,&wait));
+        CHECK(poll(wait.fds,wait.count,0)>=2 && md_fs_service_dispatch(service)==1);
+        CHECK(probe.ready==2 && probe.notices==2);
+    }
+    md_fs_service_close(service);
+    CHECK(!fs.cursors && fs.wakeup==wakeup && fs.statistics==&previous);
+    CHECK(fcntl(listener,F_GETFD)>=0 && fcntl(stop,F_GETFD)>=0);
+    CHECK(!md_fs_service_open(&fs,listener,stop,100,NULL,NULL,&service));
+    CHECK(!md_fs_service_prepare(service,&wait));
+    CHECK(poll(wait.fds,wait.count,0)>=1 && md_fs_service_dispatch(service)==1);
+    md_fs_service_close(service); md_fs_service_close(NULL);
+    CHECK(!fs.cursors && fs.wakeup==wakeup && fs.statistics==&previous);
+    md_resource_wakeup_release(wakeup);
+    close(listener); close(stop); close(probe.wake); close(probe.notification);
+    md_inode_store_close(store);
+    CHECK(fd_count(getpid())==before);
+    puts("PASS filesystem loop lifecycle: readiness order, shared work, pause, stop priority and borrowed resources");
+}
 int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "stress")) {
         CHECK(argv[2][0] == '/' && strlen(argv[2]) < sizeof(root)); strcpy(root, argv[2]);
@@ -1179,6 +1274,7 @@ int main(int argc, char **argv) {
     }
     CHECK(argc == 2 && argv[1][0] == '/' && strlen(argv[1]) < sizeof(root)); strcpy(root, argv[1]);
     CHECK(mkdir(root, 0700) == 0);
+    service_lifecycle();
     request_contract(); result_contract(); engine_buffers(); value_transport(); peer_transport();
     captured_authentication(); exchange_retirement(); deferred_reply();
     semantics(argv[0]); directories(argv[0]); lost_directory_reply(); concurrent(); contention(); reentrant(); malformed(); idle(); lost_reply();

@@ -3,7 +3,10 @@
 #include "inode_store.h"
 #include "fs_engine.h"
 #include "fs_wire.h"
+#include <poll.h>
+#include <time.h>
 struct md_image_catalogue;
+struct md_fs_service;
 int md_fs_listen(const char *abstract_name);
 struct md_fs_work_source {
     int fd;
@@ -19,8 +22,25 @@ struct md_fs_work_source {
      * watch, notification or filesystem callback runs until it is released. */
     int (*paused)(void *);
 };
-/* Calling thread exclusively owns store. Stop-FD readiness ends the service;
- * caller retains both listener/stop FDs. Peer requests never own its lifetime. */
+/* One owner serializes preparation, readiness dispatch and close. Filesystem,
+ * work source and listener/stop FDs remain borrowed until close. Preparation
+ * advances deferred operations before publishing the next readiness snapshot;
+ * it does not promise nonblocking filesystem IO. */
+struct md_fs_service_poll {
+    struct pollfd *fds;
+    unsigned count;
+    const struct timespec *timeout;
+};
+int md_fs_service_open(struct md_filesystem *, int listener, int stop_fd,
+        unsigned timeout_ms, struct md_fs_statistics *, const struct md_fs_work_source *, struct md_fs_service **);
+/* Borrowed snapshot until the next prepare/dispatch/close. A wait writes only
+ * revents; interrupted waits may prepare again without replaying a request. */
+int md_fs_service_prepare(struct md_fs_service *, struct md_fs_service_poll *);
+/* Zero continues, one acknowledges stop readiness, negative is a failure. */
+int md_fs_service_dispatch(struct md_fs_service *);
+void md_fs_service_close(struct md_fs_service *);
+/* Standalone loop over the same lifecycle. Calling thread exclusively owns
+ * store. Peer requests never own the service lifetime. */
 int md_fs_serve(struct md_filesystem *, int listener, int stop_fd,
         unsigned timeout_ms, struct md_fs_statistics *, const struct md_fs_work_source *);
 #ifdef MD_FS_TESTING
