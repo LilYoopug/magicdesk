@@ -5,6 +5,28 @@ execution environments, not equivalent isolation or a universal speed ranking.
 Lower elapsed time is better; **chroot = 1.00x** in each row. Ratios are elapsed
 time relative to chroot, not speedups.
 
+## README Comparison
+
+The five README rows divide each mode's median by chroot's median in the same
+series; they are not a single new run of every workload. The three file rows
+use the [common series](#current-common-series), with 16,384 operations per
+sample, five measured rounds and CPU 0-1.
+
+The exec and SQLite rows were remeasured on `77fa1a89` using the normal
+two-thread Shroot runtime, without CPU pinning or experimental modes. All eight
+CPUs were available and every workload had `nice=0`. Exec used seven measured
+rounds of 128 sequential `fork/exec/wait` cycles with packaged `/bin/true`;
+SQLite used three clean builds per mode with `make -j8`. Both series rotated
+launch order and excluded one warmup per mode. No governor or frequency setting
+was changed. The phone was charging.
+
+All workload checks passed; the five SQLite output hashes matched across the
+measured builds. [Samples, policies, hashes and frequency observations](benchmarks/alpine-unrestricted-exec-sqlite-2026-10-26.json)
+identify the new series. Frequency observations cover the command envelope,
+including other tasks, not just the benchmark's executing threads. They are
+not used to normalize elapsed times. These staged native bundles do not
+identify the installed APK or establish equivalent isolation between modes.
+
 ## Base Exec Locality Study
 
 The next investigation targets a 2.5x improvement, not another small reduction

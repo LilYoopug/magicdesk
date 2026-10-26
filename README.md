@@ -252,9 +252,7 @@ programs, including stock glibc, musl and Go binaries, without changing their
 files. **No libc compilation, loader replacement or extra container layer is
 needed.** Shroot Base is the seccomp/ptrace fallback for unsupported sites and
 application-filtered execution, and can be selected explicitly for diagnosis.
-See [acceleration](docs/shroot.md#syscall-acceleration) and the
-[Alpine chroot/PRoot/Shroot comparison](docs/shroot-benchmarks.md), including
-SQLite compilation and the workloads where Shroot still trails PRoot.
+See [acceleration](docs/shroot.md#syscall-acceleration).
 
 The minimum kernel is **Linux 5.15**, with actual capability checks under the
 selected executor. Failure leaves independent MagicDesk tools available.
@@ -266,6 +264,21 @@ Unadapted calls and inherited descriptors retain host authority; logical cgroups
 do not enforce native CPU, memory or device limits. Snap's reduced-confinement
 mode is not AppArmor enforcement. Use trusted images and programs.
 See [coverage and limits](docs/shroot.md#coverage-and-limits).
+
+#### Performance
+
+Alpine ARM64 on one Android phone. **Relative elapsed time: chroot = 1.000x;
+lower is better.**
+
+| Workload | chroot | PRoot | Shroot |
+| --- | ---: | ---: | ---: |
+| `stat` | 1.000x | 62.892x | 5.109x |
+| Open / close files | 1.000x | 47.908x | 7.292x |
+| Create / close / rename / delete files | 1.000x | 11.785x | 3.300x |
+| `fork/exec/wait` | 1.000x | 5.469x | 8.374x |
+| Build SQLite | 1.000x | 1.004x | 1.049x |
+
+[Methodology and measured results](docs/shroot-benchmarks.md#readme-comparison).
 
 #### Install Linux
 
