@@ -61,6 +61,12 @@ struct mdi_directory_check {
     int objects;
     char backing[33];
 };
+/* Borrowed O_PATH pins, scoped to one filesystem operation. Identity and type
+ * cannot change while pinned; catalogue membership and permissions still can. */
+struct mdi_directory_pins {
+    unsigned count;
+    struct { int fd; dev_t device; ino_t inode; } entries[2];
+};
 struct md_inode_store {
     unsigned refs;
     sqlite3 *db;
@@ -77,6 +83,7 @@ struct md_inode_store {
     struct md_inode_boundary *boundary;
     struct mdi_mount_boundary *mount_boundary;
     struct mdi_stat_location *stat_location;
+    const struct mdi_directory_pins *directory_pins;
     struct md_inode_watches *watches;
     struct mdi_fifo_owner *fifos;
     struct md_inode_statistics *statistics;
@@ -138,6 +145,8 @@ struct mdi_location {
 /* Optional final native-leaf capture. The caller owns fd on success; metadata
  * and identity come from that exact descriptor, never another pathname lookup. */
 struct mdi_path_pin { int fd; struct stat physical; };
+/* Borrowed physical directory, or -1. Never substitutes catalogue admission. */
+int mdi_directory_pin(const struct md_inode_store *,const struct mdi_node *);
 int mdi_overlay_native_name(struct md_inode_store *,const struct mdi_node *,const char *);
 int mdi_overlay_publish_leaf(struct md_inode_store *,const struct mdi_node *,const struct mdi_node *,const char *);
 int mdi_bind_body(struct md_inode_store *,const struct mdi_node *,struct mdi_node *);
@@ -218,7 +227,7 @@ int mdi_access(struct md_inode_store *, const struct mdi_node *, int);
 int mdi_permission(struct md_inode_store *, const struct mdi_node *, int, int real);
 int mdi_permission_as(struct md_inode_store *, const struct mdi_node *, int, const struct md_identity *);
 int mdi_permission_stat(struct md_inode_store *, const struct mdi_node *, struct stat *);
-int mdi_open_permission(struct md_inode_store *, const struct mdi_node *, int flags);
+int mdi_open_permission(struct md_inode_store *, const struct mdi_node *, int flags, const struct stat *observed);
 int mdi_sticky(struct md_inode_store *, const struct mdi_location *);
 int mdi_sticky_as(struct md_inode_store *, const struct mdi_location *, const struct md_identity *);
 int mdi_metadata(struct md_inode_store *, const struct mdi_node *, uint32_t, uint32_t, mode_t);

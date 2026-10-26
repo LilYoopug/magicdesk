@@ -406,7 +406,26 @@ static int descriptor_node(struct md_inode_store *s, const struct stat *st,
     r=mdi_query_release(q,r); mdi_cache_put(s,&key,node,r);
     return r==-ENOENT ? -EXDEV : r;
 }
+int mdi_directory_pin(const struct md_inode_store *s,const struct mdi_node *node) {
+    const struct mdi_directory_pins *pins=s->directory_pins;
+    if (!pins || node->kind!=S_IFDIR || node->source || !node->attached) return -1;
+    for (unsigned i=0;i<pins->count;++i)
+        if (pins->entries[i].device==node->device && pins->entries[i].inode==node->inode)
+            return pins->entries[i].fd;
+    return -1;
+}
 int mdi_fd(struct md_inode_store *s, int fd, struct mdi_node *node) {
+    const struct mdi_directory_pins *pins=s->directory_pins;
+    if (pins) for (unsigned i=0;i<pins->count;++i) if (pins->entries[i].fd==fd) {
+        struct stat identity={.st_dev=pins->entries[i].device,
+            .st_ino=pins->entries[i].inode,.st_mode=S_IFDIR};
+        int r=descriptor_node(s,&identity,node);
+        if (r!=-EXDEV) {
+            if (s->statistics) ++s->statistics->directory_pin_hits;
+            return r ? r : node->kind==S_IFDIR ? 0 : -EIO;
+        }
+        break;
+    }
     struct stat st;
     if (fstat(fd,&st)) return -errno;
     int r=descriptor_node(s,&st,node);

@@ -12,7 +12,7 @@ def main():
     parser.add_argument('--entry-only', action='store_true')
     parser.add_argument('--diagnostics', action='store_true')
     add_machine_entry_argument(parser)
-    parser.add_argument('--case', choices=('all', 'birth-retirement', 'bursts', 'fd-discovery', 'site-discovery'), default='all')
+    parser.add_argument('--case', choices=('all', 'birth-retirement', 'bursts', 'fd-discovery', 'site-discovery', 'cursor-lease'), default='all')
     args = parser.parse_args()
     suite = Suite(Path('build/cooperative-runtime'), args.build, machine_entry=args.machine_entry)
     runner = [suite.runner, *suite.entry_options]
@@ -74,7 +74,7 @@ def main():
             assert 'PASS native site discovery:' in output
             count = re.search(r'cooperativeCompleted=(\d+)', output)
             assert count and (int(count[1]) == 0 if args.machine_entry is False
-                              else int(count[1]) >= 32 * 15), 'late SVC sites missed discovery'
+                              else int(count[1]) >= 32 * 16), 'first calls at new SVC sites missed direct admission'
             if args.case == 'site-discovery':
                 suite.report['passed'] = True
                 suite.command(['rm', '-rf', suite.base])
@@ -83,6 +83,8 @@ def main():
             output = suite.command([*runner, '--statistics', '--store', suite.base + '/store',
                                    '--user', '0:0', '--', '/bin/probe', '--fd-discovery'])
             assert 'PASS native FD discovery:' in output
+            seeks = re.search(r'nativeSeek=(\d+)', output)
+            assert seeks and int(seeks[1]) < 512, 'ordinary repeated seeks still enter the worker'
             for key, minimum in (('nativeClose', 250), ('nativeDuplicate', 120),
                                  ('nativeFlags', 120), ('nativeSeek', 120)):
                 count = re.search(rf'{key}=(\d+)', output)
@@ -98,10 +100,14 @@ def main():
                                     '--statistics', '--store', suite.base + '/store',
                                     '--user', '0:0', '--', '/bin/probe', '--' + args.case])
             assert ('PASS native birth retirement:' if args.case == 'birth-retirement'
+                    else 'PASS native cursor lease:' if args.case == 'cursor-lease'
                     else 'PASS execution bursts:') in output
             suite.report['passed'] = True
             suite.command(['rm', '-rf', suite.base])
             return
+        output = suite.command(['timeout', '90', *runner, '--store', suite.base + '/store',
+                                '--user', '0:0', '--', '/bin/probe', '--cursor-lease'])
+        assert 'PASS native cursor lease:' in output
         output = suite.command(['timeout', '15', *runner, '--store', suite.base + '/store',
                                 '--user', '0:0', '--', '/bin/probe', '--initial-stack', '-silent'], quiet=True)
         assert output.count('PASS initial stack:') == 2

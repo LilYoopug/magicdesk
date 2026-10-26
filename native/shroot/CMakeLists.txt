@@ -90,6 +90,7 @@ guest_executable(bootstrap ${src}/bootstrap.c ${src}/elf.c ${src}/exec.c ${src}/
     ${src}/namespace.c ${src}/namespace_proc.c ${src}/namespace_mount.c ${src}/namespace_mount_fd.c ${src}/namespace_bpf.c ${src}/namespace_landlock.c ${src}/socket_calls.c ${src}/socket_namespace.c ${src}/socket_identity.c ${src}/socket_ancillary.c ${src}/socket_routes.c ${src}/fd_metadata.c
     ${src}/task_receive.c ${src}/fs_client.c ${src}/fs_buffer_client.c ${src}/adapter_buffer.c ${src}/file_open.c ${wire} ${src}/raw.c ${src}/raw.S)
 target_sources(bootstrap PRIVATE ${src}/descriptor_calls.c ${src}/epoll_calls.c ${src}/descriptor_capture.c ${src}/freestanding_memory.c)
+target_sources(bootstrap PRIVATE ${src}/pid_filter_program.c)
 guest_freestanding(bootstrap)
 target_sources(bootstrap PRIVATE ${src}/arguments.c ${src}/guest_copy.S ${src}/cooperative_entry.c ${src}/cooperative_native.S ${src}/vdso.c)
 target_sources(bootstrap PRIVATE ${src}/svc_runtime.c ${src}/svc_payload.c)
@@ -160,7 +161,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_compile_options(test_svc_machine_signal PRIVATE -iquote ${src} -UNDEBUG)
     guest_executable(test_signal_checkpoint ../guest-exec-lab/test_signal_checkpoint.c ${src}/task_call.c ${src}/task_checkpoint.c ${src}/task_birth.c ${src}/checkpoint_entry.S ${src}/signal_delivery.c ${src}/guest_copy.S)
     target_compile_options(test_signal_checkpoint PRIVATE -iquote ${src} -UNDEBUG)
-    guest_executable(test_svc_patch ../guest-exec-lab/test_svc_patch.c)
+    guest_executable(test_svc_patch ../guest-exec-lab/test_svc_patch.c ${src}/svc_payload.c)
     target_compile_options(test_svc_patch PRIVATE -iquote ${src} -UNDEBUG)
     target_link_options(test_svc_patch PRIVATE -Wl,--wrap=ptrace -Wl,--wrap=process_vm_readv)
     guest_executable(test_svc_raw ../guest-exec-lab/test_svc_raw.S)
@@ -185,7 +186,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_compile_options(fd_filter_remote PRIVATE -iquote ${src} -UNDEBUG)
     guest_executable(control_event ../guest-exec-lab/test_control_event.c
         ../guest-exec-lab/test_control_epoll.c ../guest-exec-lab/test_fd_weak.c
-        ../guest-exec-lab/test_fd_filter_program.c ${src}/fd_filter_program.c
+        ../guest-exec-lab/test_fd_filter_program.c ${src}/fd_filter_program.c ${src}/pid_filter_program.c
         ${src}/control_event.c ${src}/control_epoll.c)
     target_compile_options(control_event PRIVATE -iquote ${src} -UNDEBUG)
     target_link_options(control_event PRIVATE -Wl,--wrap=malloc -Wl,--wrap=calloc)
@@ -303,6 +304,7 @@ if(MAGICDESK_GUEST_FIXTURES)
     target_link_libraries(task_helper_fd PRIVATE guest-sqlite m)
     guest_executable(test_interception_memory ../guest-exec-lab/test_interception_memory.c ${src}/interception_memory.c ${src}/interception_buffers.c ${src}/resource_order.c)
     target_compile_options(test_interception_memory PRIVATE -iquote ${src} -UNDEBUG)
+    target_link_options(test_interception_memory PRIVATE -Wl,--wrap=malloc)
     guest_executable(test_interception_buffers ../guest-exec-lab/test_interception_buffers.c ${src}/interception_buffers.c ${src}/interception_memory.c ${src}/resource_order.c ${src}/fd_filter_program.c)
     target_compile_options(test_interception_buffers PRIVATE -iquote ${src} -UNDEBUG)
     target_link_options(test_interception_buffers PRIVATE -Wl,--wrap=calloc -Wl,--wrap=malloc -Wl,--wrap=realloc)

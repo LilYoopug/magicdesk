@@ -8,6 +8,89 @@
 static int accounting_enabled, accounting_requested, adoption_error, adoption_calls;
 static pid_t wait_result=123;
 static struct md_fs_buffer_open adopted={.fd=-1};
+static struct user_pt_regs memory_saved;
+static unsigned memory_reads;
+static int memory_read_error;
+static long memory_context_trace(int request,pid_t pid,void *address,void *data) {
+    assert(request==PTRACE_GETREGSET && pid==123 && (uintptr_t)address==NT_PRSTATUS);
+    ++memory_reads;
+    if (memory_read_error) { errno=ESRCH; return -1; }
+    struct iovec *io=data;
+    assert(io->iov_len==sizeof(memory_saved));
+    memcpy(io->iov_base,&memory_saved,sizeof(memory_saved));
+    return 0;
+}
+static void memory_context_capture(void) {
+    struct thread t={.pid=123,.memory_arguments_only=1};
+    thread_index[t.pid%THREAD_BUCKETS]=&t;
+    checkpoints.trace=memory_context_trace;
+    memory_saved=md_task_registers_entry(0x1004,0x8000,UINT64_C(1)<<12);
+    for (unsigned i=0;i<31;++i) memory_saved.regs[i]=0x100+i;
+    memory_saved.regs[8]=SYS_mmap;
+    struct user_pt_regs operands={.pc=memory_saved.pc,.sp=memory_saved.sp};
+    assert(memory_context(&t,&operands));
+    assert(!t.memory_arguments_only && memory_reads==1);
+    assert(!memcmp(&operands,&memory_saved,sizeof(operands)));
+    assert(!memcmp(&t.original,&memory_saved,sizeof(t.original)));
+    assert(memory_context(&t,&operands) && memory_reads==1);
+    t.memory_arguments_only=1; memory_read_error=1;
+    assert(!memory_context(&t,&operands) && t.resume_lost && t.memory_arguments_only);
+    assert(memory_reads==2 && !memcmp(&operands,&memory_saved,sizeof(operands)));
+    memory_read_error=0; checkpoints.trace=checkpoint_native_trace;
+    thread_index[t.pid%THREAD_BUCKETS]=NULL;
+    puts("PASS memory observation: lazy complete GPR capture, processor controls and lost-task cancellation");
+}
+static void memory_observation_routes(void) {
+    struct thread t={.pid=123,.memory=md_memory_new()}; assert(t.memory);
+    struct md_svc_registry *r=md_svc_registry_new(0x1000000,0x4000); assert(r);
+    assert(!md_memory_svc_set(t.memory,r));
+    r->pool_count=1; r->pools[0]=(struct md_svc_code_pool){.address=0x3000,.used=8};
+    r->count=1; r->sites[0]=(struct md_svc_site){.direct={.svc=0x2000,.gate=0x3000,.number=SYS_mmap},
+        .kernel_alias=0x3000,.state=MD_SVC_PUBLISHED};
+    struct ptrace_syscall_info info={.arch=AUDIT_ARCH_AARCH64,.instruction_pointer=0x2004,
+        .stack_pointer=0x800000,.seccomp={.nr=SYS_mmap,.ret_data=MD_INTERCEPT_MEMORY,
+            .args={0x1000,0x2000,PROT_READ,MAP_PRIVATE,19,0x3000}}};
+    struct user_pt_regs observed;
+    int alias;
+    assert(memory_observation(&t,&info,&observed,&alias) && !alias);
+    assert(observed.pc==info.instruction_pointer && observed.sp==info.stack_pointer
+        && observed.regs[8]==SYS_mmap && !memcmp(observed.regs,info.seccomp.args,sizeof(info.seccomp.args)));
+    info.instruction_pointer=0x3004;
+    assert(memory_observation(&t,&info,&observed,&alias) && alias==1);
+    assert(observed.pc==0x3004 && observed.regs[4]==19);
+    info.seccomp.nr=SYS_munmap;
+    assert(memory_observation(&t,&info,&observed,&alias) && alias==2);
+    r->sites[0].state=MD_SVC_RETIRED;
+    assert(!memory_observation(&t,&info,&observed,&alias));
+    r->sites[0].state=MD_SVC_PUBLISHED;
+    info.stack_pointer=r->frames+16;
+    assert(!memory_observation(&t,&info,&observed,&alias));
+    info.stack_pointer=0x800000; info.instruction_pointer=0x3000;
+    assert(!memory_observation(&t,&info,&observed,&alias));
+    info.instruction_pointer=0x3004; r->disabled=1;
+    assert(!memory_observation(&t,&info,&observed,&alias)); r->disabled=0;
+    t.application_filter=1;
+    assert(!memory_observation(&t,&info,&observed,&alias)); t.application_filter=0;
+    t.cooperative_blocked=1;
+    assert(!memory_observation(&t,&info,&observed,&alias)); t.cooperative_blocked=0;
+    t.debug_options=1;
+    assert(!memory_observation(&t,&info,&observed,&alias)); t.debug_options=0;
+    t.entry_fence_result=-EPERM;
+    assert(!memory_observation(&t,&info,&observed,&alias)); t.entry_fence_result=0;
+    info.seccomp.ret_data=MD_INTERCEPT_PROC;
+    assert(!memory_observation(&t,&info,&observed,&alias));
+    md_memory_release(t.memory);
+    puts("PASS compact memory routes: original/known/cold alias, exact operands, no private stack, retired gate, filter or debugger");
+}
+static void processor_controls(void) {
+    const uint64_t controls[]={0,UINT64_C(1)<<12,UINT64_C(1)<<24,(UINT64_C(1)<<12)|(UINT64_C(1)<<24)};
+    for (unsigned i=0;i<sizeof(controls)/sizeof(*controls);++i) {
+        struct user_pt_regs regs=md_task_registers_entry(0x1000,0x2000,controls[i]|UINT64_C(0xf0000000));
+        assert(regs.pc==0x1000 && regs.sp==0x2000 && regs.pstate==controls[i]);
+        for (unsigned j=0;j<sizeof(regs.regs)/sizeof(*regs.regs);++j) assert(!regs.regs[j]);
+    }
+    puts("PASS fresh continuation: operands/NZCV cleared, processor controls retained");
+}
 static void svc_client_lifetime(void) {
     struct md_interception_memory *memory=md_memory_new(); assert(memory);
     struct md_interception_memory *other=md_memory_new(); assert(other);
@@ -165,6 +248,43 @@ static void readiness_admission_order(void) {
     md_fd_admission_release(activation.admission);
     md_control_epoll_release(queue); md_fd_selector_release(group); md_fd_origins_release(files);
     puts("PASS supervisor readiness: earlier table turn drains during cold admission");
+}
+static long duplicate_reply;
+static long duplicate_return_trace(int request,pid_t pid,void *address,void *data) {
+    assert(request==PTRACE_SETREGSET && pid==123 && (uintptr_t)address==NT_PRSTATUS);
+    struct user_pt_regs *regs=((struct iovec *)data)->iov_base;
+    assert((long)regs->regs[0]==duplicate_reply);
+    errno=ESRCH; return -1;
+}
+static void duplicate_retirement_order(void) {
+    for (unsigned owned=0;owned<2;++owned) {
+        struct md_fd_origins *files=md_fd_origins_new(); assert(files);
+        struct md_fd_observation view;
+        assert(!md_fd_origins_observe(files,5,&view));
+        struct thread t={.pid=123,.fd_job=MD_FD_DUPLICATE_BEGIN};
+        t.resources.files=files; t.original.regs[0]=5; t.original.regs[8]=SYS_dup3;
+        t.fd_registers.regs[1]=view.generation;
+        assert(md_fd_order_begin(files,&t.fd_order,NULL)==1);
+        assert(!md_fd_order_start(&t.fd_order));
+        assert(!md_fd_origins_validate(&t.fd_order,view.generation));
+        assert(!md_fd_origins_close_range(files,10,10,0));
+        assert(md_fd_origins_validate(&t.fd_order,view.generation)==-EAGAIN);
+        thread_index[t.pid%THREAD_BUCKETS]=&t;
+        checkpoints.trace=duplicate_return_trace;
+        duplicate_reply=owned ? 0 : -EAGAIN;
+        if (owned) fd_loan_closed(&t,0);
+        else fd_start(&t);
+        checkpoints.trace=checkpoint_native_trace;
+        thread_index[t.pid%THREAD_BUCKETS]=NULL;
+        assert(t.resume_lost && !t.retries[0].mask && !t.retries[1].mask);
+        if (owned) {
+            assert(t.fd_job==MD_FD_DUPLICATE_BEGIN);
+            assert(!md_fd_origins_validate(&t.fd_order,t.fd_registers.regs[1]));
+            assert(!md_fd_order_complete(&t.fd_order));
+        } else assert(!t.fd_job && !t.fd_order.table);
+        md_fd_origins_release(files);
+    }
+    puts("PASS duplicate admission: foreign generation retries, owned loan retirement retains its table turn");
 }
 static long no_trace(int request,pid_t pid,void *address,void *data) {
     (void)request; (void)pid; (void)address; (void)data;
@@ -369,7 +489,10 @@ static void prepared_input(void) {
     t.original.regs[8]=SYS_recvmsg;
     assert(!dispatch_input(&t,0) && !t.buffer.pool && !t.dispatch_prepared);
     assert(!md_memory_buffers_mapped(t.memory,0x100000,md_buffers_size(pool)));
-    unsigned calls[]={SYS_recvmsg,SYS_recvmmsg,SYS_ppoll,SYS_pselect6};
+    t.original.regs[8]=SYS_execve;
+    assert(!dispatch_input(&t,0) && !t.buffer.pool);
+    strcpy(t.endpoint,"managed");
+    unsigned calls[]={SYS_recvmsg,SYS_recvmmsg,SYS_ppoll,SYS_pselect6,SYS_execve,SYS_execveat};
     for (unsigned i=0;i<sizeof(calls)/sizeof(*calls);++i) {
         t.original.regs[8]=calls[i]; t.original.regs[0]=t.original.regs[1]=8;
         assert(!dispatch_input(&t,MD_DISPATCH_NETWORK_DATA) && !t.buffer.pool);
@@ -402,7 +525,46 @@ static void prepared_input(void) {
     assert(!dispatch_input(&t,0) && !t.buffer.pool);
     md_process_member_release(t.resources.process);
     md_identity_release(&identity); md_memory_release(t.memory);
-    puts("PASS prepared input: recv/poll admission, native limits, unmapped and exhausted pool, early cleanup");
+    puts("PASS prepared input: recv/poll/exec admission, native limits, unmapped and exhausted pool, early cleanup");
+}
+static void image_entry_identity(void) {
+    tasks=md_task_registry_create(); assert(tasks);
+    for (unsigned mode=0;mode<6;++mode) {
+        unsigned secure=mode&1, machine=mode>=2;
+        struct thread t={.pid=getpid(),.tgid=getpid(),.ready=1,.mapped_image=1,
+            .identity=md_identity_new(1000,1234),.exec_backings={-1,-1},.memory=md_memory_new()};
+        assert(t.memory);
+        t.pending_identity=(struct md_exec_identity){.value=t.identity,.secure=secure};
+        if (secure) t.pending_identity.value.uid.effective=0;
+        Elf64_auxv_t aux[]={{.a_type=AT_UID},{.a_type=AT_EUID},{.a_type=AT_GID},
+            {.a_type=AT_EGID},{.a_type=AT_SECURE},{0}};
+        struct md_process_image image={.auxv_bytes=sizeof(aux)};
+        assert(image_enter(&t,(uintptr_t)&image,(uintptr_t)aux,129,machine)==-EPERM && !t.entered);
+        assert(image_enter(&t,(uintptr_t)&image,1,5,machine)==-EFAULT && !t.entered);
+        assert(image_enter(&t,(uintptr_t)&image,(uintptr_t)aux,4,machine)==-EPROTO && !t.entered);
+        assert(image_enter(&t,(uintptr_t)&image,(uintptr_t)aux,5,2)==-EPERM && !t.entered);
+        int retained=memfd_create("exec-backing",MFD_CLOEXEC); assert(retained>=0);
+        size_t page=(size_t)getpagesize(); assert(!ftruncate(retained,page));
+        void *mapping=mode>=4 ? MAP_FAILED : mmap(NULL,page,PROT_READ,MAP_PRIVATE,retained,0);
+        assert(mode>=4 || mapping!=MAP_FAILED);
+        t.exec_backings[0]=retained;
+        assert(image_enter(&t,(uintptr_t)&image,(uintptr_t)aux,5,machine)==(int)secure);
+        assert(t.entered && !t.mapped_image && t.exec_backings[0]==-1);
+        assert(t.image_backings_ready==(machine && mode<4));
+        int backing=-1; uint64_t offset=1;
+        assert(md_memory_file_view(t.memory,(uintptr_t)mapping,page,&backing,&offset)==t.image_backings_ready);
+        if (t.image_backings_ready) assert(backing>=0 && !offset && fcntl(backing,F_GETFD)>=0);
+        assert(fcntl(retained,F_GETFD)<0 && errno==EBADF);
+        assert(aux[0].a_un.a_val==1000 && aux[1].a_un.a_val==(secure ? 0 : 1000));
+        assert(aux[2].a_un.a_val==1234 && aux[3].a_un.a_val==1234 && aux[4].a_un.a_val==secure);
+        assert(!memcmp(aux,image.auxv,sizeof(aux)));
+        assert(image_enter(&t,(uintptr_t)&image,(uintptr_t)aux,5,machine)==-EPERM);
+        md_task_registry_forget(tasks,t.pid);
+        if (mapping!=MAP_FAILED) assert(!munmap(mapping,page));
+        md_identity_release(&t.identity); md_memory_release(t.memory);
+    }
+    md_task_registry_destroy(tasks); tasks=NULL;
+    puts("PASS image entry: exact identity commit, live/snapshot auxv, secure continuation, invalid input, retained mappings and optional backing failure");
 }
 static void captured_writes(void) {
     struct thread t={.pid=getpid(),.memory=md_memory_new()};
@@ -729,14 +891,19 @@ static void provider_wait_boundaries(void) {
 }
 int main(void) {
     alarm(30);
+    memory_context_capture();
+    memory_observation_routes();
+    processor_controls();
     svc_client_lifetime();
     receive_layouts();
     native_capture();
+    duplicate_retirement_order();
     barrier_admission(); readiness_admission_order(); entry_fence_ownership(); control_deadlines(); pid_collection_waiters(); terminal_buffer_completion(); buffered_io_pressure(); prepared_input(); captured_writes(); repair_events(); repair_retirement(); quiescent_birth(); event_accounting();
     for (unsigned mode=0;mode<4;++mode) {
         completed_open(mode,SIGUSR1); completed_open(mode,SIGRTMAX);
     }
     provider_wait_boundaries();
+    image_entry_identity();
     md_task_checkpoints_clear(&checkpoints);
     puts("PASS supervisor completed open: exhausted buffer, failed adoption and single standard/realtime delivery");
     return 0;

@@ -16,6 +16,7 @@
 #include <sys/syscall.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 void test_fd_origins(void);
@@ -304,8 +305,18 @@ static void live_umask_snapshot(void) {
     assert(descriptors()==before+1);
     state.release=1; assert(!pthread_cond_signal(&state.condition));
     assert(!pthread_mutex_unlock(&state.mutex));
-    /* EVENT_WAIT: the proc descriptor must observe death, never a replacement TID. */
+    /* EVENT_WAIT: join observes clear_child_tid, which can precede exit_fs.
+     * Wait for kernel task removal before testing the retained proc handle;
+     * the two-second bound fails rather than treating a live umask as dead. */
     assert(!pthread_join(owner,NULL));
+    struct timespec deadline,now;
+    assert(!clock_gettime(CLOCK_MONOTONIC,&deadline)); deadline.tv_sec+=2;
+    while (!syscall(SYS_tgkill,getpid(),state.tid,0)) {
+        assert(!clock_gettime(CLOCK_MONOTONIC,&now));
+        assert(now.tv_sec<deadline.tv_sec || (now.tv_sec==deadline.tv_sec && now.tv_nsec<deadline.tv_nsec));
+        sched_yield();
+    }
+    assert(errno==ESRCH);
     long exited_mask=md_task_snapshot_umask(&second);
     if (exited_mask!=-ESRCH) fprintf(stderr,"exited task umask: %ld\n",exited_mask);
     assert(exited_mask==-ESRCH);

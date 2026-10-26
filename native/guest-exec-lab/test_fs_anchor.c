@@ -27,7 +27,9 @@ static struct md_fs_result request(struct md_filesystem *fs, const struct md_fs_
         .path={path,NULL},.flags=flags,.resolve=resolve,.mode=op==MD_FS_FSTAT ? MD_FS_STAT_MOUNT : 0};
     struct md_fs_result out;
     struct md_fs_output output={.origin=capture};
-    md_fs_execute(fs,&q,&out,&output); return out;
+    md_fs_execute(fs,&q,&out,&output);
+    assert(!fs->store->directory_pins);
+    return out;
 }
 static struct md_fs_anchor *anchor(struct md_filesystem *fs, const char *path) {
     struct md_fs_anchor *p=NULL;
@@ -143,11 +145,64 @@ static void pinned_opens(struct md_filesystem *fs) {
     assert(descriptors()==before);
     puts("PASS shared pinned open: one identity, independent data OFD, write/append/truncate, open-unlinked and pre-effect EMFILE cleanup");
 }
+static void directory_identity(struct md_filesystem *fs) {
+    struct md_inode_store *s=fs->store;
+    const struct md_identity *previous=s->identity;
+    struct md_identity owner=md_identity_new(0,0),user=md_identity_new(1000,1000);
+    s->identity=&owner;
+    assert(!md_inode_mkdir(s,-1,"/pinned-directory",0755));
+    int file=md_inode_create(s,-1,"/pinned-directory/value",0644); assert(file>=0);
+    struct md_fs_anchor *base=anchor(fs,"/pinned-directory");
+    int fd=md_fs_anchor_fd(base);
+    struct md_fs_context context={.filesystem=fs};
+    int stream=md_open_pinned(fd,O_RDONLY|O_DIRECTORY);
+    assert(stream>=0);
+    struct md_fs_request scan={.operation=MD_FS_GETDENTS,.directory={stream,-1},.origin={base,NULL}};
+    assert(md_fs_context_operation_window(&context,&scan,0)==s);
+    scan.directory[0]=file;
+    assert(!md_fs_context_operation_window(&context,&scan,0));
+    scan.directory[0]=stream; scan.origin[0]=NULL;
+    assert(!md_fs_context_operation_window(&context,&scan,0));
+    assert(!close(stream));
+    s->identity=&user;
+    opens(fs,base,"value",O_RDONLY,0,0);
+    s->identity=&owner;
+    assert(!md_inode_import_metadata(s,fd,0,0,0700));
+    s->identity=&user;
+    opens(fs,base,"value",O_RDONLY,0,-EACCES);
+    s->identity=&owner;
+    assert(!md_inode_import_metadata(s,fd,0,0,0755));
+    assert(!md_inode_rename(s,-1,"/pinned-directory",-1,"/pinned-moved",0));
+    assert(!ftruncate(file,17));
+    struct md_fs_result r=request(fs,base,fd,MD_FS_STAT,"value",0,0,NULL);
+    assert(!r.error && r.info.size==17);
+    assert(!md_inode_mkdir(s,-1,"/pinned-target",0755));
+    struct md_fs_anchor *target=anchor(fs,"/pinned-target");
+    struct md_fs_request move={.operation=MD_FS_RENAME,
+        .directory={fd,md_fs_anchor_fd(target)},.origin={base,target},.path={"value","value"}};
+    md_fs_execute(fs,&move,&r,NULL);
+    assert(!r.error && !s->directory_pins);
+    opens(fs,base,"value",O_RDONLY,0,-ENOENT);
+    opens(fs,target,"value",O_RDONLY,0,0);
+    r=request(fs,target,md_fs_anchor_fd(target),MD_FS_UNLINK,"value",0,0,NULL);
+    assert(!r.error);
+    md_fs_anchor_release(target);
+    assert(!md_inode_unlink(s,-1,"/pinned-target",AT_REMOVEDIR));
+    opens(fs,base,"value",O_RDONLY,0,-ENOENT);
+    assert(!close(file));
+    assert(!md_inode_unlink(s,-1,"/pinned-moved",AT_REMOVEDIR));
+    r=request(fs,base,fd,MD_FS_FSTAT,NULL,0,0,NULL);
+    assert(!r.error && S_ISDIR(r.info.mode));
+    md_fs_anchor_release(base);
+    s->identity=previous; md_identity_release(&owner); md_identity_release(&user);
+    puts("PASS directory identity pins: live permissions, rename, size, unlink and operation-local lifetime");
+}
 static void empty_views(struct md_inode_store *s) {
     struct md_filesystem fs={.store=s}, copy={.store=s};
     struct md_fs_location root={0}, selected;
     assert(!md_fs_mounts_open(&fs,NULL,0));
     pinned_opens(&fs);
+    directory_identity(&fs);
     assert(!md_fs_mounts_copy(&fs,&root,&copy.mounts,&selected));
     struct md_fs_anchor *base=anchor(&fs,"/"), *fifo=NULL, *second=NULL;
     struct md_inode_statistics costs[2]={0};
@@ -160,6 +215,7 @@ static void empty_views(struct md_inode_store *s) {
     }
     assert(costs[0].step.calls==costs[1].step.calls
         && costs[0].transaction.calls==costs[1].transaction.calls);
+    assert(!costs[0].directory_pin_hits && costs[1].directory_pin_hits);
     struct md_fs_anchor *directory=anchor(&fs,"/mnt");
     for (unsigned selected=0;selected<2;++selected) {
         struct md_filesystem owner=fs;

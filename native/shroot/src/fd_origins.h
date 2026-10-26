@@ -120,7 +120,9 @@ int md_fd_origins_exclusive(const struct md_fd_order *);
  * provisional and uncertain slots, including typed objects with path origins,
  * are not native authority. Does not retain an object or capture a data OFD.
  * The regular predicate additionally excludes directory cursors and devices. */
-struct md_fd_native { unsigned kind, flags; };
+/* The anchor is borrowed until this running file-table turn completes. No
+ * slot mutation can invalidate it while the caller retains that turn. */
+struct md_fd_native { unsigned kind, flags; struct md_fs_anchor *origin; };
 int md_fd_origins_native(const struct md_fd_order *,int number,struct md_fd_native *);
 int md_fd_origins_native_regular(const struct md_fd_order *,int number);
 /* No published object can supply virtual readiness. Requires a RUNNING turn;

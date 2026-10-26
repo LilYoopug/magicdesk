@@ -8,6 +8,7 @@
 #include "proc_paths.h"
 #include "signal_protocol.h"
 #include "task_checkpoint.h"
+#include "task_registers.h"
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -46,6 +47,7 @@ struct helper {
     struct md_interception_memory *memory;
     struct md_interception_buffer buffer;
     uintptr_t stack, parcel;
+    uint64_t pstate;
     struct md_task_mapping_request request;
     enum md_task_helper_kind kind;
     int flags;
@@ -108,7 +110,7 @@ static int registers(struct helper *m, pid_t pid, struct user_pt_regs *r, int wr
     return (int)trace(m,write ? PTRACE_SETREGSET : PTRACE_GETREGSET,pid,(void *)NT_PRSTATUS,&io);
 }
 static int call(struct helper *m, pid_t pid, long nr, const unsigned long args[6]) {
-    struct user_pt_regs r={.pc=m->abi.task_call,.sp=m->stack};
+    struct user_pt_regs r=md_task_registers_entry(m->abi.task_call,m->stack,m->pstate);
     memcpy(r.regs,args,6*sizeof(*args)); r.regs[8]=nr;
     int error=registers(m,pid,&r,1);
     return error==-ESRCH ? 0 : error ? error : resume(m,pid);
@@ -146,7 +148,7 @@ static void complete(struct helper *m) {
 }
 static int abort_child(struct helper *m) {
     m->operation=EXIT;
-    struct user_pt_regs r={.pc=m->abi.task_abort,.sp=m->stack};
+    struct user_pt_regs r=md_task_registers_entry(m->abi.task_abort,m->stack,m->pstate);
     int error=registers(m,m->child,&r,1);
     return error==-ESRCH ? 0 : error ? error : resume(m,m->child);
 }
@@ -206,7 +208,7 @@ static int receive_export(struct helper *m) {
 }
 static int receive_collect(struct helper *m) {
     m->operation=RECEIVE_COLLECT;
-    struct user_pt_regs r={.pc=m->abi.task_collect,.sp=m->stack}; r.regs[0]=m->parcel;
+    struct user_pt_regs r=md_task_registers_entry(m->abi.task_collect,m->stack,m->pstate); r.regs[0]=m->parcel;
     int error=registers(m,m->child,&r,1);
     return error ? error : resume(m,m->child);
 }
@@ -523,7 +525,7 @@ int md_task_helper_begin(struct md_task_helpers *manager, pid_t owner, pid_t gro
     *m=(struct helper){.manager=manager,.owner=owner,.group=group,.abi=*abi,.request=request->mapping,
         .kind=request->kind,.complete=callback,.flags=request->kind==MD_TASK_HELPER_MAP
             ? O_RDONLY|O_CLOEXEC : request->flags|O_CLOEXEC,
-        .completion=context,.backing=-1,.maps=-1,.result=-ECANCELED};
+        .completion=context,.backing=-1,.maps=-1,.result=-ECANCELED,.pstate=regs->pstate};
     if (m->kind==MD_TASK_HELPER_FD_TABLE) m->flags=O_RDONLY|O_DIRECTORY|O_CLOEXEC;
     if (m->kind==MD_TASK_HELPER_SEND_CAPTURED) {
         m->send=request->send;
@@ -742,7 +744,7 @@ int md_task_helper_event(struct md_task_helpers *manager, pid_t pid, int status)
             if (!error) error=clone_begin(m);
         } else if (!error && child && m->operation==RECEIVE_COLLECT && r.pc==m->abi.task_collected+4) {
             error=advance(m,(long)r.regs[0]);
-        } else if (!error && r.pc==m->abi.task_return+4) {
+        } else if (!error && r.pc==m->abi.task_completed+4) {
             if (child) error=advance(m,(long)r.regs[0]);
             else {
                 if ((long)r.regs[0]<0) {

@@ -119,9 +119,16 @@ def main():
         for mode in range(4):
             check(f"native result custody mode={mode}", root + "/libmagicdesk_guest_resource_guest.so result-custody "
                   + root + f"/native {mode}", "PASS cancellation stress:")
-            check(f"guest result custody mode={mode}", root + "/libmagicdesk_guest_run.so --statistics --store "
-                  + root + f"/store --deadline-seconds 90 -- /bin/test result-custody /tmp {mode}",
-                  "PASS cancellation stress:", patterns=(r"MD_BROKER resultDeliveries=[1-9]\d*",))
+            for entry in (0, 1):
+                # Prove both ownership paths explicitly: lazy discovery can
+                # redirect the first open before a notification result exists.
+                carrier = (r"MD_BROKER nativeOpen=[1-9]\d*" if entry and not mode
+                           else r"MD_BROKER resultDeliveries=[1-9]\d*")
+                check(f"guest result custody mode={mode} entry={entry}",
+                      root + "/libmagicdesk_guest_run.so --statistics --env SHROOT_MACHINE_ENTRY="
+                      + str(entry) + " --store " + root
+                      + f"/store --deadline-seconds 90 -- /bin/test result-custody /tmp {mode}",
+                      "PASS cancellation stress:", patterns=(carrier,))
         check("native xattr with full table", root + "/libmagicdesk_guest_resource_guest.so xattr-slots-native "
               + root + "/native", "PASS xattr without private FDs")
         check("guest xattr with full table", root + "/libmagicdesk_guest_run.so --diagnostics --store " + root
@@ -275,6 +282,12 @@ def main():
                           "PASS shared memory under signals:")
 
     def check_exec_custody():
+        check("native processor controls", root + "/libmagicdesk_guest_resource_guest.so processor-state",
+              "PASS processor state:")
+        for entry in (0, 1):
+            check(f"guest processor controls entry={entry}", root
+                  + f"/libmagicdesk_guest_run.so --env SHROOT_MACHINE_ENTRY={entry} --store " + root
+                  + "/store --deadline-seconds 90 -- /bin/test processor-state", "PASS processor state:")
         check("native foreign executable", root + "/libmagicdesk_guest_resource_guest.so proc-exec direct " + root + "/native",
               "PASS foreign executable selection")
         for entry in (0, 1):
@@ -485,7 +498,7 @@ def main():
             check("archive hardlink dependencies", root + "/libmagicdesk_guest_test_image_layer.so "
                   + root + "/image-layer-unit", "PASS image hardlinks: linear dependency resolution")
             check("storage schema", root + "/libmagicdesk_guest_test_schema.so " + root + "/schema-unit",
-                  "PASS concurrent preparation fails busy")
+                  "PASS maintenance fails busy; ordinary admission waits for the complete schema upgrade")
             inspection = check("all-scope source inspection", root + "/libmagicdesk_guest_image.so inspect "
                                + root + "/schema-unit/inspection")
             sources = json.loads(inspection["output"])["sources"]
@@ -583,6 +596,8 @@ def main():
             check("live task event collection", root + "/libmagicdesk_guest_task_wait_live.so",
                   "PASS live wait collection")
             check("sparse task event collection", root + "/libmagicdesk_guest_task_wait_live.so --idle",
+                  "PASS live wait collection")
+            check("small task event collection", root + "/libmagicdesk_guest_task_wait_live.so --small",
                   "PASS live wait collection")
             for workload in ("", "descriptors", "birth"):
                 check("native event fairness " + workload, root + "/libmagicdesk_guest_event_fairness.so " + workload,

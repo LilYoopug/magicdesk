@@ -18,6 +18,7 @@
 #include "task_registry.h"
 #include "ipc_credentials.h"
 #include "inode_internal.h"
+#include "inode_lifetime.h"
 #include "linux_abi.h"
 #include "task_status.h"
 #include <errno.h>
@@ -259,7 +260,7 @@ struct md_inode_store *md_fs_context_operation_window(const struct md_fs_context
     case MD_FS_LINK: case MD_FS_RENAME: operands=2; break;
     case MD_FS_CREATE: case MD_FS_MKDIR: case MD_FS_MKNOD: case MD_FS_SYMLINK:
     case MD_FS_UNLINK: case MD_FS_CHMOD: case MD_FS_CHOWN: case MD_FS_UTIMENS:
-    case MD_FS_STAT: case MD_FS_FSTAT: case MD_FS_STATFS: case MD_FS_ACCESS:
+    case MD_FS_STAT: case MD_FS_FSTAT: case MD_FS_STATFS: case MD_FS_ACCESS: case MD_FS_GETDENTS:
     case MD_FS_READLINK: case MD_FS_XATTR: case MD_FS_FXATTR: break;
     default: return NULL;
     }
@@ -273,8 +274,13 @@ struct md_inode_store *md_fs_context_operation_window(const struct md_fs_context
         const struct md_fs_anchor *origin=q->origin[i];
         /* Capture under the cwd/file-table owner precedes this admission.
          * A foreign or detached anchor may enter another provider/store. */
-        if (!origin || !mounts || origin->view!=mounts || origin->mount!=&mounts->base
-                || q->directory[i]!=md_fs_anchor_fd(origin)) return NULL;
+        if (!origin || !mounts || origin->view!=mounts || origin->mount!=&mounts->base) return NULL;
+        if (q->directory[i]!=md_fs_anchor_fd(origin)) {
+            /* Directory bytes use the captured OFD, never its O_PATH pin.
+             * Cursor ownership still precedes this bounded store window. */
+            if (q->operation!=MD_FS_GETDENTS || origin->kind!=S_IFDIR
+                    || md_fs_anchor_check_fd(origin,q->directory[i])) return NULL;
+        }
     }
     /* The local inode walker revokes retention before a mount/provider
      * crossing. Foreign topology imports and restricted roots retain their
@@ -789,6 +795,18 @@ opened:
 void md_fs_inode_execute(struct md_filesystem *fs, const struct md_fs_request *q,
         struct md_fs_result *out, const struct md_fs_output *output) {
     struct md_inode_store *store=fs->selected_store ? fs->selected_store : fs->store;
+    struct mdi_directory_pins pins={0};
+    const struct mdi_directory_pins *previous_pins=store->directory_pins;
+    for (unsigned i=0;i<2;++i) {
+        const struct md_fs_anchor *origin=q->origin[i];
+        if (!origin || origin->kind!=S_IFDIR || origin->child || q->directory[i]!=origin->fd
+                || !md_inode_lifetime_same(origin->lifetime,md_inode_store_lifetime(store))) continue;
+        unsigned slot=pins.count++;
+        pins.entries[slot].fd=origin->fd;
+        pins.entries[slot].device=origin->device;
+        pins.entries[slot].inode=origin->inode;
+    }
+    store->directory_pins=pins.count ? &pins : NULL;
     int readonly=store->mount_readonly;
     int nodev=store->nodev;
     if (fs->mounts) store->nodev=!!(md_mount_policy_flags(fs->inode_mount
@@ -796,6 +814,7 @@ void md_fs_inode_execute(struct md_filesystem *fs, const struct md_fs_request *q
     if (fs->mounts && (fs->inode_mount ? md_view_readonly(fs->inode_mount)
             : (md_mount_policy_flags(&fs->mounts->base.policy)&MD_MOUNT_READONLY))) store->mount_readonly=1;
     inode_execute(fs,q,out,output);
+    store->directory_pins=previous_pins;
     store->mount_readonly=readonly;
     store->nodev=nodev;
 }

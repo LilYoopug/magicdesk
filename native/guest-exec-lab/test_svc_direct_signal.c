@@ -39,6 +39,14 @@ static struct shared {
 static uintptr_t sites[512];
 static size_t site_count;
 static unsigned deferred_count,recovered_count;
+static unsigned accelerated(void) {
+    return !shared->decline && !shared->busy && input.x[6]==plan.number
+        && (plan.number!=SYS_mmap || (input.x[3]&(MAP_FIXED|MAP_ANONYMOUS))==(MAP_FIXED|MAP_ANONYMOUS));
+}
+static uint64_t native_result(void) {
+    return (uint32_t)input.x[6]==SYS_mmap ? (uint64_t)-EINVAL
+        : (uint32_t)input.x[6]==SYS_getppid ? getppid() : getpid();
+}
 static int remote(void *opaque,uintptr_t at,void *data,size_t size,int write) {
     if (write && shared->unsafe==2 && at%MD_SVC_SLOT_SIZE==MD_SVC_DIRECT_PENDING
             && size==8 && *(uint64_t *)data==1) return 0;
@@ -69,7 +77,7 @@ static void unexpected(int number) { (void)number; _exit(81); }
 static void received(int number,siginfo_t *info,void *context) {
     ucontext_t *u=context;
     uint64_t expected[31]; memcpy(expected,input.x,sizeof(expected));
-    expected[7]=0; expected[8]=SYS_getpid; expected[30]=(uintptr_t)md_svc_lab_context_return;
+    expected[7]=0; expected[8]=input.x[6]; expected[30]=(uintptr_t)md_svc_lab_context_return;
     if (shared->effects) expected[0]=0x4321;
     int signal=(shared->mode&4) ? SIGRTMIN+4 : SIGUSR1;
     if (number!=signal || info->si_pid!=getppid()
@@ -98,8 +106,8 @@ static void received(int number,siginfo_t *info,void *context) {
     if (shared->mode&8) {
         struct frame nested;
         md_svc_lab_context(&input,&nested);
-        if (nested.x[0]!=(shared->decline || shared->busy ? (uint64_t)getpid() : 0x4321)
-                || shared->effects!=shared->at_handler+!(shared->decline || shared->busy)) _exit(86);
+        if (nested.x[0]!=(accelerated() ? 0x4321 : native_result())
+                || shared->effects!=shared->at_handler+accelerated()) _exit(86);
     }
     if (shared->mode&16) siglongjmp(escape,1);
     /* An edited continuation must neither replay the completed effect nor
@@ -144,17 +152,17 @@ static void child(int injected) {
         while (shared->seen<shared->expected_signals) sigsuspend(&mask);
     }
     struct frame expected=input;
-    expected.x[7]=0; expected.x[8]=SYS_getpid; expected.x[30]=(uintptr_t)md_svc_lab_context_return;
-    expected.x[0]=shared->decline || shared->busy ? (uint64_t)getpid() : 0x4321;
+    expected.x[7]=0; expected.x[8]=input.x[6]; expected.x[30]=(uintptr_t)md_svc_lab_context_return;
+    expected.x[0]=accelerated() ? 0x4321 : native_result();
     if (injected) {
         if (!shared->seen) _exit(84);
         assert(shared->seen==((shared->mode&32) ? shared->expected_signals : 1) && shared->at_handler<=1);
-        assert(shared->effects==shared->at_handler+((shared->mode&8) && !(shared->decline || shared->busy)));
+        assert(shared->effects==shared->at_handler+((shared->mode&8) && accelerated()));
         if (!(shared->mode&32)) {
             expected.x[0]=0x7777; expected.x[19]=0x8888; expected.nzcv=UINT64_C(0x60000000);
             expected.q[3*16]^=1;
         }
-    } else assert(!shared->seen && shared->effects==!(shared->decline || shared->busy));
+    } else assert(!shared->seen && shared->effects==accelerated());
     if (!escaped) assert(!memcmp(&expected,&output,sizeof(expected)));
     for (unsigned i=0;i<MD_SVC_SLOT_COUNT;++i) {
         assert(!!*(uint64_t *)(plan.frames+i*MD_SVC_SLOT_SIZE)==!!shared->busy);
@@ -325,7 +333,8 @@ static void exercise_queue(unsigned mode,int unsafe) {
 int main(int argc,char **argv) {
     assert(argc==1 || (argc==2 && (!strcmp(argv[1],"--unsafe-context")
         || !strcmp(argv[1],"--unsafe-checkpoint") || !strcmp(argv[1],"--queued-unsafe")
-        || !strcmp(argv[1],"--queued"))));
+        || !strcmp(argv[1],"--queued") || !strcmp(argv[1],"--mmap-guard"))));
+    int map_guard=argc==2 && !strcmp(argv[1],"--mmap-guard");
     alarm(240);
     size_t page=(size_t)getpagesize();
     shared=mmap(NULL,page,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0); assert(shared!=MAP_FAILED);
@@ -335,7 +344,8 @@ int main(int argc,char **argv) {
     for (unsigned i=0;i<MD_SVC_SLOT_COUNT;++i) assert(!mprotect((char *)frames+i*MD_SVC_SLOT_SIZE+16384,16384,PROT_NONE));
     void *code=mmap((void *)0x3000000,page,PROT_READ|PROT_WRITE,
         MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0); assert(code==(void *)0x3000000);
-    plan=(struct md_svc_direct_context){(uintptr_t)md_svc_lab_call,(uintptr_t)code,MD_SVC_POOL_BASE,SYS_getpid};
+    plan=(struct md_svc_direct_context){(uintptr_t)md_svc_lab_call,(uintptr_t)code,MD_SVC_POOL_BASE,
+        map_guard ? SYS_mmap : SYS_getpid};
     uintptr_t cold=(uintptr_t)code+2048;
     assert(!md_svc_direct_kernel(plan.svc,cold,(uint32_t *)cold));
     struct md_svc_direct_fallback exits={cold,cold,cold}; uint32_t branch;
@@ -350,6 +360,21 @@ int main(int argc,char **argv) {
     input.x[6]=SYS_getpid; input.nzcv=UINT64_C(0xa0000000);
     input.fpcr=UINT64_C(1)<<22; input.fpsr=UINT64_C(1)<<4;
     for (unsigned i=0;i<sizeof(input.q);++i) input.q[i]=(unsigned char)(i*17+31);
+    if (map_guard) {
+        input.x[6]=SYS_mmap; input.x[1]=0;
+        unsigned cases=0;
+        for (unsigned mask=0;mask<4;++mask) {
+            input.x[3]=MAP_PRIVATE|((mask&1) ? MAP_FIXED : 0)|((mask&2) ? MAP_ANONYMOUS : 0);
+            site_count=0; exercise(0,0);
+            for (size_t i=0;i<site_count;++i) if (sites[i]>=plan.gate && sites[i]<plan.gate+256)
+                for (unsigned behavior=0;behavior<4;++behavior) {
+                    exercise(sites[i],behavior); ++cases;
+                }
+        }
+        assert(cases && recovered_count);
+        printf("PASS mmap argument guard: cases=%u exact PC, GPRs, flags and signals\n",cases);
+        return 0;
+    }
     if (argc==2 && !strcmp(argv[1],"--queued-unsafe")) { exercise_queue(3,1); return 0; }
     if (argc==2 && !strcmp(argv[1],"--queued")) {
         for (unsigned mode=0;mode<4;++mode) { exercise_queue(mode,0); exercise_queue(mode|16,0); }
@@ -361,8 +386,9 @@ int main(int argc,char **argv) {
         return 0;
     }
     unsigned cases=0;
-    for (unsigned path=0;path<3;++path) {
+    for (unsigned path=0;path<5;++path) {
         shared->decline=path==1; shared->busy=path==2;
+        input.x[6]=path==3 ? SYS_getppid : path==4 ? (UINT64_C(1)<<32)|SYS_getpid : SYS_getpid;
         site_count=0; exercise(0,0);
         const unsigned behaviors[]={0,4,8,20};
         for (size_t i=0;i<site_count;++i) for (unsigned behavior=0;behavior<4;++behavior)

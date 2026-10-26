@@ -8,6 +8,5 @@
 extern struct md_fs md_files;
 extern char md_bootstrap[PATH_MAX];
 extern char md_executable[PATH_MAX];
-long md_guest_exec(const struct md_fs *, const char *, char *const [], char *const []);
-long md_guest_execat(const struct md_fs *, int, const char *, char *const [], char *const [], int);
+long md_guest_execat(const struct md_fs *, int, const char *, char *const [], char *const [], int, unsigned long);
 #endif

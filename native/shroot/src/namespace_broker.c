@@ -97,6 +97,7 @@ struct md_namespace_broker {
     struct task *channels, *channel_cursor;
     struct task *task_index[TASK_BUCKETS];
     struct task *result_waiting;
+    atomic_uint results_pending;
     struct task *event_ready;
     pthread_mutex_t lock;
     int listener;
@@ -224,6 +225,7 @@ int md_broker_hold_event(struct md_namespace_broker *b,pid_t pid,int status,cons
     struct task *t=NULL;
     for (t=b->task_index[(unsigned)pid%TASK_BUCKETS];t && t->pid!=pid;t=t->indexed) { }
     int held=0;
+    if (t && t->channel) atomic_store_explicit(&t->channel->native_regular,0,memory_order_release);
     if (t && t->native_borrowed) { pthread_mutex_unlock(&b->lock); return 0; }
     if (t) {
         t->stopped=1;
@@ -291,7 +293,10 @@ int md_broker_native_borrow(struct md_namespace_broker *b,pid_t pid,int *stopped
                 || (unsigned)t->status>>16==PTRACE_EVENT_EXEC)) result=-ESRCH;
         else if (op && op->native_plan!=3 && md_fd_order_state(&op->order)!=MD_RESOURCE_ORDER_QUEUED)
             result=-EBUSY;
-        else { t->native_borrowed=1; *stopped|=t->held!=0; result=1; }
+        else {
+            if (t->channel) atomic_store_explicit(&t->channel->native_regular,0,memory_order_release);
+            t->native_borrowed=1; *stopped|=t->held!=0; result=1;
+        }
     }
     pthread_mutex_unlock(&b->lock); return result;
 }
@@ -304,14 +309,18 @@ void md_broker_native_return(struct md_namespace_broker *b,pid_t pid) {
     t->native_borrowed=0;
     pthread_mutex_unlock(&b->lock);
 }
+static void result_observed(struct md_namespace_broker *b,int result) {
+    if (result==MD_NOTIFICATION_WAIT) ++b->result_waits;
+    else if (result==MD_NOTIFICATION_CANCELLED) ++b->result_cancelled;
+    else if (result==MD_NOTIFICATION_DELIVERED) ++b->result_deliveries;
+}
 /* Broker lock protects admission against supervisor cancellation. No guest
  * memory, filesystem mutation or supervisor round trip occurs here. */
 static int result_progress(struct md_namespace_broker *b, struct task *t) {
     int result=md_notification_result_progress(&t->result.completion);
     if (result==MD_NOTIFICATION_STATUS) result=md_notification_result_reply(&t->result.completion);
-    if (result==MD_NOTIFICATION_WAIT) { ++b->result_waits; return 1; }
-    if (result==MD_NOTIFICATION_CANCELLED) ++b->result_cancelled;
-    if (result==MD_NOTIFICATION_DELIVERED) ++b->result_deliveries;
+    result_observed(b,result);
+    if (result==MD_NOTIFICATION_WAIT) return 1;
     return result<0 ? result : 0;
 }
 static void result_unqueue(struct md_namespace_broker *b, struct task *t) {
@@ -320,6 +329,7 @@ static void result_unqueue(struct md_namespace_broker *b, struct task *t) {
     while (*p && *p!=t) p=&(*p)->result.next;
     if (*p) *p=t->result.next;
     t->result.queued=0; t->result.next=NULL;
+    atomic_store_explicit(&b->results_pending,!!b->result_waiting,memory_order_release);
 }
 static int result_clear(struct md_namespace_broker *b, struct task *t) {
     int error=md_notification_result_clear(&t->result.completion);
@@ -338,11 +348,10 @@ static int result_receive(struct md_namespace_broker *b, struct task *t, const s
     int result=md_notification_result_offer(&t->result.completion,b->listener,q->id,b->wakeup);
     if (result==MD_NOTIFICATION_STATUS) result=md_notification_result_reply(&t->result.completion);
     if (result<0) return result;
-    if (result==MD_NOTIFICATION_DELIVERED) ++b->result_deliveries;
-    if (result==MD_NOTIFICATION_CANCELLED) ++b->result_cancelled;
+    result_observed(b,result);
     if (result==MD_NOTIFICATION_WAIT && !t->result.queued) {
-        ++b->result_waits;
         t->result.next=b->result_waiting; b->result_waiting=t; t->result.queued=1;
+        atomic_store_explicit(&b->results_pending,1,memory_order_release);
     } else if (result!=MD_NOTIFICATION_WAIT) result_unqueue(b,t);
     return 1;
 }
@@ -420,6 +429,7 @@ struct md_namespace_broker *md_broker_create(struct md_fs_worker *worker, int st
         void (*delegate)(const struct seccomp_notif *)) {
     struct md_namespace_broker *b = calloc(1, sizeof(*b));
     if (b) {
+        atomic_init(&b->results_pending,0);
         atomic_init(&b->cooperative_count,0);
         atomic_init(&b->cooperative_completed,0);
         atomic_init(&b->cooperative_declined,0);
@@ -681,8 +691,24 @@ static int native_offer(struct operation *op) {
                 && ((unsigned)n->args[1]==F_DUPFD || (unsigned)n->args[1]==F_DUPFD_CLOEXEC))) ++op->owner->native_duplicate;
         else ++op->owner->native_flags;
     }
+    unsigned lease=0, flags=0;
+    if ((n->number==SYS_lseek || (n->number==SYS_openat && !op->birth))
+            && md_fd_origins_exclusive(&op->order)) {
+        struct md_fd_native native;
+        if (n->number==SYS_openat && !op->birth && md_fs_anchor_kind(op->output_origin)==S_IFREG
+                && !md_fd_origins_has_loans(op->context.task.files)) {
+            lease=MD_ENTRY_RESULT_FD;
+            flags=op->request.flags&O_CLOEXEC ? FD_CLOEXEC : 0;
+        } else if (n->number==SYS_lseek && md_fd_origins_native(&op->order,(int)n->args[0],&native)) {
+            lease=(unsigned)n->args[0]+1; flags=native.flags;
+        }
+    }
     pthread_mutex_lock(&op->owner->lock);
     op->native_plan=2;
+    if (lease && !op->task->stopped) {
+        c->native_flags=flags;
+        atomic_store_explicit(&c->native_regular,lease,memory_order_release);
+    }
     op->native_started=md_cost_begin(op->owner->counts ? &op->owner->native_roundtrip : NULL);
     n->result=-EINTR;
     atomic_store_explicit(&n->state,op->task->stopped ? MD_NATIVE_CANCELLED : MD_NATIVE_READY,memory_order_release);
@@ -744,6 +770,7 @@ static int reply(struct operation *op, const void *data) {
                 op->request.flags&O_CLOEXEC);
         if (error) return error;
         int result=md_notification_result_offer(&op->completion,op->listener,op->notification.id,op->owner->wakeup);
+        result_observed(op->owner,result);
         if (result==MD_NOTIFICATION_CANCELLED || result==MD_NOTIFICATION_STATUS) { recover(op); return 0; }
         if (result==MD_NOTIFICATION_WAIT) return 2;
         if (result==MD_NOTIFICATION_DELIVERED) op->result.error=op->completion.value<0 ? (int)op->completion.value : 0;
@@ -850,6 +877,7 @@ int md_broker_result_finish(struct md_namespace_broker *b, int pid, long *value)
     pthread_mutex_unlock(&b->lock); return error ? error : delivered;
 }
 static int task_resumed(struct task *t) {
+    if (t->channel) atomic_store_explicit(&t->channel->native_regular,0,memory_order_release);
     t->stopped=0;
     return t->channel && atomic_load_explicit(&t->channel->state,memory_order_acquire)==MD_ENTRY_REQUEST;
 }
@@ -910,6 +938,7 @@ int md_broker_cooperative_bind(struct md_namespace_broker *b,pid_t pid,struct md
         atomic_init(&channel->enabled,!!(t->eligible&MD_BROKER_COOPERATIVE));
         atomic_init(&channel->awake,0); atomic_init(&channel->sleeping,0);
         atomic_init(&channel->copying,0);
+        atomic_init(&channel->native_regular,0);
         channel->owner=pid;
         t->channel=channel; t->cooperative_gate=gate; t->sequence=0; ++b->cooperative_count;
         t->channel_next=b->channels; b->channels=t;
@@ -1187,17 +1216,22 @@ static int native_progress(struct md_namespace_broker *b,struct md_execution_win
     return 0;
 }
 static int progress(struct md_namespace_broker *b,struct md_execution_window *window) {
-    pthread_mutex_lock(&b->lock);
     int result=0;
-    struct task **pending=&b->result_waiting;
-    while (*pending) {
-        struct task *t=*pending;
-        result=result_progress(b,t);
-        if (result<0) break;
-        if (result) { pending=&t->result.next; continue; }
-        *pending=t->result.next; t->result.next=NULL; t->result.queued=0;
+    /* Only the worker enqueues receipts. Supervisor cancellation may remove
+     * them; a nonempty hint still requires the lock and exact live queue. */
+    if (atomic_load_explicit(&b->results_pending,memory_order_acquire)) {
+        pthread_mutex_lock(&b->lock);
+        struct task **pending=&b->result_waiting;
+        while (*pending) {
+            struct task *t=*pending;
+            result=result_progress(b,t);
+            if (result<0) break;
+            if (result) { pending=&t->result.next; continue; }
+            *pending=t->result.next; t->result.next=NULL; t->result.queued=0;
+        }
+        atomic_store_explicit(&b->results_pending,!!b->result_waiting,memory_order_release);
+        pthread_mutex_unlock(&b->lock);
     }
-    pthread_mutex_unlock(&b->lock);
     if (result<0) return result;
     result=native_progress(b,window,NULL);
     if (result) return result;
@@ -1207,6 +1241,7 @@ static int progress(struct md_namespace_broker *b,struct md_execution_window *wi
         if (op->native_plan==2 || op->native_plan==3) { at=&op->waiting; continue; }
         if (op->completion.active) {
             int done=md_notification_result_progress(&op->completion);
+            result_observed(b,done);
             if (done<0) return done;
             if (done==MD_NOTIFICATION_WAIT) { at=&op->waiting; continue; }
             *at=op->waiting; op->waiting=NULL;
@@ -1303,17 +1338,21 @@ static int cooperative_progress(struct md_namespace_broker *b,struct md_filesyst
         if (t && !t->channel) t=NULL;
         if (!t) t=b->channels;
         unsigned left=b->cooperative_count;
-        int native_pending=0, effect_pending=0;
+        int native_pending=0, effect_pending=0, runnable=0;
         while (t && left && (!channel_available(t)
                 || atomic_load_explicit(&t->channel->state,memory_order_acquire)!=MD_ENTRY_REQUEST)) {
             native_pending|=atomic_load_explicit(&t->channel->state,memory_order_acquire)==MD_ENTRY_FD_REQUEST;
             effect_pending|=t->operation && t->operation->native_plan==2;
+            runnable|=channel_available(t);
             t=t->channel_next ? t->channel_next : b->channels; --left;
         }
         if (!left) t=NULL;
         if (!t) {
             pthread_mutex_unlock(&b->lock);
-            if ((!completed && !effect_pending) || !spin) break;
+            /* Stopped callers and resource waiters cannot publish a next
+             * request. Release the window for their event owners instead of
+             * spending (and penalizing) the idle-spin budget. */
+            if ((!runnable && !effect_pending) || (!completed && !effect_pending) || !spin) break;
             /* An FD request needs the listener, not another shared-memory
              * turn. Do not spend the idle spin delaying its kernel carrier. */
             if (native_pending) {
@@ -1485,6 +1524,7 @@ static int receive_one(struct md_namespace_broker *b,struct md_filesystem *fs,
         if (!result && count) ++count->handled;
         return result;
     }
+    if (task && task->channel) atomic_store_explicit(&task->channel->native_regular,0,memory_order_release);
     int delivered=result_receive(b,task,&q);
     if (delivered) {
         pthread_mutex_unlock(&b->lock);

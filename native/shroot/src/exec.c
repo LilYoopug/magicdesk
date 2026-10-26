@@ -17,11 +17,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-long md_guest_exec(const struct md_fs *fs, const char *program, char *const argv[], char *const env[]) {
-    return md_guest_execat(fs, AT_FDCWD, program, argv, env, 0);
-}
 static long prepare_retained(const struct md_fs *fs, int base, const char *path, int flags,
-        int inaccessible, struct md_command_recipe *recipe) {
+        int inaccessible, struct md_command_recipe *recipe, unsigned long prepared) {
     char routed[PATH_MAX];
     long error=md_copy(routed,sizeof(routed),path);
     if (error) return error;
@@ -54,14 +51,14 @@ static long prepare_retained(const struct md_fs *fs, int base, const char *path,
     }
     if (error) return error;
     if (*routed=='/') q.directory[0]=-1;
-    error=md_fs_buffer_exec_prepare(&q,recipe);
+    error=md_fs_buffer_exec_prepare(&q,recipe,prepared);
     return error;
 }
 int md_command_initial(const struct md_fs *fs, struct md_command *c, const char *path, char *const argv[]) {
     int error=md_command_arguments(c,path,argv);
     if (error) return error;
     struct md_command_recipe recipe;
-    error=(int)prepare_retained(fs,AT_FDCWD,path,0,0,&recipe);
+    error=(int)prepare_retained(fs,AT_FDCWD,path,0,0,&recipe,0);
     if (!error) error=md_command_apply_recipe(c,&recipe);
     if (!error) {
         long fd=RAW3(prctl,MD_GUEST_MAP_IMAGE,0,MD_IMAGE_TAKE_PROGRAM);
@@ -78,7 +75,8 @@ int md_command_initial(const struct md_fs *fs, struct md_command *c, const char 
     if (error) { md_fs_buffer_exec_cancel(); md_command_close(c); }
     return error;
 }
-long md_guest_execat(const struct md_fs *fs, int base, const char *program, char *const argv[], char *const env[], int flags) {
+long md_guest_execat(const struct md_fs *fs, int base, const char *program, char *const argv[], char *const env[],
+        int flags, unsigned long prepared) {
     if (flags & ~(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW)) return -EINVAL;
     char path[PATH_MAX], identity[PATH_MAX];
     long r = md_read_string(path, sizeof(path), program);
@@ -106,7 +104,7 @@ long md_guest_execat(const struct md_fs *fs, int base, const char *program, char
         r=md_command_arguments(&c,invocation,argv);
         if (r<0) return r;
         struct md_command_recipe recipe;
-        r=prepare_retained(fs,base,path,flags,inaccessible,&recipe);
+        r=prepare_retained(fs,base,path,flags,inaccessible,&recipe,prepared);
         if (!r) { loader=recipe.loader; execfd=recipe.execfd; r=md_command_apply_recipe(&c,&recipe); }
         if (r<0) { md_fs_buffer_exec_cancel(); md_command_close(&c); return r; }
     } else {

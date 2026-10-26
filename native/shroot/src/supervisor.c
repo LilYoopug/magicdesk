@@ -17,6 +17,7 @@
 #include "notification_result.h"
 #include "signal_delivery.h"
 #include "task_checkpoint.h"
+#include "task_registers.h"
 #include "task_birth.h"
 #include "signal_protocol.h"
 #include "cooperative_channel.h"
@@ -167,7 +168,7 @@ struct interception_statistics {
     uint64_t notification_rebounds, notification_readmissions_retired;
     uint64_t direct_status, direct_open, direct_fallback, direct_admit, direct_retry, compact_close, native_io;
     uint64_t captured_writes, captured_receives, entry_receives;
-    struct md_cost rpc;
+    struct md_cost rpc, event_collect, event_sleep;
     struct { uint64_t trace, notification; } calls[512];
 };
 static struct interception_statistics *statistics;
@@ -441,13 +442,14 @@ struct thread {
     struct md_identity identity;
     struct md_exec_identity pending_identity;
     int exec_images[3];
+    int exec_backings[2];
     struct md_fs_anchor *execfd_origin;
     struct md_process_executable *executable, *prepared_executable;
     struct md_fs_anchor *executable_origin, *prepared_executable_origin;
     int exec_images_ready;
     unsigned exec_mount_flags;
     struct md_exec_image *exec_setid;
-    int mapped_image, entered;
+    int mapped_image, entered, image_backings_ready;
     int debug_step_call, debug_birth;
     pid_t debug_exec_old;
     int kernel_stopped, kernel_resume, interrupt_pending, trace_options_dirty, debug_call_active, debug_adapter;
@@ -471,6 +473,7 @@ struct thread {
     int memory_backing_pending;
     struct md_resource_order memory_order;
     enum memory_action memory_action;
+    int memory_arguments_only;
     struct md_fd_order memory_files;
     struct md_mapping_change memory_change;
     int pid_filter, pid_preflight, filter_preflight, debug_replay_entry;
@@ -586,6 +589,7 @@ static unsigned admitted_images, identity_changes;
 static int registers(pid_t pid, struct user_pt_regs *out);
 static int set_registers(pid_t pid, struct user_pt_regs *regs);
 static void resume(pid_t pid, int sig);
+static void cooperative_buffer_release(struct thread *t);
 static int shield(struct thread *t);
 static int save_signal_mask(struct thread *t,uint64_t *mask,const char *reason);
 static int signal_mask(struct thread *t,uint64_t mask,const char *reason);
@@ -623,7 +627,14 @@ static const unsigned long trace_options = PTRACE_O_TRACESECCOMP | PTRACE_O_TRAC
     | PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD;
 static void release_operation(struct thread *t);
 static void metadata_restart_return(struct thread *t,long value);
+static void exec_backings_release(struct thread *t) {
+    for (unsigned i=0;i<2;++i) {
+        if (t->exec_backings[i]>=0) close(t->exec_backings[i]);
+        t->exec_backings[i]=-1;
+    }
+}
 static void exec_images_release(struct thread *t) {
+    exec_backings_release(t);
     md_fs_anchor_release(t->execfd_origin); t->execfd_origin=NULL;
     md_exec_image_release(t->exec_setid); t->exec_setid=NULL;
     md_process_executable_release(t->prepared_executable); t->prepared_executable=NULL;
@@ -709,6 +720,8 @@ static void cleanup(void) {
         md_fs_anchor_release(threads->executable_origin);
         fd_discard(threads);
         adapter_discard(threads);
+        md_broker_forget(broker,threads->pid);
+        cooperative_buffer_release(threads);
         md_memory_release(threads->memory);
         md_memory_release(threads->remote_memory);
         free(threads->memory_notification);
@@ -865,7 +878,7 @@ static void adapter_discard(struct thread *t) {
     if (t->memory_files.table && md_fd_order_cancel(&t->memory_files)==1)
         CHECK(!md_fd_order_complete(&t->memory_files));
     md_memory_mapping_abandon(t->memory,&t->memory_change);
-    t->memory_action=0;
+    t->memory_action=0; t->memory_arguments_only=0;
     CHECK(!md_fd_return_cancel(&t->buffer_return));
     if (t->receive) {
         struct receive_owner *owner=t->receive; t->receive=NULL; owner->caller=0;
@@ -886,6 +899,7 @@ static void adapter_discard(struct thread *t) {
     md_fs_buffer_open_release(&t->buffer_open);
     md_ipc_transport_close(&t->ipc_transport);
     CHECK(!md_buffer_release(&t->buffer));
+    t->dispatch_prepared=0;
     t->buffer_waiting=0;
     t->buffer_rights_delivered=0;
     t->direct=DIRECT_NONE;
@@ -909,9 +923,11 @@ static int checkpoint_marker(uintptr_t pc) {
     return 0;
 }
 static int checkpoint_entry_marker(uintptr_t pc,unsigned long command) {
-    /* TAKE only returns a scalar to its C caller. FINISH and all other
-     * operations retain the post-syscall stop and complete register custody. */
-    return abi.buffer_control && pc==abi.buffer_control+4 && command==MD_BUFFER_TAKE;
+    /* Full-register completion and task-context injection retain their
+     * post-syscall stop; scalar C returns need no interrupt round trip. */
+    if (abi.ready && pc==abi.ready+4) return 1;
+    return abi.buffer_control && pc==abi.buffer_control+4
+        && (md_adapter_buffer_scalar(command) || md_fs_buffer_scalar(command));
 }
 static struct md_task_checkpoints checkpoints={.trace=checkpoint_native_trace,
     .restricted=checkpoint_restricted,.marker=checkpoint_marker,.entry_marker=checkpoint_entry_marker};
@@ -992,7 +1008,7 @@ static struct thread *thread(pid_t pid) {
         .identity = md_identity_copy(&launch_identity), .memory = md_memory_new(),
         .shm_space = md_shm_space_new(),
         .buffer_open = {.fd=-1}, .proc_image_fd=-1, .control_mapping_fd=-1,
-        .exec_images = {-1,-1,-1},
+        .exec_images = {-1,-1,-1}, .exec_backings={-1,-1},
         .fd_selector = md_fd_selector_new()};
     CHECK(t->memory && t->fd_selector && t->shm_space);
     unsigned bucket = (unsigned)pid % THREAD_BUCKETS;
@@ -1050,7 +1066,7 @@ static void release_thread(struct thread *t) {
     CHECK(!md_resources_release(&t->resources));
     free(t->identity_buffer); t->identity_buffer = NULL;
     md_broker_forget(broker, t->pid);
-    CHECK(!md_buffer_release(&t->cooperative_buffer));
+    cooperative_buffer_release(t);
     release_operation(t);
     md_memory_stack_return(t->memory, t->stack);
     md_memory_release(t->memory); t->memory = NULL;
@@ -1318,6 +1334,67 @@ static void retained_result(struct thread *t, const struct seccomp_notif *q) {
     CHECK(!ioctl(listener, SECCOMP_IOCTL_NOTIF_SEND, &reply) || errno == ENOENT);
     t->phase = EXPORT_RETURN;
 }
+static int image_identity_prepare(struct thread *t,int fd,struct md_exec_identity *next,int *replacement) {
+    int matched=admitted_path ? md_admission_match(&admission,t->endpoint,fd) : 0;
+    if (matched<0) return matched;
+    *next=(struct md_exec_identity){.value=t->identity};
+    next->value.uid.saved=next->value.uid.fs=next->value.uid.effective;
+    next->value.gid.saved=next->value.gid.fs=next->value.gid.effective;
+    next->secure=next->value.uid.real!=next->value.uid.effective
+        || next->value.gid.real!=next->value.gid.effective;
+    const struct md_exec_image *setid=matched ? admission.image : t->exec_setid;
+    int error=0;
+    if (setid) error=md_identity_prepare_exec(&t->identity,setid,
+        md_debugger_traced(debugger,t->pid) || (t->exec_mount_flags&MD_MOUNT_NOSUID),next);
+    else md_identity_exec(&t->identity,&next->value);
+    if (!error && matched) {
+        *replacement=md_exec_image_dup(admission.image);
+        if (*replacement<0) error=*replacement;
+    }
+    return error ? error : matched;
+}
+static int image_enter(struct thread *t,uintptr_t image,uintptr_t address,size_t count,unsigned long machine) {
+    if (!t->ready || t->entered || !t->mapped_image || count>128 || machine>1) return -EPERM;
+    if (!image || image>UINTPTR_MAX-sizeof(struct md_process_image)) return -EFAULT;
+    Elf64_auxv_t aux[128];
+    struct iovec local={aux,count*sizeof(*aux)},remote={(void *)address,local.iov_len};
+    if (process_vm_readv(t->pid,&local,1,&remote,1,0)!=(ssize_t)local.iov_len) return -EFAULT;
+    unsigned found=0;
+    const struct md_exec_identity *next=&t->pending_identity;
+    for (size_t i=0;i<count;++i) {
+        switch (aux[i].a_type) {
+        case AT_UID: aux[i].a_un.a_val=md_identity_visible_id(&next->value,0,next->value.uid.real); found|=1; break;
+        case AT_EUID: aux[i].a_un.a_val=md_identity_visible_id(&next->value,0,next->value.uid.effective); found|=2; break;
+        case AT_GID: aux[i].a_un.a_val=md_identity_visible_id(&next->value,1,next->value.gid.real); found|=4; break;
+        case AT_EGID: aux[i].a_un.a_val=md_identity_visible_id(&next->value,1,next->value.gid.effective); found|=8; break;
+        case AT_SECURE: aux[i].a_un.a_val=next->secure; found|=16; break;
+        }
+    }
+    if (found!=31) return -EPROTO;
+    /* /proc/auxv retains a snapshot, separately from the loader's live auxv. */
+    struct iovec values[2]={local,local}, destinations[2]={remote,
+        {(void *)(image+offsetof(struct md_process_image,auxv)),local.iov_len}};
+    if (process_vm_writev(t->pid,values,2,destinations,2,0)!=(ssize_t)(2*local.iov_len)) return -EFAULT;
+    CHECK(!md_task_registry_publish(tasks,t->pid,t->tgid,&next->value,&t->resources));
+    /* The loader has closed its copies, but these exact published images
+     * still authenticate the actual mappings. Capture before secure entry
+     * lowers dumpability; failure only declines optional SVC rewriting. */
+    t->image_backings_ready=machine && t->exec_backings[0]>=0
+        && !md_memory_image_backings(t->memory,t->pid,t->exec_backings,t->exec_backings[1]>=0 ? 2 : 1);
+    exec_backings_release(t);
+    t->identity=next->value; t->mapped_image=0; t->entered=1;
+    md_exec_image_release(t->exec_setid); t->exec_setid=NULL;
+    TRACE("PROBE entered-image pid=%d uid=%u euid=%u secure=%d\n",t->pid,
+        t->identity.uid.real,t->identity.uid.effective,next->secure);
+    if (diagnostics) {
+        struct md_fs_location root;
+        struct md_fs_anchor *cwd=NULL;
+        md_domain_paths(t->resources.fs,&root,&cwd);
+        TRACE("PROBE image-cwd pid=%d known=%d\n",t->pid,cwd!=NULL);
+        md_fs_anchor_release(cwd);
+    }
+    return next->secure;
+}
 static void image_request(struct thread *t, const struct seccomp_notif *q) {
     struct seccomp_notif_resp reply = {.id = q->id};
     if (q->data.instruction_pointer != RAW_GATE || t->phase != IDLE) reply.error = -EPERM;
@@ -1328,100 +1405,72 @@ static void image_request(struct thread *t, const struct seccomp_notif *q) {
                     || q->data.args[3] || q->data.args[4] || q->data.args[5]
                     || t->exec_images[index]<0) reply.error=-EPERM;
             else {
+                struct md_exec_identity next={0};
+                int replacement=-1,matched=0;
+                if (!index) {
+                    matched=image_identity_prepare(t,t->exec_images[index],&next,&replacement);
+                    if (matched<0) { reply.error=matched; goto image_reply; }
+                }
                 struct md_fd_origin_update update={0};
                 int error=index==2 ? md_fd_origins_prepare(t->resources.files,t->execfd_origin,0,&update) : 0;
                 if (error) { reply.error=error; goto image_reply; }
                 struct seccomp_notif_addfd add={.id=q->id,.flags=SECCOMP_ADDFD_FLAG_SEND,
-                    .srcfd=t->exec_images[index],.newfd_flags=index==2 ? 0 : O_CLOEXEC};
+                    .srcfd=replacement>=0 ? replacement : t->exec_images[index],.newfd_flags=index==2 ? 0 : O_CLOEXEC};
                 int fd=ioctl(listener,SECCOMP_IOCTL_NOTIF_ADDFD,&add);
                 int saved=errno;
                 if (index==2) md_fd_origins_finish(&update,fd<0 ? -saved : fd);
-                if (fd>=0) { close(t->exec_images[index]); t->exec_images[index]=-1; return; }
+                if (fd>=0) {
+                    if (index<2) {
+                        /* Retain the exact published file until its mappings
+                         * are registered; do not reacquire it from /proc/fd. */
+                        CHECK(t->exec_backings[index]<0);
+                        t->exec_backings[index]=(int)add.srcfd;
+                        if (replacement>=0) close(t->exec_images[index]);
+                    } else close(t->exec_images[index]);
+                    if (!index) {
+                        t->pending_identity=next; t->mapped_image=1;
+                        if (matched) {
+                            ++admitted_images;
+                            TRACE("PROBE admitted-image pid=%d fd=%d euid=%u secure=%d\n",
+                                t->pid,fd,next.value.uid.effective,next.secure);
+                        } else if (t->exec_setid)
+                            TRACE("PROBE stored-setid-image pid=%d euid=%u egid=%u secure=%d\n",
+                                t->pid,next.value.uid.effective,next.value.gid.effective,next.secure);
+                    }
+                    t->exec_images[index]=-1; return;
+                }
+                if (replacement>=0) close(replacement);
                 reply.error=-saved;
             }
-        } else if (t->entered || q->data.args[2] > 1) reply.error = -EPERM;
-        else if (!q->data.args[2]) {
+        } else if (t->entered || q->data.args[2]) reply.error = -EPERM;
+        else {
             int fd = admitted_path ? duplicate_fd(t->pid, (int)q->data.args[1]) : -1;
-            int matched = !admitted_path ? 0 : fd >= 0 ? md_admission_match(&admission, t->endpoint, fd) : fd;
+            struct md_exec_identity next;
+            int replacement=-1;
+            int matched=admitted_path && fd<0 ? fd : image_identity_prepare(t,fd,&next,&replacement);
             if (fd >= 0) close(fd);
             if (matched < 0) reply.error = matched;
             else {
-                struct md_exec_identity next = {.value = t->identity};
-                next.value.uid.saved = next.value.uid.fs = next.value.uid.effective;
-                next.value.gid.saved = next.value.gid.fs = next.value.gid.effective;
-                next.secure = next.value.uid.real != next.value.uid.effective
-                    || next.value.gid.real != next.value.gid.effective;
-                const struct md_exec_image *setid=matched ? admission.image : t->exec_setid;
-                if (setid) reply.error = md_identity_prepare_exec(&t->identity, setid,
-                    md_debugger_traced(debugger,t->pid) || (t->exec_mount_flags&MD_MOUNT_NOSUID), &next);
-                else md_identity_exec(&t->identity, &next.value);
-                if (!reply.error && matched) {
-                    fd = md_exec_image_dup(admission.image);
-                    if (fd < 0) reply.error = fd;
-                    else {
-                        struct seccomp_notif_addfd add = {.id = q->id, .srcfd = fd,
-                            .newfd = q->data.args[1], .newfd_flags = O_CLOEXEC,
-                            .flags = SECCOMP_ADDFD_FLAG_SETFD | SECCOMP_ADDFD_FLAG_SEND};
-                        int sent = ioctl(listener, SECCOMP_IOCTL_NOTIF_ADDFD, &add);
-                        int error = errno; close(fd);
-                        if (sent >= 0) {
-                            t->pending_identity = next; t->mapped_image = 1; admitted_images++;
-                            TRACE("PROBE admitted-image pid=%d fd=%d euid=%u secure=%d\n",
-                                t->pid, sent, next.value.uid.effective, next.secure);
-                            return;
-                        }
-                        if (error == ENOENT) return;
-                        reply.error = -error;
+                if (matched) {
+                    struct seccomp_notif_addfd add = {.id = q->id, .srcfd = replacement,
+                        .newfd = q->data.args[1], .newfd_flags = O_CLOEXEC,
+                        .flags = SECCOMP_ADDFD_FLAG_SETFD | SECCOMP_ADDFD_FLAG_SEND};
+                    int sent = ioctl(listener, SECCOMP_IOCTL_NOTIF_ADDFD, &add);
+                    int error = errno; close(replacement);
+                    if (sent >= 0) {
+                        t->pending_identity = next; t->mapped_image = 1; admitted_images++;
+                        TRACE("PROBE admitted-image pid=%d fd=%d euid=%u secure=%d\n",
+                            t->pid, sent, next.value.uid.effective, next.secure);
+                        return;
                     }
+                    if (error == ENOENT) return;
+                    reply.error = -error;
                 }
                 if (!reply.error) {
                     t->pending_identity = next; t->mapped_image = 1;
-                    if (setid) TRACE("PROBE stored-setid-image pid=%d euid=%u egid=%u secure=%d\n",
+                    if (t->exec_setid) TRACE("PROBE stored-setid-image pid=%d euid=%u egid=%u secure=%d\n",
                         t->pid,next.value.uid.effective,next.value.gid.effective,next.secure);
                 }
-            }
-        }
-    } else if (q->data.args[0] == MD_GUEST_ENTER_IMAGE) {
-        if (!t->ready || t->entered || q->data.args[2] > 128) reply.error = -EPERM;
-        else if (t->mapped_image) {
-            size_t count = q->data.args[2];
-            Elf64_auxv_t aux[128];
-            struct iovec local = {aux, count * sizeof(*aux)}, remote = {(void *)q->data.args[1], local.iov_len};
-            if (process_vm_readv(t->pid, &local, 1, &remote, 1, 0) != (ssize_t)local.iov_len) reply.error = -EFAULT;
-            unsigned found = 0;
-            const struct md_exec_identity *next = &t->pending_identity;
-            for (size_t i = 0; !reply.error && i < count; i++) {
-                switch (aux[i].a_type) {
-                case AT_UID: aux[i].a_un.a_val = md_identity_visible_id(&next->value,0,next->value.uid.real); found |= 1; break;
-                case AT_EUID: aux[i].a_un.a_val = md_identity_visible_id(&next->value,0,next->value.uid.effective); found |= 2; break;
-                case AT_GID: aux[i].a_un.a_val = md_identity_visible_id(&next->value,1,next->value.gid.real); found |= 4; break;
-                case AT_EGID: aux[i].a_un.a_val = md_identity_visible_id(&next->value,1,next->value.gid.effective); found |= 8; break;
-                case AT_SECURE: aux[i].a_un.a_val = next->secure; found |= 16; break;
-                }
-            }
-            if (!reply.error && found != 31) reply.error = -EPROTO;
-            if (!reply.error && process_vm_writev(t->pid, &local, 1, &remote, 1, 0) != (ssize_t)local.iov_len)
-                reply.error = -EFAULT;
-            if (!reply.error) {
-                reply.val = next->secure;
-                CHECK(!md_task_registry_publish(tasks, t->pid, t->tgid, &next->value, &t->resources));
-                if (!ioctl(listener, SECCOMP_IOCTL_NOTIF_SEND, &reply)) {
-                    t->identity = next->value; t->mapped_image = 0; t->entered = 1;
-                    md_exec_image_release(t->exec_setid); t->exec_setid=NULL;
-                    TRACE("PROBE entered-image pid=%d uid=%u euid=%u secure=%d\n", t->pid,
-                        t->identity.uid.real, t->identity.uid.effective, next->secure);
-                    if (diagnostics) {
-                        struct md_fs_location root;
-                        struct md_fs_anchor *cwd=NULL;
-                        md_domain_paths(t->resources.fs,&root,&cwd);
-                        TRACE("PROBE image-cwd pid=%d known=%d\n",t->pid,cwd!=NULL);
-                        md_fs_anchor_release(cwd);
-                    }
-                } else {
-                    CHECK(errno == ENOENT);
-                    CHECK(!md_task_registry_publish(tasks, t->pid, t->tgid, &t->identity, &t->resources));
-                }
-                return;
             }
         }
     } else reply.error = -EPROTO;
@@ -1510,14 +1559,23 @@ static void delegate_begin(struct thread *t, const struct seccomp_notif *q) {
     t->phase = DELEGATE_CANCEL;
     tracee_request(t, PTRACE_INTERRUPT, NULL, NULL, "interrupt-delegation");
 }
-static void machine_observe(struct thread *t,const struct user_pt_regs *regs) {
+static int machine_observe(struct thread *t,const struct user_pt_regs *regs) {
     struct md_svc_registry *registry=md_memory_svc(t->memory);
     if (!registry || registry->disabled || !t->entered || t->application_filter || t->cooperative_blocked
             || t->debug_options || md_memory_exposed(t->memory) || !md_entry_supported((int)regs->regs[8])
-            || regs->pc<4 || regs->pc==RAW_GATE) return;
-    int published=md_svc_registry_direct(registry,t->pid,regs->pc-4,regs->regs[8]);
+            || regs->pc<4 || regs->pc==RAW_GATE) return 0;
+    enum md_entry_route route=md_entry_route((int)regs->regs[8]);
+    if (route==MD_ENTRY_TASK) return 0;
+    /* This is only a profitability rejection. The guest-side snapshot still
+     * proves every execution; a file-backed/shared range cannot use it. */
+    if (route==MD_ENTRY_MEMORY && (!md_memory_native_arguments(regs->regs[8],regs->regs[2],regs->regs[3])
+            || md_memory_mapping_observe(t->memory,regs->regs[0],regs->regs[1])
+            || md_shm_space_used(t->shm_space))) return 0;
+    const struct md_private_memory_access *access=md_memory_private_access(t->memory);
+    int published=md_svc_registry_direct(registry,t->pid,access ? access->memory : -1,regs->pc-4,regs->regs[8]);
     if (published) TRACE("PROBE machine-entry pid=%d svc=%#llx nr=%llu publication=%d\n",
         t->pid,regs->pc-4,regs->regs[8],published);
+    return published==1 && (route==MD_ENTRY_WORKER || route==MD_ENTRY_FD || route==MD_ENTRY_VALUE);
 }
 static void notification_interrupted(struct thread *t) {
     if (t->phase!=DELEGATE_CANCEL
@@ -1539,6 +1597,22 @@ static int cooperative_copying(struct thread *t) {
             || md_buffer_span(&t->cooperative_buffer,&span) || span.size<sizeof(struct md_entry_channel)) return 0;
     const struct md_entry_channel *c=span.data;
     return c->owner==t->pid && atomic_load_explicit(&c->copying,memory_order_acquire);
+}
+static void cooperative_buffer_release(struct thread *t) {
+    if (t->cooperative_buffer.pool) {
+        struct md_buffer_span span;
+        CHECK(!md_buffer_span(&t->cooperative_buffer,&span) && span.size>=sizeof(struct md_entry_channel));
+        struct md_entry_channel *c=span.data;
+        md_memory_admission_detach(t->memory,&c->memory);
+        CHECK(!md_buffer_release(&t->cooperative_buffer));
+    }
+}
+static void cooperative_memory_publish(struct thread *t,int eligible) {
+    if (!t->cooperative_buffer.pool) return;
+    struct md_buffer_span span;
+    CHECK(!md_buffer_span(&t->cooperative_buffer,&span) && span.size>=sizeof(struct md_entry_channel));
+    struct md_entry_channel *c=span.data;
+    md_memory_admission_publish(t->memory,&c->memory,eligible && !md_shm_space_used(t->shm_space));
 }
 static void buffer_setup(struct thread *t, const struct seccomp_notif *q) {
     size_t page=(size_t)getpagesize();
@@ -2040,7 +2114,7 @@ static long cooperative_bind(struct thread *t) {
     if (!error && span.size<sizeof(struct md_entry_channel)) error=-ENOBUFS;
     if (!error) error=md_broker_cooperative_bind(broker,t->pid,span.data,abi.buffer_admit);
     if (error) {
-        CHECK(!md_buffer_release(&t->cooperative_buffer));
+        cooperative_buffer_release(t);
         return error;
     }
     return (long)md_memory_buffer_address(t->memory,&t->cooperative_buffer);
@@ -3084,8 +3158,17 @@ static void fd_start(struct thread *t) {
     }
     if (md_fd_order_state(&t->fd_order)==MD_RESOURCE_ORDER_READY)
         CHECK(!md_fd_order_start(&t->fd_order));
-    if ((!t->fd_job || t->fd_job==MD_FD_DUPLICATE_BEGIN) && !fd_loans_ready(t)) return;
     struct user_pt_regs *r=&t->fd_registers;
+    if (t->fd_job==MD_FD_DUPLICATE_BEGIN) {
+        int error=md_fd_origins_validate(&t->fd_order,r->regs[1]);
+        if (error) {
+            CHECK(!md_fd_order_complete(&t->fd_order)); t->fd_job=0;
+            r->regs[0]=error;
+            if (set_registers(t->pid,r)) resume(t->pid,0);
+            return;
+        }
+    }
+    if ((!t->fd_job || t->fd_job==MD_FD_DUPLICATE_BEGIN) && !fd_loans_ready(t)) return;
     int needs_fs=t->fd_job==MD_FD_INPUT ? (int)r->regs[2]==AT_FDCWD || (int)r->regs[3]==AT_FDCWD
         : !t->fd_job && (t->fd_cwd || md_clone_call(r->regs[8]) || r->regs[8]==SYS_setns
             || (r->regs[8]==SYS_unshare && (r->regs[0]&(CLONE_FS|CLONE_NEWNS|CLONE_NEWUSER))));
@@ -3102,9 +3185,8 @@ static void fd_start(struct thread *t) {
     if (t->fd_job) {
         long result=0;
         if (t->fd_job==MD_FD_DUPLICATE_BEGIN) {
-            result=md_fd_origins_validate(&t->fd_order,r->regs[1]);
             struct md_fd_observation view;
-            if (!result) result=md_fd_origins_observe(t->resources.files,(int)t->original.regs[0],&view);
+            result=md_fd_origins_observe(t->resources.files,(int)t->original.regs[0],&view);
             if (!result) result=view.selectors;
         }
         if (t->fd_job==MD_FD_PAIR_BEGIN) {
@@ -4148,6 +4230,15 @@ static void readiness_loan_closed(pid_t pid,long result) {
     }
 }
 static void fd_loan_closed(struct thread *t,long result) {
+    if (!result && t->fd_job==MD_FD_DUPLICATE_BEGIN) {
+        /* fd_start validated discovery before retirement. This close owns the
+         * same uninterrupted table turn: do not retry our own generation bump
+         * and let the waiter lend the just-retired slot again indefinitely. */
+        CHECK(md_fd_order_state(&t->fd_order)==MD_RESOURCE_ORDER_RUNNING);
+        struct md_fd_observation view;
+        result=md_fd_origins_observe(t->resources.files,(int)t->original.regs[0],&view);
+        if (!result) t->fd_registers.regs[1]=view.generation;
+    }
     if (result) { fd_discard(t); return_value(t,&t->fd_registers,result); }
     else fd_start(t);
 }
@@ -5612,18 +5703,6 @@ static void buffer_control(struct thread *t, const struct user_pt_regs *r) {
         buffer_result_replay(t);
         return;
     }
-    case MD_BUFFER_MACHINE_ADMIT:
-        result=broker && t->phase==IDLE && !t->entered && !t->application_filter
-            && !t->cooperative_blocked && !t->debug_options && !md_memory_exposed(t->memory);
-        break;
-    case MD_BUFFER_IMAGE_BACKING: {
-        result=-EPERM;
-        if (t->entered || t->phase!=IDLE || r->regs[2]) break;
-        int fd=duplicate_fd(t->pid,(int)r->regs[1]);
-        result=fd<0 ? fd : md_memory_image_backing(t->memory,t->pid,fd);
-        if (fd>=0) close(fd);
-        break;
-    }
     case MD_BUFFER_POLL_BEGIN:
         if (t->phase!=DISPATCHING || t->readiness || r->regs[1] || r->regs[2]
                 || (t->original.regs[8]!=SYS_ppoll && t->original.regs[8]!=SYS_pselect6)) break;
@@ -6694,11 +6773,13 @@ static int svc_client_alive(pid_t pid,void *memory) {
     struct thread *t=find_thread(pid);
     return t && t->memory==memory && !t->terminal_stop;
 }
-static int svc_clients_collect(struct thread *t) {
+static int svc_clients_prepare(struct thread *t) {
     struct md_svc_registry *r=md_memory_svc(t->memory);
-    if (!r || !r->clients_dirty) return 1;
+    if (!r || r->disabled) return 1;
     const struct md_private_memory_access *access=md_memory_private_access(t->memory);
-    int error=md_svc_registry_collect_clients(r,t->pid,access ? access->memory : -1,svc_client_alive,t->memory);
+    int fd=access ? access->memory : -1;
+    int error=md_svc_registry_identity(r,t->pid,fd,md_memory_sole_owner(t->memory) ? t->pid : 0);
+    if (!error) error=md_svc_registry_collect_clients(r,t->pid,fd,svc_client_alive,t->memory);
     if (error==-EIO || error==-EFAULT) {
         int displaced=md_task_checkpoint_displaced(&checkpoints,t->pid);
         if (displaced>0) error=-ESRCH;
@@ -6795,7 +6876,7 @@ static void resume(pid_t pid, int sig) {
         if (freezer_parked(t)) md_cgroup_member_frozen(t->resources.cgroup,1);
     }
     struct md_svc_registry *machine=md_memory_svc(t->memory);
-    if (!svc_clients_collect(t)) return;
+    if (!svc_clients_prepare(t)) return;
     if (machine && !machine->disabled && (md_memory_exposed(t->memory)
             || t->debug_options || md_debugger_traced(debugger,pid)))
         CHECK(!md_svc_registry_revoke(machine,pid));
@@ -6820,6 +6901,7 @@ static void resume(pid_t pid, int sig) {
             && !t->debug_call_active && !t->debug_step_call && !md_debugger_traced(debugger,pid);
         struct md_svc_registry *registry=md_memory_svc(t->memory);
         int discovery=opens && registry && !registry->disabled && !md_memory_exposed(t->memory);
+        cooperative_memory_publish(t,discovery && !t->cooperative_blocked);
         struct md_broker_code_ranges ranges={.size=MD_SVC_CODE_BYTES};
         _Static_assert(MD_SVC_CODE_POOLS<=8,"broker code range capacity");
         if (registry) {
@@ -6831,14 +6913,16 @@ static void resume(pid_t pid, int sig) {
             |(opens && !t->cooperative_blocked ? MD_BROKER_COOPERATIVE : 0) : 0,
             RAW_GATE,abi.watch_return,&ranges));
     }
-    if (!sig && md_signal_delivery_pending(&t->signal_delivery) && !t->signal_delivery.active
-            && !t->signal_shielded && debugger_at_boundary(t)
+    int publish_signal=md_signal_delivery_pending(&t->signal_delivery) && !t->signal_delivery.active
+        && !t->signal_shielded;
+    if (!sig && (t->machine.draining || publish_signal) && debugger_at_boundary(t)
             && !t->debug_call_active) {
         /* Carrier delivery resumes with CONT. A native syscall must first
          * publish its exit to the guest debugger, even when its result was
-         * replaced without entering an adapter phase. */
+         * replaced without entering an adapter phase. A cold entry fence also
+         * retires native aliases here, without waiting for another signal. */
         int deferred=md_svc_machine_flush(md_memory_svc(t->memory),&t->machine,pid);
-        int error=deferred ? (deferred<0 ? deferred : 0)
+        int error=deferred || !publish_signal ? (deferred<0 ? deferred : 0)
             : md_signal_delivery_publish(&t->signal_delivery,pid,t->tgid);
         if (error==-ESRCH) { t->resume_lost=1; return; }
         CHECK(!error);
@@ -6852,7 +6936,7 @@ static void resume(pid_t pid, int sig) {
             || phase == WATCH_ENTRY || phase == WATCH_READ || phase==DEBUG_WAIT_ENTRY || phase==DEBUG_WAIT_EXIT
             || phase==DEBUG_PARK_ENTRY || phase==DEBUG_PARK_EXIT
             || phase==IPC_WAIT_ENTRY || phase==IPC_WAITING || phase==SOCKET_WAIT_ENTRY || phase==SOCKET_WAITING
-            || phase==CALL_RESTART_ENTRY || phase==CALL_RESTART_EXIT || phase==EPOLL_WAIT
+            || phase==CALL_RESTART_ENTRY || phase==CALL_RESTART_EXIT || phase==EPOLL_CALL || phase==EPOLL_WAIT
             || phase==FILE_WAIT_ENTRY || phase==FILE_WAITING
             || phase==CONTROL_WAIT_ENTRY || phase==CONTROL_WAITING || phase==CLOSE_WAIT_ENTRY || phase==CLOSE_WAITING
             || phase==WAIT_CANCEL_EXIT || phase==CLONE_ENTRY || phase==CLONE_ADMISSION
@@ -7000,8 +7084,9 @@ static uintptr_t dispatch_input(struct thread *t,unsigned policy) {
     unsigned long count=nr==SYS_ppoll ? t->original.regs[1] : t->original.regs[0];
     int poll=(nr==SYS_ppoll || nr==SYS_pselect6) && count<=INT_MAX
         && (nr!=SYS_ppoll || count<=md_process_native_nofile(t->resources.process));
+    int exec=(nr==SYS_execve || nr==SYS_execveat) && t->endpoint[0];
     if (t->buffer.pool || (policy&MD_DISPATCH_NETWORK_DATA)
-            || (nr!=SYS_recvmsg && nr!=SYS_recvmmsg && !poll)) return 0;
+            || (nr!=SYS_recvmsg && nr!=SYS_recvmmsg && !poll && !exec)) return 0;
     /* Opportunistic admission, not a retained per-thread cache. Pool pressure
      * keeps the adapter's normal queued TAKE; unrelated calls allocate nothing. */
     if (md_buffers_take_sized(md_memory_buffers(t->memory),poll ? md_poll_bytes(count) : 0,&t->buffer)) return 0;
@@ -7471,6 +7556,14 @@ static void mapping_begin(struct thread *t, struct user_pt_regs *regs) {
     regs->regs[0]=error;
     if (set_registers(t->pid,regs)) resume(t->pid,0);
 }
+/* A native observation needs operands, not a restorable GPR image. Capture
+ * the latter only before an error rewrite or task-affine adapter takes over. */
+static int memory_context(struct thread *t,struct user_pt_regs *regs) {
+    if (!t->memory_arguments_only) return 1;
+    if (!registers(t->pid,&t->original)) return 0;
+    t->memory_arguments_only=0; *regs=t->original;
+    return 1;
+}
 static void memory_start(struct thread *t) {
     retry_clear(t,RETRY_MEMORY);
     enum md_resource_order_state state=md_resource_order_state(&t->memory_order);
@@ -7495,6 +7588,7 @@ static void memory_start(struct thread *t) {
                 error=md_svc_registry_unpatch(machine,t->pid,regs.regs[4],regs.regs[2]);
         }
         int file=nr==SYS_mmap && !(regs.regs[3]&MAP_ANONYMOUS);
+        struct md_fd_native native={0};
         if (file && !error) {
             if (!t->memory_files.table) {
                 error=md_fd_order_begin(t->resources.files,&t->memory_files,fd_wakeup);
@@ -7503,7 +7597,8 @@ static void memory_start(struct thread *t) {
             if (!error && md_fd_order_state(&t->memory_files)!=MD_RESOURCE_ORDER_READY) { retry_wait(t,RETRY_MEMORY); return; }
             if (!error) {
                 CHECK(!md_fd_order_start(&t->memory_files));
-                struct md_proc_file *control=proc_file_capture(t,(int)regs.regs[4]);
+                int ordinary=md_fd_origins_native(&t->memory_files,(int)regs.regs[4],&native);
+                struct md_proc_file *control=ordinary ? NULL : proc_file_capture(t,(int)regs.regs[4]);
                 if (control) {
                     error=md_proc_file_mapping(control,(unsigned)regs.regs[2],(unsigned)regs.regs[3]);
                     struct md_control_file file=md_proc_file_control(control);
@@ -7513,6 +7608,7 @@ static void memory_start(struct thread *t) {
                         else {
                             /* Capture the exact OFD, then release both turns
                              * before asking its userspace provider for data. */
+                            if (!memory_context(t,&regs)) { md_proc_file_release(control); return; }
                             CHECK(!md_fd_order_complete(&t->memory_files));
                             CHECK(!md_resource_order_complete(&t->memory_order)); t->memory_action=0;
                             t->proc_file=control;
@@ -7523,9 +7619,10 @@ static void memory_start(struct thread *t) {
                     }
                     md_proc_file_release(control);
                 }
-                struct md_fs_anchor *origin=md_fd_origins_get(t->resources.files,(int)regs.regs[4],NULL);
+                struct md_fs_anchor *origin=ordinary ? native.origin
+                    : md_fd_origins_get(t->resources.files,(int)regs.regs[4],NULL);
                 noexec=!!(md_fs_anchor_policy(origin)&MD_MOUNT_NOEXEC);
-                md_fs_anchor_release(origin);
+                if (!ordinary) md_fs_anchor_release(origin);
                 if (!error && noexec && (regs.regs[2]&PROT_EXEC)) error=-EPERM;
             }
         }
@@ -7537,36 +7634,92 @@ static void memory_start(struct thread *t) {
         int source=-1; uint64_t offset=0;
         int repair=nr==SYS_mprotect && md_memory_private_access(t->memory)
             && md_memory_file_view(t->memory,regs.regs[0],regs.regs[1],&source,&offset);
-        int observe=repair || (nr!=SYS_mprotect && (file || overlap || md_memory_has_policy(t->memory)));
+        int tracked=nr!=SYS_mprotect && md_memory_mapping_observe(t->memory,regs.regs[0],
+            nr==SYS_mremap && !regs.regs[1] ? 1 : regs.regs[1]);
+        if (nr==SYS_mremap && (regs.regs[3]&MREMAP_FIXED))
+            tracked|=md_memory_mapping_observe(t->memory,regs.regs[4],regs.regs[2]);
+        int observe=repair || (nr!=SYS_mprotect && (file || overlap || tracked));
+        TRACE("PROBE memory-plan pid=%d nr=%ld address=%#llx size=%llu protection=%#llx flags=%#llx file=%d tracked=%d repair=%d sole=%d\n",
+            t->pid,nr,regs.regs[0],regs.regs[1],regs.regs[2],regs.regs[3],file,tracked,repair,
+            md_memory_sole_owner(t->memory));
         if (!error && observe && nr!=SYS_mprotect) error=md_memory_mapping_prepare(t->memory,&t->memory_change,
             nr==SYS_mmap ? MD_MAPPING_MAP : nr==SYS_munmap ? MD_MAPPING_UNMAP : MD_MAPPING_REMAP,
             regs.regs[0],regs.regs[1],nr==SYS_mremap ? regs.regs[2] : 0,(unsigned)regs.regs[3],noexec);
         if (!error && file && !noexec && (regs.regs[3]&MAP_TYPE)==MAP_PRIVATE
                 && md_memory_private_access(t->memory)) {
-            int fd=duplicate_fd(t->pid,(int)regs.regs[4]);
-            t->memory_backing_pending=fd<0;
-            int captured=fd<0 ? fd : md_memory_mapping_backing(t->memory,&t->memory_change,fd,regs.regs[5]);
-            if (fd>=0) close(fd);
+            int number=(int)regs.regs[4],captured=0;
+            /* The running file-table turn authenticates this immutable pin.
+             * Typed providers, uncertain slots and denied pin access still
+             * take the exact kernel-descriptor capture path below. */
+            if (native.kind==S_IFREG) {
+                captured=md_memory_mapping_pin(t->memory,&t->memory_change,
+                    md_fs_anchor_fd(native.origin),regs.regs[5]);
+            }
+            if (captured<=0) {
+                int fd=duplicate_fd(t->pid,number);
+                t->memory_backing_pending=fd<0;
+                captured=fd<0 ? fd : md_memory_mapping_backing(t->memory,&t->memory_change,fd,regs.regs[5]);
+                if (fd>=0) close(fd);
+            }
             /* This optional authority cannot fail native mmap or relax noexec.
              * Denied direct access uses task-affine capture after native mmap. */
             TRACE("PROBE memory-backing pid=%d fd=%d retained=%d result=%d\n",
-                t->pid,(int)regs.regs[4],!!t->memory_change.backing,captured);
+                t->pid,number,!!t->memory_change.backing,captured);
         }
         if (error || !observe) {
+            if (error && !memory_context(t,&regs)) return;
             if (t->memory_files.table) CHECK(!md_fd_order_complete(&t->memory_files));
             CHECK(!md_resource_order_complete(&t->memory_order)); t->memory_action=0;
+            t->memory_arguments_only=0;
             t->phase=IDLE;
             if (error) return_value(t,&regs,error); else resume(t->pid,0);
         } else { t->phase=OBSERVING; resume(t->pid,0); }
     }
 }
-static void memory_begin(struct thread *t, const struct user_pt_regs *regs, enum memory_action action) {
+static void memory_begin(struct thread *t, const struct user_pt_regs *regs, enum memory_action action,int arguments_only) {
     CHECK(!t->memory_order.queue && !t->memory_action);
+    t->memory_arguments_only=arguments_only;
     t->original=*regs; t->memory_action=action; t->phase=MEMORY_WAIT; t->memory_backing_pending=0;
     CHECK(md_memory_order_begin(t->memory,&t->memory_order,fd_wakeup)>=0);
     /* EVENT_WAIT: address-space publication precedes competing unmap/fork;
      * task exit cancels its queued turn. fd_ready drives progress, not polling. */
     memory_start(t);
+}
+static int memory_observation(struct thread *t,const struct ptrace_syscall_info *info,
+        struct user_pt_regs *observed,int *native_entry) {
+    long nr=(long)info->seccomp.nr;
+    if (info->arch!=AUDIT_ARCH_AARCH64
+            || (nr!=SYS_mmap && nr!=SYS_munmap && nr!=SYS_mprotect && nr!=SYS_mremap)
+            || info->seccomp.ret_data!=MD_INTERCEPT_MEMORY || t->entry_fence_result
+            || t->memory_order.queue || t->memory_action || t->debug_options
+            || t->debug_call_active || t->debug_step_call || md_debugger_traced(debugger,t->pid)) return 0;
+    struct md_svc_registry *machine=md_memory_svc(t->memory);
+    *observed=(struct user_pt_regs){.pc=info->instruction_pointer,.sp=info->stack_pointer};
+    observed->regs[8]=nr;
+    for (unsigned i=0;i<6;++i) observed->regs[i]=info->seccomp.args[i];
+    *native_entry=0;
+    if (md_svc_registry_context(machine,observed->pc,observed->sp)) {
+        /* The exact kernel alias has already restored the caller's context.
+         * A private stack or any other resident PC still needs full recovery. */
+        if (t->application_filter || t->cooperative_blocked || md_memory_exposed(t->memory)
+                || (observed->sp>machine->frames && observed->sp-machine->frames<=MD_SVC_POOL_SIZE)) return 0;
+        *native_entry=md_svc_machine_native_entry(machine,observed);
+        if (!*native_entry) return 0;
+    }
+    return 1;
+}
+static int memory_observed(struct thread *t,const struct ptrace_syscall_info *info) {
+    struct user_pt_regs observed;
+    int native_entry;
+    if (!memory_observation(t,info,&observed,&native_entry)) return 0;
+    if (native_entry!=1) {
+        struct user_pt_regs discovery=observed;
+        if (native_entry) discovery.pc=md_svc_registry_call_origin(md_memory_svc(t->memory),observed.pc);
+        machine_observe(t,&discovery);
+    }
+    if (statistics) ++statistics->calls[observed.regs[8]].trace;
+    memory_begin(t,&observed,MEMORY_KERNEL,1);
+    return 1;
 }
 static void proc_lookup_start(struct thread *t) {
     retry_clear(t,RETRY_PROC_LOOKUP);
@@ -7594,7 +7747,7 @@ static void proc_lookup_start(struct thread *t) {
         || (nr==SYS_ioctl && md_filesystem_ioctl_command((unsigned)regs.regs[1])));
     if (nr==SYS_mmap) {
         md_proc_file_release(file);
-        memory_begin(t,&regs,MEMORY_KERNEL); return;
+        memory_begin(t,&regs,MEMORY_KERNEL,0); return;
     }
     if (file && nr==SYS_fcntl) {
         long result=0;
@@ -7667,6 +7820,7 @@ static void memory_capture_complete(void *context,struct md_task_helper_result r
         md_memory_mapping_finish(t->memory,&t->memory_change,(long)capture->returned.regs[0]);
         if (t->memory_files.table) CHECK(!md_fd_order_complete(&t->memory_files));
         CHECK(!md_resource_order_complete(&t->memory_order)); t->memory_action=0;
+        t->memory_arguments_only=0;
         t->memory_capture=NULL; t->kernel_stopped=1; t->phase=IDLE;
         if (set_registers(t->pid,&capture->returned)
                 && signal_mask(t,capture->mask,"memory-capture-mask"))
@@ -7777,14 +7931,14 @@ static int readiness_native_event(struct thread *t,int status) {
     unsigned event=(unsigned)status>>16;
     int signal=WSTOPSIG(status);
     struct user_pt_regs regs;
-    if (event==PTRACE_EVENT_SECCOMP && t->phase==EPOLL_CALL) {
-        unsigned long cookie;
+    if (!event && signal==(SIGTRAP|0x80) && t->phase==EPOLL_CALL) {
+        struct ptrace_syscall_info info;
         if (!registers(t->pid,&regs)
-                || !tracee_request(t,PTRACE_GETEVENTMSG,NULL,&cookie,"epoll-call")) return 1;
+                || !tracee_request(t,PTRACE_GET_SYSCALL_INFO,(void *)sizeof(info),&info,"epoll-call-entry")) return 1;
         struct readiness_owner *o=t->readiness;
-        CHECK(cookie==MD_INTERCEPT_TASK && regs.pc==abi.task_return
-            && regs.regs[8]==(unsigned long)o->native_call.number
-            && !memcmp(regs.regs,o->native_call.value,sizeof(o->native_call.value)));
+        CHECK(info.op==PTRACE_SYSCALL_INFO_ENTRY && info.instruction_pointer==abi.task_return
+            && info.entry.nr==(unsigned long)o->native_call.number
+            && !memcmp(info.entry.args,o->native_call.value,sizeof(o->native_call.value)));
         if (o->evicting) {
             if (skip(t->pid)) {
                 md_epoll_wait_cancel(&o->wait);
@@ -7804,7 +7958,7 @@ static int readiness_native_event(struct thread *t,int status) {
     if (!(event==MD_TASK_CHECKPOINT_EVENT || (!event && signal==(SIGTRAP|0x80))
             || (event==PTRACE_EVENT_STOP && signal==SIGTRAP && t->socket_waking))) return 0;
     if (!registers(t->pid,&regs)) return 1;
-    CHECK(regs.pc==abi.task_return+(event==MD_TASK_CHECKPOINT_EVENT ? 4 : 0));
+    CHECK(regs.pc==(event==MD_TASK_CHECKPOINT_EVENT ? abi.task_completed+4 : abi.task_return));
     long value=(long)regs.regs[0];
     int restart=md_syscall_restarting(value);
     int waking=t->socket_waking; t->socket_waking=0;
@@ -7916,7 +8070,14 @@ static int interrupted_operation(struct thread *t) {
         if (set_registers(t->pid,&regs)) resume(t->pid,0);
         return 1;
     }
-    machine_observe(t,&regs);
+    if (machine_observe(t,&regs) && !t->metadata_restart && !t->entry_fence_result) {
+        /* The notification was cancelled before any effect. Only a newly
+         * published site can enter here; an existing gate's fallback must
+         * complete through Base instead of retrying the same gate forever. */
+        release_operation(t); t->phase=IDLE; regs.pc-=4;
+        if (set_registers(t->pid,&regs)) resume(t->pid,0);
+        return 1;
+    }
     t->original=regs; calls++; t->calls++;
     if (receive_entry(t)) return 1;
     if (!save_signal_mask(t,&t->mask,"get-mask") || !shield(t)) return 1;
@@ -8230,6 +8391,7 @@ static int publish_birth(struct thread *t,pid_t child,unsigned event) {
     return debug_birth;
 }
 static pid_t kernel_event(int *status,struct rusage *usage) {
+    int64_t start=md_cost_begin(statistics ? &statistics->event_collect : NULL);
     int accounting=md_debugger_active(debugger);
     /* Refresh the lossy TID hint before paying for a general kernel scan.
      * The periodic source budget still services all other event owners. */
@@ -8238,6 +8400,7 @@ static pid_t kernel_event(int *status,struct rusage *usage) {
     /* Deferred events may outlive a debugger attachment. Absent accounting
      * must be explicit, not a previous event's or uninitialized stack data. */
     if (pid>0 && usage && !accounting) *usage=(struct rusage){0};
+    md_cost_end(statistics ? &statistics->event_collect : NULL,start);
     return pid;
 }
 static pid_t wait_event(int *status, struct rusage *usage) {
@@ -8295,7 +8458,9 @@ static pid_t wait_event(int *status, struct rusage *usage) {
          * A readiness snapshot cannot outlive its callbacks' descriptor owners. */
         event_sources(events);
         if (statistics) ++statistics->event_waits;
+        int64_t sleep_start=md_cost_begin(statistics ? &statistics->event_sleep : NULL);
         long outcome = md_event_wait(events, EVENT_SOURCES, bound);
+        md_cost_end(statistics ? &statistics->event_sleep : NULL,sleep_start);
         /* Report expiry through the transaction that owns the memory deadline. */
         if (outcome==-ETIMEDOUT && bound==memory_deadline()) memory_progress();
         if (outcome==-ETIMEDOUT && mapping_execution && bound==mapping_execution->deadline) mapping_progress();
@@ -8391,7 +8556,7 @@ static void memory_complete(void *context,struct md_task_helper_result result) {
 static void memory_call(struct memory_execution *execution,const struct md_memory_replace_call *call) {
     struct thread *t=execution->actor;
     execution->call=*call; execution->calling=1;
-    struct user_pt_regs regs={.pc=abi.task_call,.sp=t->original.sp};
+    struct user_pt_regs regs=md_task_registers_entry(abi.task_call,t->original.sp,execution->returned.pstate);
     regs.regs[8]=call->number; memcpy(regs.regs,call->args,sizeof(call->args));
     CHECK(set_registers(t->pid,&regs));
     CHECK(!native_trace(PTRACE_CONT,t->pid,NULL,NULL));
@@ -8439,6 +8604,7 @@ static void memory_finish(struct memory_execution *execution) {
     }
     if (t->memory_files.table) CHECK(!md_fd_order_complete(&t->memory_files));
     CHECK(!md_resource_order_complete(&t->memory_order)); t->memory_action=0;
+    t->memory_arguments_only=0;
     t->phase=IDLE; resume(t->pid,0);
 }
 static int memory_yield_retirement(struct memory_execution *execution) {
@@ -8606,7 +8772,7 @@ static int memory_event(pid_t pid,int status,const struct rusage *usage) {
             for (unsigned i=0;i<6;++i) CHECK(regs.regs[i]==execution->call.args[i]);
             CHECK(!native_trace(PTRACE_CONT,pid,NULL,NULL));
         } else {
-            CHECK(event==MD_TASK_CHECKPOINT_EVENT && regs.pc==abi.task_return+4);
+            CHECK(event==MD_TASK_CHECKPOINT_EVENT && regs.pc==abi.task_completed+4);
             execution->calling=0;
             if (execution->stage==MEMORY_ADVICE) execution->error=(long)regs.regs[0];
             else CHECK(!md_memory_replace_observed(&execution->replacement,(long)regs.regs[0]));
@@ -9092,7 +9258,7 @@ int main(int argc, char **argv) {
             md_svc_machine_forget(&t->machine);
             /* A non-leader exec replaces the task behind the leader's PID. */
             md_broker_forget(broker, pid);
-            CHECK(!md_buffer_release(&t->cooperative_buffer));
+            cooperative_buffer_release(t);
             completed_event_discard(t);
             unsigned long old; CHECK(!native_trace(PTRACE_GETEVENTMSG, pid, NULL, &old));
             t->debug_exec_old=(pid_t)old;
@@ -9157,7 +9323,7 @@ int main(int argc, char **argv) {
             md_memory_release(t->memory); t->memory=memory;
             t->memory_access_pending=0;
             t->phase = IDLE; t->stack = 0; t->ready = 0; t->resume_lost = 0; t->terminal_stop=0; images++;
-            t->mapped_image = 0; t->entered = 0;
+            t->mapped_image = 0; t->entered = 0; t->image_backings_ready=0;
             t->registration_revoked=0;
             t->pid_preflight=t->filter_preflight=0;
             t->process_image=0;
@@ -9209,36 +9375,54 @@ int main(int argc, char **argv) {
         }
         else if (event == PTRACE_EVENT_SECCOMP) {
             struct user_pt_regs regs;
-            int captured=t->phase==IDLE && md_memory_svc(t->memory);
+            unsigned long cookie;
+            struct ptrace_syscall_info info={0};
+            const struct ptrace_syscall_info *observed=NULL;
+            if (t->phase==IDLE && t->ready) {
+                if (!tracee_request(t,PTRACE_GET_SYSCALL_INFO,(void *)sizeof(info),&info,"seccomp-call")) continue;
+                if (info.op==PTRACE_SYSCALL_INFO_SECCOMP) {
+                    cookie=info.seccomp.ret_data; observed=&info;
+                    if (memory_observed(t,&info)) continue;
+                }
+            }
+            if (!observed && !tracee_request(t,PTRACE_GETEVENTMSG,NULL,&cookie,"seccomp-event")) continue;
+            struct md_svc_registry *registry=md_memory_svc(t->memory);
+            /* Discovery and resident recovery need full context. Ordinary IO
+             * outside those regions can use the existing syscall observation,
+             * including its original pointers and native wait semantics. */
+            int captured=t->phase==IDLE && registry && (!observed
+                || md_entry_supported((int)observed->seccomp.nr)
+                || md_svc_registry_context(registry,observed->instruction_pointer,observed->stack_pointer));
             if (captured) {
                 if (!registers(pid,&regs)) continue;
-                int owned=md_svc_machine_syscall(md_memory_svc(t->memory),&t->machine,pid,&regs);
+                int native_entry=0;
+                if (!t->application_filter && !t->cooperative_blocked
+                        && !t->debug_options && !md_memory_exposed(t->memory))
+                    native_entry=md_svc_machine_native_entry(registry,&regs);
+                int owned=native_entry ? 0 : md_svc_machine_syscall(md_memory_svc(t->memory),&t->machine,pid,&regs);
                 if (owned==-ESRCH) { t->resume_lost=1; continue; }
                 if (owned<0) errno=-owned;
                 CHECK(owned>=0);
                 if (owned) { resume(pid,0); continue; }
                 /* Observe the executed site before compact Base handlers can
                  * consume it. Reuse this snapshot for ordinary dispatch too. */
-                machine_observe(t,&regs);
+                struct user_pt_regs discovery=regs;
+                if (native_entry) discovery.pc=md_svc_registry_call_origin(registry,regs.pc);
+                int published=native_entry==1 ? 0 : machine_observe(t,&discovery);
+                if (!native_entry && published && !t->entry_fence_result) {
+                    struct user_pt_regs entry=regs; entry.pc-=4;
+                    int redirected=md_svc_machine_redirect(&t->machine,pid,&entry);
+                    if (redirected==-ESRCH) { t->resume_lost=1; continue; }
+                    if (redirected<0) errno=-redirected;
+                    CHECK(redirected>0);
+                    resume(pid,0); continue;
+                }
             }
             if (t->phase==WAIT_CANCEL_EXIT) {
                 if (skip(pid)) resume(pid,0);
                 continue;
             }
-            unsigned long cookie;
-            struct ptrace_syscall_info info={0};
-            const struct ptrace_syscall_info *observed=NULL;
-            if (t->phase==IDLE && t->ready && t->resources.files
-                    && (t->application_filter || md_fd_selector_has(t->fd_selector,MD_FD_SELECTOR_PROC,-1)>0
-                        || md_fd_selector_has(t->fd_selector,MD_FD_SELECTOR_POLL,-1)>0
-                        || md_fd_selector_has(t->fd_selector,MD_FD_SELECTOR_EPOLL,-1)>0)) {
-                if (!tracee_request(t,PTRACE_GET_SYSCALL_INFO,(void *)sizeof(info),&info,"seccomp-call")) continue;
-                if (info.op==PTRACE_SYSCALL_INFO_SECCOMP) {
-                    cookie=info.seccomp.ret_data;
-                    observed=&info;
-                    if (fd_native_io(t,&info)) continue;
-                } else if (!tracee_request(t,PTRACE_GETEVENTMSG,NULL,&cookie,"seccomp-event")) continue;
-            } else if (!tracee_request(t,PTRACE_GETEVENTMSG,NULL,&cookie,"seccomp-event")) continue;
+            if (observed && t->resources.files && fd_native_io(t,observed)) continue;
             if (fd_close_compact(t,cookie,observed)) continue;
             if (cookie&MD_INTERCEPT_CLOSE) cookie=MD_INTERCEPT_FD;
             if (!captured && !registers(pid, &regs)) continue;
@@ -9283,7 +9467,7 @@ int main(int argc, char **argv) {
                 if (cookie==MD_INTERCEPT_FD && md_clone_call(regs.regs[8])
                         && (md_shm_space_used(t->shm_space) || md_memory_has_policy(t->memory))
                         && !(t->cloning&CLONE_VM)) {
-                    memory_begin(t,&regs,MEMORY_FORK); continue;
+                    memory_begin(t,&regs,MEMORY_FORK,0); continue;
                 }
                 int delivery=cookie==MD_INTERCEPT_CAPTURE && (int)regs.regs[4]==MD_FS_BUFFER_SOURCE;
                 int capture_flags=delivery ? t->buffer_open.fd>=0
@@ -9303,7 +9487,7 @@ int main(int argc, char **argv) {
             }
             if (cookie == MD_INTERCEPT_MEMORY) {
                 CHECK(t->phase == IDLE);
-                memory_begin(t,&regs,MEMORY_KERNEL); continue;
+                memory_begin(t,&regs,MEMORY_KERNEL,0); continue;
             }
             if (descriptor_call(t, &regs, cookie)) continue;
             /* Stacked selectors survive close/reuse and fork/exec. The newest
@@ -9351,7 +9535,7 @@ int main(int argc, char **argv) {
             CHECK(cookie == MD_INTERCEPT_DISPATCH && t->ready && t->phase == IDLE);
             t->original = regs; calls++; t->calls++;
             t->debug_step_call=md_debugger_step(debugger,pid);
-            if (regs.regs[8]==SYS_shmdt) { memory_begin(t,&regs,MEMORY_DETACH); continue; }
+            if (regs.regs[8]==SYS_shmdt) { memory_begin(t,&regs,MEMORY_DETACH,0); continue; }
             if (direct_begin(t)) continue;
             if (receive_entry(t)) continue;
             if (!save_signal_mask(t,&t->mask,"get-mask")
@@ -9387,10 +9571,17 @@ int main(int argc, char **argv) {
             }
             if (t->machine.retry_svc) {
                 uintptr_t suspended=t->machine.retry_svc;
-                int owned=md_svc_machine_retry(md_memory_svc(t->memory),&t->machine,pid);
+                struct user_pt_regs observed;
+                int owned=md_svc_machine_retry(&t->machine,pid,&observed);
                 if (owned==-ESRCH) { t->resume_lost=1; continue; }
                 CHECK(owned>=0);
-                if (owned) { resume(pid,0); continue; }
+                if (owned) {
+                    machine_observe(t,&observed);
+                    int error=md_svc_registry_resume(md_memory_svc(t->memory),pid,suspended);
+                    if (error==-ESRCH) { t->resume_lost=1; continue; }
+                    CHECK(!error);
+                    resume(pid,0); continue;
+                }
                 for (struct thread *member=threads;member;member=member->next)
                     if (member->pid && member->memory==t->memory)
                         md_broker_resample(broker,member->pid,suspended+4);
@@ -9732,6 +9923,7 @@ int main(int argc, char **argv) {
                     if (t->memory_files.table) CHECK(!md_fd_order_complete(&t->memory_files));
                     CHECK(!md_resource_order_complete(&t->memory_order)); t->memory_action=0;
                 }
+                t->memory_arguments_only=0;
                 t->phase = IDLE; resume(pid, 0); continue;
             }
             if (t->phase!=EXECUTING) {
@@ -9763,14 +9955,22 @@ int main(int argc, char **argv) {
             if (abi.task_control && checkpoint==abi.task_control && t->ready) {
                 mapping_begin(t,&regs); continue;
             }
-            if (checkpoint==abi.enter && t->phase==IDLE && t->entered) {
-                if (!md_memory_svc(t->memory)) {
+            if (checkpoint==abi.enter && t->phase==IDLE && t->ready) {
+                if (!t->entered) {
+                    int result=image_enter(t,regs.regs[2],regs.regs[3],regs.regs[4],regs.regs[5]);
+                    /* Ordinary entry commits at this existing stop. Secure
+                     * entry returns only to lower native dumpability first. */
+                    if (result) { return_value(t,&regs,result); continue; }
+                } else if (regs.regs[3] || regs.regs[4] || regs.regs[5]) {
+                    return_value(t,&regs,-EPERM); continue;
+                }
+                if (t->image_backings_ready && !md_memory_svc(t->memory)) {
                     struct md_svc_registry *registry=md_svc_machine_admit(pid,abi.svc_runtime);
                     if (registry) CHECK(!md_memory_svc_set(t->memory,registry));
                 }
                 t->process_image=regs.regs[2];
                 uint64_t entry=regs.regs[0], stack=regs.regs[1];
-                regs=(struct user_pt_regs){.pc=entry,.sp=stack};
+                regs=md_task_registers_entry(entry,stack,regs.pstate);
                 if (!set_registers(pid,&regs)) continue;
                 if (!md_debugger_exec(debugger,pid,t->debug_exec_old ? t->debug_exec_old : pid)) resume(pid,0);
                 continue;
@@ -9792,6 +9992,7 @@ int main(int argc, char **argv) {
                 continue;
             }
             if (checkpoint==abi.loaded_groups && t->phase==PROCESS_INFO_LOAD) {
+                regs.regs[8]=regs.regs[19];
                 _Static_assert(offsetof(siginfo_t,si_pid)==16,"AArch64 siginfo PID offset");
                 t->process_info_code=(int)regs.regs[5];
                 t->process_info_native=(pid_t)regs.regs[7];
@@ -9828,7 +10029,8 @@ int main(int argc, char **argv) {
                 unsigned count = t->identity_count - t->identity_copied;
                 if (count > 16) count = 16;
                 if (checkpoint == abi.loaded_groups)
-                    for (unsigned i = 0; i < count; i++) t->identity_buffer[t->identity_copied+i] = regs.regs[i+3];
+                    for (unsigned i = 0; i < count; i++)
+                        t->identity_buffer[t->identity_copied+i] = regs.regs[i==5 ? 19 : i+3];
                 t->identity_copied += count; identity_copy_next(t); continue;
             }
             if (checkpoint == EXPORTED && (t->phase == EXPORTING || t->phase == PROC_OPENING)) {
@@ -9858,7 +10060,11 @@ int main(int argc, char **argv) {
                 }
                 t->ready = 1;
                 t->registration_revoked=!!(t->application_filter || t->cooperative_blocked);
-                regs.regs[0]=!t->registration_revoked;
+                regs.regs[0]=t->registration_revoked ? 0 : MD_INTERCEPTION_COOPERATIVE;
+                if (broker && !t->entered && !t->registration_revoked
+                        && !t->debug_options && !md_memory_exposed(t->memory))
+                    regs.regs[0]|=MD_INTERCEPTION_MACHINE;
+                if (statistics) regs.regs[0]|=MD_INTERCEPTION_STATISTICS;
                 if (!set_registers(pid, &regs)) continue;
                 describe_process(pid, 0);
                 TRACE("PROBE guest image ready pid=%d\n", pid); resume(pid, 0);
@@ -10007,6 +10213,9 @@ static void report_statistics(void) {
                 (unsigned long long)statistics->buffer_commands[i]);
         fprintf(stderr, "MD_EVENT_LOOP polls=%llu waits=%llu\n",
             (unsigned long long)statistics->event_polls, (unsigned long long)statistics->event_waits);
+        fprintf(stderr,"MD_EVENT_TIME collectCalls=%llu collectNs=%llu sleepCalls=%llu sleepNs=%llu\n",
+            (unsigned long long)statistics->event_collect.calls,(unsigned long long)statistics->event_collect.nanoseconds,
+            (unsigned long long)statistics->event_sleep.calls,(unsigned long long)statistics->event_sleep.nanoseconds);
         fprintf(stderr,"MD_QUIESCENCE interrupts=%llu memoryRepairs=%llu\n",
             (unsigned long long)statistics->quiesce_interrupts,(unsigned long long)statistics->memory_repairs);
         fprintf(stderr,"MD_ENTRY_FENCE transitions=%llu drains=%llu\n",

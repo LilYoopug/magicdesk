@@ -5,6 +5,9 @@
 #include "fd_filter_program.h"
 #include "execution_window.h"
 #include "spin_policy.h"
+#include "cooperative_channel.h"
+#include "memory_admission.h"
+#include "svc_registry.h"
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -82,6 +85,16 @@ static void execution_windows(void) {
     md_spin_observed(&spin,1,200,200); assert(spin.misses==3);
     md_spin_observed(&spin,1,199,200); assert(!spin.misses);
     md_spin_observed(&spin,0,100,200); assert(spin.misses==1);
+    struct md_entry_channel channel={0};
+    assert(md_entry_wait_kind(SYS_openat,0)==MD_ENTRY_WAIT_OPEN);
+    assert(md_entry_wait_kind(SYS_openat2,0)==MD_ENTRY_WAIT_OPEN);
+    assert(md_entry_wait_kind(SYS_close,0)==MD_ENTRY_WAIT_REPLY);
+    assert(md_entry_wait_kind(SYS_newfstatat,0)==MD_ENTRY_WAIT_REPLY);
+    assert(md_entry_wait_kind(SYS_openat,1)==MD_ENTRY_WAIT_COMMIT);
+    for (unsigned i=0;i<4;++i) md_spin_result(&channel.feedback[MD_ENTRY_WAIT_OPEN],0);
+    assert(!md_spin_budget(&channel.feedback[MD_ENTRY_WAIT_OPEN],25000));
+    assert(md_spin_budget(&channel.feedback[MD_ENTRY_WAIT_REPLY],25000)==25000);
+    assert(md_spin_budget(&channel.feedback[MD_ENTRY_WAIT_COMMIT],25000)==25000);
     puts("PASS execution windows: provider/count/time boundaries, failed acquire/release, teardown, invalid bounds and adaptive parking");
 }
 static void slots(void) {
@@ -341,11 +354,22 @@ static void mapping_policy(void) {
     assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_MAP,0,p,0,0,0));
     md_memory_mapping_finish(m,&c,(long)base);
     assert(!md_memory_has_policy(m) && !md_memory_protect_check(m,base,p,PROT_EXEC));
+    assert(!md_memory_mapping_observe(m,base,p));
+    assert(md_memory_mapping_observe(m,base,SIZE_MAX));
+    assert(md_memory_mapping_observe(m,UINTPTR_MAX-p+1,p));
     assert(allocations==before);
     assert(md_memory_mapping_prepare(m,&c,MD_MAPPING_MAP,0,3*p,0,0,1)==-ENOMEM && !c.prepared);
     fail_allocation=0;
     assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_MAP,0,2*p,0,MAP_SHARED,MD_MAPPING_NOWRITE));
     md_memory_mapping_finish(m,&c,base+40*p);
+    assert(!md_memory_mapping_observe(m,base,40*p));
+    assert(md_memory_mapping_observe(m,base,40*p+1));
+    assert(md_memory_mapping_observe(m,base+40*p,p));
+    assert(!md_memory_mapping_observe(m,base+42*p,p));
+    struct md_interception_memory *shared=md_memory_fork(m,1); assert(shared==m);
+    assert(md_memory_mapping_observe(m,base,p));
+    md_memory_release(shared);
+    assert(!md_memory_mapping_observe(m,base,p));
     assert(!md_memory_protect_check(m,base+40*p,p,PROT_EXEC));
     assert(md_memory_protect_check(m,base+40*p,p,PROT_WRITE)==-EACCES);
     assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_MAP,0,p,0,MAP_SHARED,MD_MAPPING_NOEXEC));
@@ -385,12 +409,87 @@ static void mapping_policy(void) {
     fail_allocation=0;
     assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_MAP,base,p,0,0,1));
     md_memory_mapping_abandon(m,&c);
+    assert(md_memory_mapping_observe(m,base+100*p,p));
     assert(md_memory_protect_check(m,base,p,PROT_EXEC)==-EIO);
     assert(md_memory_protect_check(copy,base,p,PROT_EXEC)==-EACCES);
     assert(md_memory_protect_check(copy,base+1,p,PROT_EXEC)==-EINVAL);
     assert(md_memory_protect_check(copy,base,SIZE_MAX,PROT_EXEC)==-ENOMEM);
     md_memory_release(m); md_memory_release(copy);
     puts("PASS mapping policy: allocation-free ordinary IO, prepare rollback, split/move/clone, fork independence and unknown terminal result");
+}
+static void native_memory_admission(void) {
+    assert(md_memory_native_arguments(SYS_munmap,UINT64_MAX,UINT64_MAX));
+    assert(md_memory_native_arguments(SYS_mprotect,PROT_NONE,0));
+    assert(!md_memory_native_arguments(SYS_mprotect,PROT_READ|PROT_GROWSDOWN,0));
+    assert(md_memory_native_arguments(SYS_mmap,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED));
+    assert(!md_memory_native_arguments(SYS_mmap,PROT_READ,MAP_PRIVATE|MAP_FIXED));
+    assert(!md_memory_native_arguments(SYS_mmap,PROT_READ,MAP_SHARED|MAP_ANONYMOUS|MAP_FIXED));
+    assert(!md_memory_native_arguments(SYS_mmap,PROT_READ,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE));
+    assert(!md_memory_native_arguments(SYS_mremap,0,0));
+    assert(md_memory_native_arguments(SYS_mremap,4096,0));
+    assert(md_memory_native_arguments(SYS_mremap,8192,MREMAP_MAYMOVE));
+    assert(!md_memory_native_arguments(SYS_mremap,8192,MREMAP_MAYMOVE|MREMAP_FIXED));
+    assert(!md_memory_native_arguments(SYS_mremap,8192,MREMAP_MAYMOVE|MREMAP_DONTUNMAP));
+    size_t page=(size_t)getpagesize(); uintptr_t base=0x4000000;
+    struct md_interception_memory *m=md_memory_new(); assert(m);
+    struct md_svc_registry *r=calloc(1,sizeof(*r)); assert(r);
+    r->native_begin=base+300*page; r->native_end=r->native_begin+page;
+    r->frames=base+400*page;
+    r->pool_count=1; r->pools[0].address=base+10000*page;
+    r->count=1; r->sites[0].direct.svc=base+4*page+128;
+    r->sites[0].direct.gate=r->pools[0].address;
+    assert(!md_memory_svc_set(m,r));
+    struct md_memory_admission p={0};
+    md_memory_admission_publish(m,&p,1);
+    assert(md_memory_admission_allows(&p,base,page,page));
+    assert(!md_memory_admission_allows(&p,base+1,page,page));
+    assert(!md_memory_admission_allows(&p,base,0,page));
+    assert(!md_memory_admission_allows(&p,base,SIZE_MAX,page));
+    assert(!md_memory_admission_allows(&p,UINTPTR_MAX-page+1,page,page));
+    assert(md_memory_admission_allows(&p,base,4*page,page));
+    assert(!md_memory_admission_allows(&p,base,4*page+1,page));
+    assert(!md_memory_admission_allows(&p,r->native_begin,page,page));
+    assert(!md_memory_admission_allows(&p,r->frames,page,page));
+    assert(!md_memory_admission_allows(&p,r->pools[0].address,page,page));
+    md_memory_admission_publish(m,&p,0); assert(!atomic_load(&p.enabled));
+    md_memory_admission_publish(m,&p,1); assert(atomic_load(&p.enabled));
+    r->sites[r->count++].direct=(struct md_svc_direct_context){
+        .svc=base+8*page,.gate=r->pools[0].address+2048};
+    md_memory_admission_publish(m,&p,1);
+    assert(!md_memory_admission_allows(&p,base+8*page,page,page));
+    r->pools[r->pool_count++].address=base+20000*page;
+    md_memory_admission_publish(m,&p,1);
+    assert(!md_memory_admission_allows(&p,base+20000*page,page,page));
+    r->disabled=1;
+    md_memory_admission_publish(m,&p,1); assert(!atomic_load(&p.enabled));
+    r->disabled=0;
+    md_memory_admission_publish(m,&p,1); assert(atomic_load(&p.enabled));
+    struct md_interception_memory *shared=md_memory_fork(m,1); assert(shared==m);
+    assert(!atomic_load(&p.enabled));
+    md_memory_admission_publish(m,&p,1); assert(!atomic_load(&p.enabled));
+    md_memory_release(shared);
+    md_memory_admission_publish(m,&p,1); assert(atomic_load(&p.enabled));
+    struct md_interception_memory *copy=md_memory_fork(m,0); assert(copy);
+    struct md_memory_admission child={0};
+    md_memory_admission_publish(copy,&child,1); assert(atomic_load(&child.enabled));
+    md_memory_admission_detach(copy,&child); md_memory_release(copy);
+    struct md_mapping_change change={0};
+    assert(!md_memory_mapping_prepare(m,&change,MD_MAPPING_MAP,0,page,0,0,MD_MAPPING_NOEXEC));
+    md_memory_mapping_finish(m,&change,base);
+    md_memory_admission_publish(m,&p,1);
+    assert(!md_memory_admission_allows(&p,base,page,page));
+    assert(md_memory_admission_allows(&p,base+page,page,page));
+    assert(!md_memory_mapping_prepare(m,&change,MD_MAPPING_UNMAP,base,page,0,0,0));
+    md_memory_mapping_finish(m,&change,0);
+    md_memory_admission_publish(m,&p,1);
+    assert(md_memory_admission_allows(&p,base,page,page));
+    for (unsigned i=1;i<=MD_MEMORY_ADMISSION_RANGES;++i) {
+        assert(!md_memory_mapping_prepare(m,&change,MD_MAPPING_MAP,0,page,0,0,MD_MAPPING_NOEXEC));
+        md_memory_mapping_finish(m,&change,base+2*i*page);
+    }
+    md_memory_admission_publish(m,&p,1); assert(!atomic_load(&p.enabled));
+    md_memory_admission_detach(m,&p); md_memory_release(m);
+    puts("PASS native memory admission: rounded ranges, cached exclusions, mapping/site invalidation, revocation, fork and bounded fallback");
 }
 static void file_views(void) {
     size_t p=(size_t)getpagesize(); uintptr_t base=0x20000000;
@@ -411,6 +510,9 @@ static void file_views(void) {
     fail_allocation=1;
     md_memory_mapping_finish(m,&c,(long)base);
     assert(md_memory_file_view(m,base,3*p,&source,&offset)==1 && offset==p && source!=fd);
+    assert(md_memory_mapping_observe(m,base-p,p+1));
+    assert(md_memory_mapping_observe(m,base+2*p,p));
+    assert(!md_memory_mapping_observe(m,base+3*p,p));
     assert((fcntl(source,F_GETFD)&FD_CLOEXEC) && !close(fd));
     fail_allocation=0;
     struct md_interception_memory *copy=md_memory_fork(m,0); assert(copy);
@@ -418,6 +520,8 @@ static void file_views(void) {
     assert(!md_memory_mapping_prepare(m,&c,MD_MAPPING_UNMAP,base+p,p,0,0,0));
     fail_allocation=1; md_memory_mapping_finish(m,&c,0); fail_allocation=0;
     assert(!md_memory_file_view(m,base,3*p,&source,&offset));
+    assert(!md_memory_mapping_observe(m,base+p,p));
+    assert(md_memory_mapping_observe(copy,base+p,p));
     assert(md_memory_file_view(m,base,p,&source,&offset)==1 && offset==p);
     assert(md_memory_file_view(m,base+2*p,p,&source,&offset)==1 && offset==3*p);
     assert(md_memory_file_view(copy,base,3*p,&source,&offset)==1 && offset==p);
@@ -538,6 +642,50 @@ static void file_backing_lifetime(void) {
     assert(descriptors()==initial);
     puts("PASS file backing ownership: independent opens, 32 exec images, 256 mappings, fork, failed mmap and final unmap retain exactly one FD per file");
 }
+static void image_backings(void) {
+    unsigned initial=descriptors();
+    size_t page=(size_t)getpagesize();
+    int files[2];
+    void *segments[2][3];
+    for (unsigned i=0;i<2;++i) {
+        char path[]=".md-image-backing-XXXXXX";
+        files[i]=mkstemp(path);
+        assert(files[i]>=0 && !unlink(path));
+        assert(files[i]>=0 && !ftruncate(files[i],3*page));
+        for (unsigned j=0;j<3;++j) {
+            segments[i][j]=mmap(NULL,page,j==1 ? PROT_NONE : PROT_READ,
+                j==2 ? MAP_SHARED : MAP_PRIVATE,files[i],j*page);
+            assert(segments[i][j]!=MAP_FAILED);
+        }
+    }
+    struct md_interception_memory *image=md_memory_new(); assert(image);
+    unsigned before=descriptors();
+    assert(md_memory_image_backings(image,getpid(),files,0)==-EINVAL);
+    assert(md_memory_image_backings(image,getpid(),files,3)==-EINVAL);
+    int invalid[]={files[0],-1};
+    assert(md_memory_image_backings(image,getpid(),invalid,2)==-EBADF);
+    fail_allocation=1;
+    assert(md_memory_image_backings(image,getpid(),files,2)==-ENOMEM);
+    fail_allocation=0;
+    assert(descriptors()==before);
+    assert(!md_memory_image_backings(image,getpid(),files,2));
+    assert(descriptors()==before+2);
+    for (unsigned i=0;i<2;++i) {
+        int source=-1; uint64_t offset;
+        for (unsigned j=0;j<2;++j) {
+            assert(md_memory_file_view(image,(uintptr_t)segments[i][j],page,&source,&offset));
+            assert(offset==j*page && (fcntl(source,F_GETFL)&O_ACCMODE)==O_RDONLY);
+            struct stat a,b;
+            assert(!fstat(source,&a) && !fstat(files[i],&b) && a.st_ino==b.st_ino && a.st_dev==b.st_dev);
+        }
+        assert(!md_memory_file_view(image,(uintptr_t)segments[i][2],page,&source,&offset));
+        close(files[i]);
+        for (unsigned j=0;j<3;++j) assert(!munmap(segments[i][j],page));
+    }
+    md_memory_release(image);
+    assert(descriptors()==initial);
+    puts("PASS ELF backing admission: one observation, two identities, protected private segments, shared exclusion and allocation failure");
+}
 static void memory_access_lifetime(void) {
     struct md_interception_memory *parent=md_memory_new(); assert(parent);
     int fd=memfd_create("memory-access-lifetime",MFD_CLOEXEC); assert(fd>=0);
@@ -622,8 +770,8 @@ static void memory_access_protected_child(void) {
 int main(void) {
     alarm(30);
     unsigned before=descriptors();
-    execution_windows(); slots(); spans(); channels(); filter_payload(); owner_lifetime(); failures(); address_spaces(); payload_reuse(); mapping_policy(); file_views(); file_view_failures();
-    file_backing_lifetime(); memory_access_lifetime(); memory_access_capture(); memory_access_protected_child();
+    execution_windows(); slots(); spans(); channels(); filter_payload(); owner_lifetime(); failures(); address_spaces(); payload_reuse(); mapping_policy(); native_memory_admission(); file_views(); file_view_failures();
+    file_backing_lifetime(); image_backings(); memory_access_lifetime(); memory_access_capture(); memory_access_protected_child();
     assert(descriptors()==before);
     puts("PASS shared request buffer ownership");
     return 0;

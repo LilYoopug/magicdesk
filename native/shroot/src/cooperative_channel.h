@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <fcntl.h>
 #include "file_open.h"
+#include "memory_admission.h"
 
 static inline int md_entry_open(int number) {
     return number==SYS_openat || number==SYS_openat2;
@@ -43,13 +44,27 @@ _Static_assert(sizeof(atomic_uint)==4,"Linux futex word size");
 enum md_entry_state { MD_ENTRY_IDLE, MD_ENTRY_REQUEST, MD_ENTRY_FD_REQUEST, MD_ENTRY_RUNNING,
     MD_ENTRY_RESPONSE, MD_ENTRY_CLOSED, MD_ENTRY_NATIVE, MD_ENTRY_RETIRING };
 enum { MD_ENTRY_WAKE = 0x434f4f50, MD_ENTRY_BIND };
+/* The open effect chooses its FD. Resolve only a completed, non-birth effect;
+ * explicit descriptors are encoded as fd+1, never this sentinel. */
+#define MD_ENTRY_RESULT_FD UINT32_MAX
+enum md_entry_wait { MD_ENTRY_WAIT_REPLY, MD_ENTRY_WAIT_OPEN, MD_ENTRY_WAIT_COMMIT, MD_ENTRY_WAITS };
+static inline enum md_entry_wait md_entry_wait_kind(int number,int native_sent) {
+    return native_sent ? MD_ENTRY_WAIT_COMMIT : md_entry_open(number) ? MD_ENTRY_WAIT_OPEN : MD_ENTRY_WAIT_REPLY;
+}
 struct md_entry_channel {
     _Alignas(64) atomic_uint state;
-    atomic_uint enabled, awake, sleeping, copying, caller;
+    atomic_uint enabled, awake, sleeping;
+    /* fd+1 or MD_ENTRY_RESULT_FD, issued under an exclusive table turn.
+     * Only the identified resident
+     * entry may use it: its signal delivery is deferred until entry completes.
+     * Every new request, task stop and borrowed execution revokes this lease. */
+    atomic_uint native_regular;
+    unsigned native_flags;
+    _Alignas(64) atomic_uint copying, caller;
     int32_t owner;
-    struct md_spin_policy feedback;
+    struct md_spin_policy feedback[MD_ENTRY_WAITS];
     uint64_t sequence;
-    struct md_entry_request {
+    _Alignas(64) struct md_entry_request {
         uint64_t args[6];
         int32_t number;
         uint32_t reserved;
@@ -57,7 +72,7 @@ struct md_entry_channel {
     _Alignas(64) uint64_t receipt;
     enum md_entry_outcome outcome;
     int64_t result;
-    struct md_entry_native native;
+    _Alignas(64) struct md_entry_native native;
     /* The native FD is provisional until the worker publishes its name. */
     unsigned native_commit;
     char native_path[64];
@@ -74,7 +89,16 @@ struct md_entry_channel {
         uintptr_t address[2];
         char paths[2][4096];
     } input;
+    struct md_memory_admission memory;
 };
+static inline int md_entry_regular_descriptor(const struct md_entry_channel *c) {
+    unsigned lease=atomic_load_explicit(&c->native_regular,memory_order_acquire);
+    if (!lease) return -1;
+    if (lease!=MD_ENTRY_RESULT_FD) return (int)(lease-1);
+    if (atomic_load_explicit(&c->native.state,memory_order_acquire)!=MD_NATIVE_DONE
+            || c->native.number!=SYS_openat || c->native.result<0 || c->native.result>INT32_MAX) return -1;
+    return (int)c->native.result;
+}
 enum { MD_ENTRY_PENDING_CALL=1, MD_ENTRY_PENDING_NATIVE=2 };
 /* Pair with the producer's publication/fence/awake check. Either this sees
  * the work or that producer requests a kernel wake; neither may miss both. */

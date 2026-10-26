@@ -353,6 +353,7 @@ static void exercise_request(int protected, enum scenario scenario, unsigned exp
     struct md_task_helper_callbacks callbacks={trace,newborn};
     struct md_task_helpers *helpers=md_task_helpers_new(&callbacks); assert(helpers);
     struct md_interception_abi abi={.task_call=(uintptr_t)helper_call,.task_return=(uintptr_t)helper_return,
+        .task_completed=(uintptr_t)helper_return,
         .task_abort=(uintptr_t)helper_abort,.store_groups=(uintptr_t)helper_store,.stored_groups=(uintptr_t)helper_stored};
     struct md_task_helper_request request={.kind=MD_TASK_HELPER_FD_TABLE,.path="/proc/self/fd"};
     struct completed c={0};

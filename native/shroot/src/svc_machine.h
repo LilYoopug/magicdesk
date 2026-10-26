@@ -13,14 +13,23 @@ struct md_svc_machine_thread {
 };
 struct md_svc_registry *md_svc_machine_admit(pid_t,uintptr_t descriptor);
 int md_svc_machine_return(struct md_svc_registry *,struct md_svc_machine_thread *,pid_t,struct user_pt_regs *);
-/* 1 consumes the original syscall entry; 0 leaves an unrelated stop to its
+/* 1 captures the original call's PC/SP/number/arguments, not full GPRs; the
+ * supervisor owns admission and rearming. 0 leaves an unrelated stop to its
  * existing owner. Both retire the temporary retry observer. */
-int md_svc_machine_retry(struct md_svc_registry *,struct md_svc_machine_thread *,pid_t);
+int md_svc_machine_retry(struct md_svc_machine_thread *,pid_t,struct user_pt_regs *observed);
 void md_svc_machine_forget(struct md_svc_machine_thread *);
 /* The supervisor retains resume ownership. A handled checkpoint requests one
  * syscall-exit stop; the common signal queue owns subsequent delivery. */
 int md_svc_machine_syscall(struct md_svc_registry *,struct md_svc_machine_thread *,pid_t,
     const struct user_pt_regs *observed);
+/* A published site's alias can use the ordinary syscall owner without replay or register
+ * writes: its resident branch returns to the original continuation. The owner
+ * must exclude application filters/debuggers; signal recovery translates PC.
+ * 1 is already admitted; 2 may benefit from discovery without syscall replay. */
+int md_svc_machine_native_entry(const struct md_svc_registry *,const struct user_pt_regs *);
+/* Cancel an unexecuted syscall at its entry stop, then restore the complete
+ * continuation at exit, after the kernel has restored its temporary x7. */
+int md_svc_machine_redirect(struct md_svc_machine_thread *,pid_t,const struct user_pt_regs *);
 int md_svc_machine_exit(struct md_svc_machine_thread *,pid_t);
 int md_svc_machine_signal(struct md_svc_registry *,struct md_svc_machine_thread *,pid_t,
     struct md_signal_delivery *,int *deliver);

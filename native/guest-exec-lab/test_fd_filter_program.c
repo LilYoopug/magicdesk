@@ -1,23 +1,30 @@
 #define _GNU_SOURCE
 #include "fd_filter_program.h"
+#include "pid_filter_program.h"
 #include "interception.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/seccomp.h>
+#include <linux/futex.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 
-static unsigned evaluate(const struct md_fd_filter_program *p,const struct seccomp_data *d) {
+static unsigned evaluate_program(const struct sock_filter *code,unsigned count,
+        const struct seccomp_data *d,unsigned *reads) {
     unsigned a=0;
-    for (unsigned pc=0,steps=0;pc<p->count && steps++<p->count;++pc) {
-        const struct sock_filter *i=&p->code[pc];
+    for (unsigned pc=0,steps=0;pc<count && steps++<count;++pc) {
+        const struct sock_filter *i=&code[pc];
         switch (i->code) {
         case BPF_LD|BPF_W|BPF_ABS:
             assert(i->k<=sizeof(*d)-sizeof(a) && !(i->k&3));
+            if (reads && i->k!=offsetof(struct seccomp_data,nr)
+                    && i->k!=offsetof(struct seccomp_data,arch)) ++*reads;
             memcpy(&a,(const char *)d+i->k,sizeof(a)); break;
         case BPF_ALU|BPF_AND|BPF_K: a&=i->k; break;
         case BPF_ALU|BPF_OR|BPF_K: a|=i->k; break;
@@ -31,6 +38,56 @@ static unsigned evaluate(const struct md_fd_filter_program *p,const struct secco
         }
     }
     assert(!"FD filter did not terminate"); return 0;
+}
+static unsigned evaluate_reads(const struct md_fd_filter_program *p,const struct seccomp_data *d,unsigned *reads) {
+    return evaluate_program(p->code,p->count,d,reads);
+}
+static unsigned evaluate(const struct md_fd_filter_program *p,const struct seccomp_data *d) {
+    return evaluate_reads(p,d,NULL);
+}
+static int pid_sensitive(const struct seccomp_data *d) {
+    switch (d->nr) {
+    case SYS_getpid: case SYS_gettid: case SYS_getppid: case SYS_set_tid_address:
+    case SYS_kill: case SYS_tkill: case SYS_tgkill: case SYS_wait4: case SYS_waitid:
+    case SYS_getpgid: case SYS_getsid: case SYS_setpgid: case SYS_setsid:
+    case SYS_pidfd_open: case SYS_pidfd_send_signal: case SYS_rt_sigqueueinfo:
+    case SYS_rt_tgsigqueueinfo: case SYS_rt_sigtimedwait:
+    case SYS_sched_getaffinity: case SYS_sched_setaffinity: case SYS_sched_getparam:
+    case SYS_sched_setparam: case SYS_sched_getscheduler: case SYS_sched_setscheduler:
+    case SYS_sched_getattr: case SYS_sched_setattr: case SYS_sched_rr_get_interval:
+    case SYS_get_robust_list: case SYS_prlimit64: case SYS_ioprio_get: case SYS_ioprio_set:
+    case SYS_process_vm_readv: case SYS_process_vm_writev: case SYS_kcmp: return 1;
+    case SYS_ioctl:
+        return (unsigned)d->args[1]==TIOCGPGRP || (unsigned)d->args[1]==TIOCSPGRP
+            || (unsigned)d->args[1]==TIOCGSID;
+    case SYS_prctl:
+        return (unsigned)d->args[0]==PR_SET_CHILD_SUBREAPER || (unsigned)d->args[0]==PR_GET_CHILD_SUBREAPER;
+    case SYS_futex:
+        switch ((unsigned)d->args[1]&FUTEX_CMD_MASK) {
+        case FUTEX_LOCK_PI: case FUTEX_UNLOCK_PI: case FUTEX_TRYLOCK_PI:
+        case FUTEX_WAIT_REQUEUE_PI: case FUTEX_CMP_REQUEUE_PI: case FUTEX_LOCK_PI2: return 1;
+        }
+    }
+    return 0;
+}
+static void pid_filter(void) {
+    struct md_pid_filter_program p;
+    const uintptr_t gate=UINT64_C(0x2012345678);
+    md_pid_filter_build(gate,&p);
+    assert(p.count && p.count<=MD_PID_FILTER_INSTRUCTIONS);
+    const uintptr_t sites[]={gate,gate+4,gate+(UINT64_C(1)<<32),0};
+    const unsigned extra[]={TIOCGPGRP,TIOCSPGRP,TIOCGSID};
+    for (unsigned nr=0;nr<512;++nr) for (unsigned command=0;command<512+3;++command)
+        for (unsigned i=0;i<sizeof(sites)/sizeof(*sites);++i) {
+            uint64_t value=(command<512 ? command : extra[command-512])|(UINT64_C(1)<<32);
+            struct seccomp_data d={.nr=(int)nr,.instruction_pointer=sites[i],.args={value,value}};
+            unsigned want=sites[i]!=gate && pid_sensitive(&d)
+                ? SECCOMP_RET_TRACE|MD_INTERCEPT_PROCESS : SECCOMP_RET_ALLOW;
+            unsigned reads=0;
+            assert(evaluate_program(p.code,p.count,&d,&reads)==want);
+            if (!pid_sensitive(&d) && nr!=SYS_futex && nr!=SYS_ioctl && nr!=SYS_prctl) assert(!reads);
+        }
+    puts("PASS PID filter: exact gate, PID calls, PI/non-PI futex, terminal/subreaper arguments and cacheable native calls");
 }
 static unsigned expected(unsigned kind,int fd,const struct seccomp_data *d) {
     if (kind==MD_FD_SELECTOR_POLL)
@@ -73,6 +130,7 @@ static unsigned expected(unsigned kind,int fd,const struct seccomp_data *d) {
     return SECCOMP_RET_ALLOW;
 }
 void test_fd_filter_program(void) {
+    pid_filter();
     const struct sock_filter close_code[]={
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
         MD_FD_CLOSE_FILTER,
@@ -103,6 +161,12 @@ void test_fd_filter_program(void) {
             int fd=fds[f];
             assert(!md_fd_filter_build(kind,fd,&gates,&built));
             assert(built.count && built.count<=MD_FD_FILTER_INSTRUCTIONS);
+            const unsigned unrelated[]={SYS_gettid,SYS_futex,SYS_clock_gettime,SYS_rt_sigprocmask,SYS_exit};
+            for (unsigned n=0;n<sizeof(unrelated)/sizeof(*unrelated);++n) {
+                struct seccomp_data d={.nr=(int)unrelated[n],.instruction_pointer=exempt[0]};
+                unsigned reads=0;
+                assert(evaluate_reads(&built,&d,&reads)==SECCOMP_RET_ALLOW && !reads);
+            }
             for (unsigned nr=0;nr<512;++nr) for (unsigned arg=0;arg<6;++arg)
                 for (unsigned alias=0;alias<3;++alias) for (unsigned c=0;c<sizeof(commands)/sizeof(*commands);++c) {
                     struct seccomp_data d={.nr=(int)nr,.instruction_pointer=0x4412345678};
@@ -133,7 +197,8 @@ void test_fd_filter_program(void) {
             assert(!md_fd_filter_build(kind,190,&gates,&separate));
             assert(!md_fd_filter_build(kind,190,g,&built));
             assert(built.count<separate.count);
-            if (p==1) assert(built.count+9==separate.count);
+            if (p==1) assert(separate.count-built.count==9u*(kind==MD_FD_SELECTOR_PROC ? 3
+                : kind==MD_FD_SELECTOR_POLL ? 1 : 2));
             for (unsigned nr=0;nr<512;++nr) for (unsigned i=0;i<4;++i)
                 for (unsigned adjacent=0;adjacent<2;++adjacent) {
                     struct seccomp_data d={.nr=(int)nr,.instruction_pointer=addresses[i]+4*adjacent,

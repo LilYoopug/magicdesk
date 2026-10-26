@@ -19,6 +19,11 @@ enum md_fs_buffer_control { MD_FS_BUFFER_CALL=16, MD_FS_BUFFER_ACK, MD_FS_BUFFER
     MD_FS_BUFFER_IPC_CAPTURE_OBSERVED, MD_FS_BUFFER_IPC_RECEIVE,
     MD_FS_BUFFER_IPC_IO_PREPARE, MD_FS_BUFFER_IPC_IO_COPY, MD_FS_BUFFER_IPC_IO_SELECT,
     MD_FS_BUFFER_RESULT_REPLAY };
+/* These completions return to the C adapter, not to application registers. */
+static inline int md_fs_buffer_scalar(unsigned long command) {
+    return command==MD_FS_BUFFER_CALL || command==MD_FS_BUFFER_EXEC_PREPARE
+        || command==MD_FS_BUFFER_EXEC_CANCEL || command==MD_FS_BUFFER_PROC_LINK;
+}
 enum { MD_FS_BUFFER_SOURCE=-2 };
 /* Kernel ancillary FDs do not index a capsule-expanded application vector. */
 enum md_received_source { MD_RECEIVED_KERNEL, MD_RECEIVED_APPLICATION };
@@ -73,7 +78,7 @@ static inline int md_fs_buffer_source_matches(const struct md_fs_buffer_frame *f
 #ifndef MD_USE_LIBC
 long md_guest_buffer_result(unsigned flags,unsigned mode,struct md_fs_buffer_frame *);
 int md_fs_buffer_accepts(const struct md_fs_request *);
-long md_fs_buffer_exec_prepare(const struct md_fs_request *, struct md_command_recipe *);
+long md_fs_buffer_exec_prepare(const struct md_fs_request *, struct md_command_recipe *, unsigned long);
 void md_fs_buffer_exec_cancel(void);
 /* Producer copies into mapped bytes; only the completed file enters the guest. */
 long md_fs_buffer_snapshot(unsigned flags, long (*produce)(void *, void *, size_t), void *);

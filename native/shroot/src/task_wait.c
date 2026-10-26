@@ -38,6 +38,19 @@ static pid_t remember(struct md_task_wait *w, pid_t pid, int status) {
     }
     return pid;
 }
+/* One discovery pass may name a task through the fair cursor, SIGCHLD hints
+ * and the recent working set. A miss is useful to all three, not a reason to
+ * query the same task again before the general queue check. */
+struct queried {
+    pid_t tasks[2+sizeof(((struct md_task_wait *)0)->hints)/sizeof(pid_t)
+        +sizeof(((struct md_task_wait *)0)->recent)/sizeof(pid_t)];
+    unsigned count;
+};
+static int first_query(struct queried *q,pid_t pid) {
+    for (unsigned i=0;i<q->count;++i) if (q->tasks[i]==pid) return 0;
+    if (q->count<sizeof(q->tasks)/sizeof(*q->tasks)) q->tasks[q->count++]=pid;
+    return 1;
+}
 void md_task_wait_hint(struct md_task_wait *w, pid_t pid) {
     if (pid <= 0) return;
     w->drained = 0;
@@ -56,10 +69,32 @@ pid_t md_task_wait_take(struct md_task_wait *w, int *status, struct rusage *usag
     }
     return 0;
 }
+static pid_t collect(struct md_task_wait *w,int *status,struct rusage *usage,unsigned limit) {
+    w->pending_first=0;
+    w->count=w->directed=0;
+    while (w->pending_count<limit) {
+        unsigned i=w->pending_count;
+        w->pending[i].usage=(struct rusage){0};
+        pid_t pid=wait4(-1,&w->pending[i].status,__WALL|WNOHANG,
+            usage ? &w->pending[i].usage : NULL);
+        if (pid<=0) {
+            if (!pid) w->drained=1;
+            if (!w->pending_count) return pid;
+            break;
+        }
+        w->pending[i].pid=pid; ++w->pending_count;
+    }
+    return md_task_wait_take(w,status,usage);
+}
 pid_t md_task_wait_ready(struct md_task_wait *w, int *status, struct rusage *usage) {
     pid_t pending=md_task_wait_take(w,status,usage);
     if (pending) return pending;
     if (w->drained) return 0;
+    /* Small trees cost less to scan once than to query several sleeping TIDs.
+     * Collect before resuming anyone: a hot child cannot take the list head
+     * again while an older stop is waiting. Untracked births are retained too. */
+    if (w->members>1 && w->members<=4) return collect(w,status,usage,4);
+    struct queried queried={0};
     /* A hot child cannot indefinitely postpone stops whose SIGCHLD coalesced.
      * This is an event budget, not a timer or a readiness assumption. */
     unsigned directed_budget=w->members>4 ? 64 : 8;
@@ -75,6 +110,7 @@ pid_t md_task_wait_ready(struct md_task_wait *w, int *status, struct rusage *usa
         for (unsigned i=0;i<2 && w->directed<directed_budget;++i) {
             pid_t selected=w->cursor->pid;
             w->cursor=w->cursor->next;
+            first_query(&queried,selected);
             ++w->directed;
             pid_t pid=wait4(selected,status,__WALL|WNOHANG,usage);
             if (pid>0) return remember(w,pid,*status);
@@ -87,6 +123,7 @@ pid_t md_task_wait_ready(struct md_task_wait *w, int *status, struct rusage *usa
         pid_t selected=w->hints[w->first];
         w->first=(w->first+1)%capacity; w->count--;
         forget(w,selected);
+        if (!first_query(&queried,selected)) continue;
         w->directed++;
         pid_t pid = wait4(selected, status, __WALL | WNOHANG, usage);
         if (pid > 0) return remember(w,pid,*status);
@@ -98,7 +135,9 @@ pid_t md_task_wait_ready(struct md_task_wait *w, int *status, struct rusage *usa
      * Fresh SIGCHLD hints take precedence; general collection remains fair. */
     for (unsigned i=0;i<sizeof(w->recent)/sizeof(*w->recent)
             && w->recent[i] && w->directed<directed_budget;++i) {
-        pid_t selected=w->recent[i]; ++w->directed;
+        pid_t selected=w->recent[i];
+        if (!first_query(&queried,selected)) continue;
+        ++w->directed;
         pid_t pid=wait4(selected,status,__WALL|WNOHANG,usage);
         if (pid>0) return remember(w,pid,*status);
         if (pid<0 && errno!=ECHILD && errno!=ESRCH) return pid;
@@ -108,21 +147,7 @@ pid_t md_task_wait_ready(struct md_task_wait *w, int *status, struct rusage *usa
         /* General wait scans every child, including sleeping threads. Reuse
          * directed hints first; when discovery is needed, collect a bounded
          * batch before any hot child can reoccupy the kernel's list head. */
-        w->pending_first=0;
-        w->count=0;
-        while (w->pending_count<sizeof(w->pending)/sizeof(*w->pending)) {
-            unsigned i=w->pending_count;
-            w->pending[i].usage=(struct rusage){0};
-            pid_t pid=wait4(-1,&w->pending[i].status,__WALL|WNOHANG,
-                usage ? &w->pending[i].usage : NULL);
-            if (pid<=0) {
-                if (!pid) w->drained=1;
-                if (!w->pending_count) return pid;
-                break;
-            }
-            w->pending[i].pid=pid; ++w->pending_count;
-        }
-        return md_task_wait_ready(w,status,usage);
+        return collect(w,status,usage,sizeof(w->pending)/sizeof(*w->pending));
     }
     pid_t pid = wait4(-1, status, __WALL | WNOHANG, usage);
     if (!pid) {

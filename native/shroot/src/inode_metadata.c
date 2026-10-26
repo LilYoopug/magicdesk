@@ -64,7 +64,8 @@ int mdi_permission_stat(struct md_inode_store *s,const struct mdi_node *node,str
         .st_nlink=node->links,.st_dev=node->logical_device,.st_ino=node->logical_inode};
     return 0;
 }
-int mdi_permission_as(struct md_inode_store *s, const struct mdi_node *node, int mode, const struct md_identity *identity) {
+static int permission_observed(struct md_inode_store *s,const struct mdi_node *node,int mode,
+        const struct md_identity *identity,const struct stat *observed) {
     if (mode & ~(R_OK | W_OK | X_OK)) return -EINVAL;
     if (!identity) {
         int dir = mdi_backing_directory(s, node);
@@ -72,11 +73,16 @@ int mdi_permission_as(struct md_inode_store *s, const struct mdi_node *node, int
             mode, MD_AT_EACCESS) ? -errno : 0;
     }
     struct stat st;
-    int error = mdi_permission_stat(s, node, &st);
+    int error=0;
+    if (observed) st=*observed;
+    else error=mdi_permission_stat(s,node,&st);
     if (error || !mode) return error;
     if (md_file_dac_override(&st,mode,identity)) return 0;
     if (node->acl_mask&MD_ACL_ACCESS) return mdi_acl_permission(s,node,identity,mode);
     return md_file_mode_allows(&st,mode,identity) ? 0 : -EACCES;
+}
+int mdi_permission_as(struct md_inode_store *s,const struct mdi_node *node,int mode,const struct md_identity *identity) {
+    return permission_observed(s,node,mode,identity,NULL);
 }
 int mdi_permission(struct md_inode_store *s, const struct mdi_node *node, int mode, int real) {
     struct md_identity ids;
@@ -92,16 +98,20 @@ int mdi_permission(struct md_inode_store *s, const struct mdi_node *node, int mo
     } else r=mdi_permission_as(s,node,mode,actor);
     return r ? r : mdi_overlay_permission(s,node,mode);
 }
-int mdi_open_permission(struct md_inode_store *s, const struct mdi_node *node, int flags) {
+int mdi_open_permission(struct md_inode_store *s,const struct mdi_node *node,int flags,const struct stat *observed) {
     if (flags & O_PATH) return 0;
     /* The loader reads the ELF on behalf of exec, not as guest file IO.
      * Execute-only helpers must retain X_OK without gaining R_OK. */
-    if (s->image_open) return node->kind==S_IFREG ? mdi_permission(s,node,X_OK,0) : -EACCES;
-    int r = mdi_permission(s, node,
-        (flags & O_ACCMODE) == O_WRONLY ? W_OK : (flags & O_ACCMODE) == O_RDWR ? R_OK | W_OK : R_OK, 0);
+    if (s->image_open && node->kind!=S_IFREG) return -EACCES;
+    int access=s->image_open ? X_OK : (flags&O_ACCMODE)==O_WRONLY ? W_OK
+        : (flags&O_ACCMODE)==O_RDWR ? R_OK|W_OK : R_OK;
+    int r=permission_observed(s,node,access,s->identity,observed);
+    if (!r) r=mdi_overlay_permission(s,node,access);
+    if (s->image_open) return r;
     if (!r && (flags & O_NOATIME) && s->identity) {
         struct stat st;
-        r = mdi_stat(s, node, &st);
+        if (observed) st=*observed;
+        else r=mdi_stat(s,node,&st);
         if (!r) r = md_file_noatime(&st,s->identity);
     }
     return r;

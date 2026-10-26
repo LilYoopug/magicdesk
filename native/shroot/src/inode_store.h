@@ -42,6 +42,7 @@ struct md_inode_statistics {
     uint64_t walk_components, walk_materializations;
     uint64_t write_admissions;
     uint64_t directory_check_hits, directory_check_misses;
+    uint64_t directory_pin_hits;
     uint64_t path_prefix_hits;
 };
 /* Caller-owned diagnostic counters; NULL disables clock sampling. */

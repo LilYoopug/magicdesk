@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <asm/ptrace.h>
 
-/* SVC-only entry. A read-only bit guard establishes the full x8
+/* SVC-only entry. A reversible guard establishes the full x8
  * value before borrowing it. All non-completions reach miss with original
  * registers, flags and SP; the owner must execute the original syscall. */
 size_t md_svc_direct_size(void);

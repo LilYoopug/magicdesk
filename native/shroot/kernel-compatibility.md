@@ -461,7 +461,11 @@ semantics. `test_resources.py --case private-memory` covers the memory owner and
 native/guest preparation under UID 2000, including retained access after
 PR_SET_DUMPABLE=0, supervisor source capture, exact child-mm ownership and partial
 proc-capture FD exhaustion. Direct source capture uses the existing task-descriptor
-adapter, falling back to the existing private-table SCM_RIGHTS capture. Denied
+adapter. An authenticated regular-file O_PATH pin can instead reopen the exact
+inode through `/proc/self/fd`, even after unlink; repair needs positional reads,
+not the application's OFD offset or status flags. Existing backing custody is
+reused before opening another description. Denied access falls back to the
+existing private-table SCM_RIGHTS capture. Denied
 capture leaves native mmap intact without reopening a source by pathname or
 changing dumpability. The namespace
 worker's acknowledged pause uses its pipe-backed queue signals and pthread synchronization,
@@ -948,8 +952,9 @@ re-enter natively with their original IP and arguments and remain subject to
 seccomp. A synthetic PTRACE_INTERRUPT exposes the real x7 before publishing a
 marker, because ARM64 syscall stops borrow that register. Application handlers
 and guest debugger execution never inherit this service scope.
-The scalar TAKE marker can publish at syscall entry because its C ABI does not
-retain x7. FINISH and full-context operations still require the post-syscall
+The scalar MAPPED/TAKE/RELEASE and filesystem
+CALL/EXEC_PREPARE/EXEC_CANCEL/PROC_LINK markers can publish at syscall entry
+because their C ABI does not retain x7. FINISH and full-context operations still require the post-syscall
 interrupt. Checkpoint fixtures cover TRACE/SYSEMU, dumpability and blocked SIGTRAP
 for both forms. Supervisor-state covers clone/fork/vfork stops already consumed
 before a cold barrier begins, including exact event and rusage replay.
@@ -959,6 +964,13 @@ saving registers after that stop cannot recover the argument. Gate entry and
 marker addresses are published separately. The production-gate fixture checks
 invalid incoming x8, positive/negative x0, protected tasks and strict filters;
 the live memfd poll/epoll/mmap sequence covers adapter cleanup after native IO.
+Register-copy and native-completion markers use the same fixed number, with
+separate native-return and marker addresses. Native waits and execution-state
+calls can therefore precede the IP checks in the base filter without consuming
+a completion as an ordinary syscall. Mixed epoll retirement validates a captured
+FD generation before retiring a borrowed slot; only an uninterrupted table turn
+can refresh that generation after its own close. Shared-table replacement and
+filtered/unfiltered native-wait fixtures cover these paths.
 
 ARM64 PTRACE_SYSEMU and its pre-seccomp ordering exist in Android common 5.15;
 PTRACE_INTERRUPT/SEIZE and GET_SYSCALL_INFO predate the minimum. There is no
@@ -1001,6 +1013,30 @@ available. Only 4 KiB pages have device coverage. Publication does not borrow
 hardware breakpoints or stop peer threads; no extra filter is installed per
 pool or exec.
 
+`svc_registry` stages unreachable gate code with one write through the address
+space owner's retained `/proc/PID/mem` descriptor, without reopening it per site,
+falling back to word-sized ptrace writes if the firmware denies that access.
+The original SVC is still published separately through the existing word
+writer, only after the complete gate is written. Partial staging is never
+published. Linux 5.15 already routes [proc memory writes](https://github.com/torvalds/linux/blob/v5.15/fs/proc/base.c)
+through remote-page access and [ARM64 executable-page cache maintenance](https://github.com/torvalds/linux/blob/v5.15/arch/arm64/mm/flush.c).
+This adds no newer-kernel requirement. `test_svc_patch` covers RX staging and
+borrowed-FD lifetime and the denied-access fallback; the runtime SVC suite covers execution, signals,
+fork and protection transitions.
+
+Private untracked memory admission uses ordinary `munmap`, `mprotect`, anonymous
+private `MAP_FIXED` and nonfixed `mremap`, plus shared atomic
+state, with no new host primitive. `interception_memory` owns the excluded
+ranges and revokes admission on sharing/exposure; only the resident SVC driver
+may use the native effect, under its existing deferred-signal contract.
+Tracked/shared ranges and unsupported admission retain the ordered supervisor
+path. `test_interception_buffers` checks range publication and revocation;
+`test_svc_patch.py` checks accelerated completion, page rounding, invalid
+addresses, resize/content preservation, forced kernel relocation, file-backed
+fallback, signal reentry and filter denial. Remapping accepts only flags zero
+or baseline `MREMAP_MAYMOVE`; fixed destinations and cloning keep the observed
+path. Minimum kernel remains 5.15.
+
 `svc_machine.c` uses the existing seccomp TRACE/USER_NOTIF routing and baseline
 register/siginfo APIs to recover logical contexts. Deferred standard and realtime
 signals use the same `signal_delivery` owner as shielded Base operations. Realtime
@@ -1011,6 +1047,14 @@ tests also cover repeated custody of the oldest event before delivery.
 A caller-owned getuid checkpoint handles pending signals; its syscall must exit
 before delivery installs the recovered guest registers. It is not a service
 SIGTRAP. This mechanism adds no post-5.15 dependency.
+The regular-file cursor lease uses only baseline `lseek` and the existing raw
+service gate. It is issued under the exclusive file-table turn and revoked by
+task stops, ordinary notifications, new requests and borrowed execution. The
+resident private frame retains signals through the call; the explicit entry API
+and shared tables keep ordinary admission. `test_cooperative_runtime.py` checks
+repeated relative seeks, invalid offsets, directory cursors, pipe replacement,
+CLONE_FILES replacement, asynchronous signals and seccomp revocation.
+
 The integrated cooperative suite, stock Go with and without seccomp, glibc
 signal/churn fixtures and deterministic instruction-boundary fixture cover it.
 Application filters revoke admission; passing their fallback tests does not
@@ -1022,15 +1066,21 @@ has made its restart/EINTR decision and constructed the signal frame, before
 the handler executes. Early PC replacement would bypass the kernel's restart-PC
 comparison, including on [Linux 5.15](https://github.com/torvalds/linux/blob/v5.15/arch/arm64/kernel/signal.c#L849-L917).
 `test_svc_machine_signal` covers read/futex restart classes, SA_RESTART,
-altstack, filters, ignored/suppressed delivery, longjmp and a concurrent entry
-drain. Stock glibc/musl signal storms and real document-portal shutdown exercise
+altstack, filters, ignored/suppressed delivery, longjmp, a concurrent entry
+drain and a native alias returning without signal delivery. Known unfiltered
+aliases keep their resident return branch instead of another SETREGSET; filter
+barriers also reconcile a quiet return at the next ordinary guest boundary.
+Stock glibc/musl signal storms and real document-portal shutdown exercise
 the integrated owner. Device execution remains 6.12/4 KiB, not a 5.15 claim.
 Inherited no_new_privs conservatively selects restricted service checkpoints
 before bootstrap probes; `test_capabilities` verifies denied required syscalls
 produce admission errors instead of falling through a rejected marker.
 
-Bootstrap supplies exact program/interpreter FDs and `/proc/PID/maps` ranges to
-`interception_memory` before closing them. Initial ELF text therefore uses the
+Bootstrap supplies both exact program/interpreter FDs in one admission before
+closing them. `interception_memory` validates each identity against the same
+`/proc/PID/maps` observation and retains one backing per file across its private
+segments, including initially inaccessible ones; shared mappings are excluded.
+Initial ELF text therefore uses the
 same retained-file repair as intercepted mmap when a later NONE/R to RX change
 is denied after ptrace COW. No pathname reopen, new kernel operation or weakened
 protection is required. The native/Base/machine mapping fixture covers repeated

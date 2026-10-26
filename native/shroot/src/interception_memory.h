@@ -10,6 +10,11 @@
  * owner; fork copies stack metadata and retains the shared buffer allocator.
  * Exec creates an empty owner. Worker pins may outlive every mapping owner. */
 struct md_interception_memory;
+struct md_memory_admission;
+/* The caller owns this channel until detach; publication requires a stopped
+ * task. Sharing/exposure revokes its native memory admission immediately. */
+void md_memory_admission_publish(struct md_interception_memory *,struct md_memory_admission *,int eligible);
+void md_memory_admission_detach(struct md_interception_memory *,struct md_memory_admission *);
 struct md_svc_registry;
 struct md_svc_registry *md_memory_svc(const struct md_interception_memory *);
 int md_memory_svc_set(struct md_interception_memory *,struct md_svc_registry *);
@@ -18,6 +23,7 @@ struct md_interception_memory *md_memory_new(void);
  * with its launch family. No mappings, private-memory authority or buffers survive. */
 struct md_interception_memory *md_memory_new_image(struct md_interception_memory *);
 struct md_interception_memory *md_memory_fork(struct md_interception_memory *, int shared);
+int md_memory_sole_owner(const struct md_interception_memory *);
 void md_memory_release(struct md_interception_memory *);
 /* An in-flight proc open can already publish a native FD to CLONE_FILES peers.
  * Reserve before opening, commit success or unknown completion, cancel only a
@@ -62,6 +68,9 @@ struct md_mapping_change {
     size_t moving_count;
 };
 int md_memory_has_policy(const struct md_interception_memory *);
+/* Conservative native-completion admission. Shared owners retain the mapping
+ * turn through syscall exit: another thread could replace an unrelated range. */
+int md_memory_mapping_observe(const struct md_interception_memory *,uintptr_t,size_t);
 int md_memory_protect_check(const struct md_interception_memory *, uintptr_t, size_t, unsigned protection);
 int md_memory_mapping_prepare(struct md_interception_memory *, struct md_mapping_change *,
     enum md_mapping_operation, uintptr_t, size_t, size_t new_length, unsigned flags, int restrictions);
@@ -69,9 +78,15 @@ int md_memory_mapping_prepare(struct md_interception_memory *, struct md_mapping
  * Independent address spaces share only file identity, not private bytes/offsets.
  * A failed syscall never publishes it. Native devices remain kernel-owned. */
 int md_memory_mapping_backing(struct md_interception_memory *, struct md_mapping_change *, int fd, uint64_t offset);
+/* Obtain a read-only backing from an authenticated caller-owned pin (O_PATH
+ * is sufficient), reusing existing custody first. Returns 1 on capture, 0 for
+ * nonregular files, or a negative errno. Denied reopening needs caller capture;
+ * native mmap still enforces the application's descriptor access mode. */
+int md_memory_mapping_pin(struct md_interception_memory *,struct md_mapping_change *,int pin,uint64_t offset);
 /* Bootstrap-only import of existing private mappings of this exact open file.
  * The caller has not entered application code or published any patch yet. */
-int md_memory_image_backing(struct md_interception_memory *, pid_t, int fd);
+/* Bootstrap program and optional interpreter; one stopped-task map observation. */
+int md_memory_image_backings(struct md_interception_memory *, pid_t, const int *fds, unsigned count);
 /* Borrowed under the address-space turn. No pathname lookup or FD-number reuse.
  * Returns 1 for continuous provenance, 0 for an untracked/mixed range. */
 int md_memory_file_view(const struct md_interception_memory *, uintptr_t, size_t,

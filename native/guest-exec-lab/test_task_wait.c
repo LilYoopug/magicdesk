@@ -17,6 +17,8 @@ static void expect(pid_t selected, pid_t result, int error) {
 pid_t __wrap_wait4(pid_t selected, int *status, int options, struct rusage *usage) {
     assert(taken < queued);
     struct call call = calls[taken++];
+    if (call.selected!=selected)
+        fprintf(stderr,"wait query %u/%u: expected pid=%d, got pid=%d\n",taken,queued,call.selected,selected);
     assert(call.selected == selected && options == (__WALL | WNOHANG));
     assert(batch_usage ? usage!=NULL : usage == expected_usage);
     if (call.result > 0) {
@@ -159,24 +161,25 @@ int main(void) {
     assert(md_task_wait_ready(&w,&status,NULL)==71); done();
     expect(71,0,0); expect(80,0,0); expect(73,0,0); expect(72,0,0); expect(-1,0,0);
     assert(!md_task_wait_ready(&w,&status,NULL)); done();
-    /* A general wait may repeatedly choose the same hot child. An older
-     * unnotified stop must be queried independently of that kernel ordering. */
+    /* A small tree collects before any hot child can repeat its checkpoint.
+     * An unnotified older stop survives membership changes and a new hint. */
     w=(struct md_task_wait){0};
     struct md_task_wait_member members[3]={0};
     for (unsigned i=0;i<3;++i) md_task_wait_track(&w,&members[i],90+i);
-    expect(90,90,0);
+    expect(-1,90,0); expect(-1,92,0); expect(-1,0,0);
     assert(md_task_wait_ready(&w,&status,NULL)==90); done();
-    expect(91,0,0); expect(92,92,0);
+    md_task_wait_hint(&w,90);
     assert(md_task_wait_ready(&w,&status,NULL)==92); done();
     assert(w.cursor==&members[0]);
     md_task_wait_untrack(&w,&members[0]);
     assert(w.cursor==&members[1] && members[2].next==&members[1]);
-    expect(91,91,0);
+    expect(-1,91,0); expect(-1,0,0);
     assert(md_task_wait_ready(&w,&status,NULL)==91); done();
     md_task_wait_untrack(&w,&members[2]);
     md_task_wait_untrack(&w,&members[2]);
     assert(w.cursor==&members[1] && members[1].next==&members[1]);
     /* One live tracee does not acquire an extra fairness syscall. */
+    md_task_wait_hint(&w,91);
     expect(91,91,0);
     assert(md_task_wait_ready(&w,&status,NULL)==91); done();
     md_task_wait_untrack(&w,&members[1]);
@@ -236,6 +239,21 @@ int main(void) {
     assert(!md_task_wait_ready(&w,&status,NULL) && w.drained); done();
     for (unsigned i=0;i<1000;++i) assert(!md_task_wait_ready(&w,&status,NULL));
     done();
+    /* Each TID gets one query per discovery pass even if it appears in every
+     * source. Only the general wait establishes that the queue is drained. */
+    w=(struct md_task_wait){0};
+    struct md_task_wait_member duplicate[6]={0};
+    for (unsigned i=0;i<6;++i) md_task_wait_track(&w,&duplicate[i],200+i);
+    w.recent[0]=200; w.recent[1]=201; w.recent[2]=202;
+    md_task_wait_hint(&w,200); md_task_wait_hint(&w,201);
+    expect(200,0,0); expect(201,0,0); expect(202,0,0); expect(-1,0,0);
+    assert(!md_task_wait_ready(&w,&status,NULL) && w.drained); done();
+    assert(w.cursor==&duplicate[2]);
+    /* A later signal begins a new pass; a previous miss is never cached. */
+    md_task_wait_hint(&w,200);
+    expect(202,0,0); expect(203,0,0); expect(200,200,0);
+    assert(md_task_wait_ready(&w,&status,NULL)==200); done();
+    for (unsigned i=0;i<6;++i) md_task_wait_untrack(&w,&duplicate[i]);
     puts("PASS task event selection");
     return 0;
 }

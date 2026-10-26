@@ -133,6 +133,7 @@ int md_svc_machine_flush(struct md_svc_registry *r,struct md_svc_machine_thread 
     int recovery=recover(r,s,pid,&registers);
     if (recovery<0) return recovery;
     if (recovery==1 && (error=regs(pid,PTRACE_SETREGSET,&registers))) return error;
+    if (!recovery) s->draining=0;
     return recovery==2;
 }
 int md_svc_machine_signal(struct md_svc_registry *r,struct md_svc_machine_thread *s,pid_t pid,
@@ -223,10 +224,31 @@ int md_svc_machine_syscall(struct md_svc_registry *r,struct md_svc_machine_threa
     struct user_pt_regs registers=*observed;
     int owned=md_svc_machine_return(r,s,pid,&registers);
     if (owned<=0) return owned;
+    return md_svc_machine_redirect(s,pid,&registers);
+}
+int md_svc_machine_native_entry(const struct md_svc_registry *r,const struct user_pt_regs *registers) {
+    if (!r || r->disabled) return 0;
+    uintptr_t origin=md_svc_registry_call_origin(r,registers->pc);
+    if (origin==registers->pc) return 0;
+    /* An alias retains the caller's arguments and original continuation even
+     * for a number not yet admitted by this chain. Its ordinary syscall owner
+     * can execute it while discovery independently considers a new gate. */
+    int published=0;
+    for (unsigned i=0;i<r->count;++i) {
+        const struct md_svc_site *site=&r->sites[i];
+        if (site->state!=MD_SVC_PUBLISHED || site->direct.svc+4!=origin) continue;
+        if (site->direct.number==registers->regs[8]) return 1;
+        published=1;
+    }
+    return published ? 2 : 0;
+}
+int md_svc_machine_redirect(struct md_svc_machine_thread *s,pid_t pid,
+        const struct user_pt_regs *registers) {
+    if (s->syscall_exit) return -EBUSY;
     int number=-1;
     struct iovec io={&number,sizeof(number)};
     if (ptrace(PTRACE_SETREGSET,pid,(void *)NT_ARM_SYSTEM_CALL,&io)<0) return -errno;
-    s->restored=registers; s->syscall_exit=1;
+    s->restored=*registers; s->syscall_exit=1;
     return 1;
 }
 int md_svc_machine_exit(struct md_svc_machine_thread *s,pid_t pid) {
@@ -235,7 +257,7 @@ int md_svc_machine_exit(struct md_svc_machine_thread *s,pid_t pid) {
     if (error) return error;
     s->syscall_exit=0; s->draining=0; return 1;
 }
-int md_svc_machine_retry(struct md_svc_registry *r,struct md_svc_machine_thread *s,pid_t pid) {
+int md_svc_machine_retry(struct md_svc_machine_thread *s,pid_t pid,struct user_pt_regs *observed) {
     struct ptrace_syscall_info info={0};
     if (ptrace(PTRACE_GET_SYSCALL_INFO,pid,(void *)sizeof(info),&info)<0) return -errno;
     /* A handler may run first or longjmp away. Do not repatch its interrupted
@@ -243,7 +265,11 @@ int md_svc_machine_retry(struct md_svc_registry *r,struct md_svc_machine_thread 
      * A later observed original SVC can republish through normal discovery. */
     int original=info.op==PTRACE_SYSCALL_INFO_ENTRY
         && info.instruction_pointer==s->retry_svc+4 && info.entry.nr==s->retry_number;
-    int error=original ? md_svc_registry_resume(r,pid,s->retry_svc,s->retry_number) : 0;
-    if (!error) s->retry_svc=0;
-    return error ? error : original;
+    if (original) {
+        *observed=(struct user_pt_regs){.pc=info.instruction_pointer,.sp=info.stack_pointer};
+        observed->regs[8]=info.entry.nr;
+        for (unsigned i=0;i<6;++i) observed->regs[i]=info.entry.args[i];
+    }
+    s->retry_svc=0;
+    return original;
 }

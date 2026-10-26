@@ -241,16 +241,19 @@ int mdi_leaf_lookup(struct md_inode_store *s,const struct mdi_node *parent,const
     size_t prefix=strlen(parent->backing),length=strlen(name);
     if (prefix+length+1>=sizeof(path)) return -ENAMETOOLONG;
     memcpy(path,parent->backing,prefix); path[prefix]='/'; memcpy(path+prefix+1,name,length+1);
+    int directory=mdi_directory_pin(s,parent);
+    const char *selected=directory<0 ? path : name;
+    if (directory<0) directory=s->objects;
     struct stat st;
     if (pin) {
-        int fd=openat(s->objects,path,O_PATH|O_NOFOLLOW|O_CLOEXEC);
+        int fd=openat(directory,selected,O_PATH|O_NOFOLLOW|O_CLOEXEC);
         if (fd<0) return -errno;
         int r=fstat(fd,&st) ? -errno : leaf(s,parent,path,fd,&st,out,attributes);
         if (r) close(fd);
         else *pin=(struct mdi_path_pin){.fd=fd,.physical=st};
         return r;
     }
-    if (fstatat(s->objects,path,&st,AT_SYMLINK_NOFOLLOW)) return -errno;
+    if (fstatat(directory,selected,&st,AT_SYMLINK_NOFOLLOW)) return -errno;
     return leaf(s,parent,path,-1,&st,out,attributes);
 }
 static int fdpath(int fd,char *out,size_t size) {

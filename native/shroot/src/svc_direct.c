@@ -3,6 +3,7 @@
 #include "svc_frame.h"
 #include <errno.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 
 extern const unsigned char md_svc_single_begin[],md_svc_single_prefix[],md_svc_single_dispatch[];
@@ -13,7 +14,7 @@ extern const unsigned char md_svc_single_claim[],md_svc_single_claimed[],md_svc_
 extern const unsigned char md_svc_single_borrow_lr[],md_svc_single_saved_gprs[],md_svc_single_saved_sp[];
 extern const unsigned char md_svc_single_invoke[],md_svc_single_returned[],md_svc_single_outcome[];
 extern const unsigned char md_svc_single_done[],md_svc_single_kernel[];
-enum { GUARD_BYTES=64*4 };
+enum { GUARD_BYTES=64*4, MAP_GUARD=32, MAP_GUARD_END=40 };
 static size_t at(const unsigned char *label) { return (size_t)(label-md_svc_single_begin); }
 size_t md_svc_direct_size(void) { return GUARD_BYTES+md_svc_single_size()+16; }
 int md_svc_direct_kernel(uintptr_t svc,uintptr_t destination,uint32_t output[2]) {
@@ -36,7 +37,7 @@ int md_svc_direct_plan(uintptr_t svc,uint64_t number,uintptr_t destination,
     unsigned char *code=output,*body=code+GUARD_BYTES;
     uintptr_t body_pc=destination+GUARD_BYTES;
     /* The ordinary x8 template needs no guest stack, TLS, or spare register.
-     * Its replay slots load the value established by the read-only guard. */
+     * Its replay slots load the syscall number established by the guard. */
     memcpy(body,md_svc_single_begin,body_size);
     error=md_svc_frame_relocate(body,body_size,frames);
     if (error) return error;
@@ -51,7 +52,35 @@ int md_svc_direct_plan(uintptr_t svc,uint64_t number,uintptr_t destination,
     memcpy(body+body_size+8,&miss_branch,4);
     uint32_t nop=UINT32_C(0xd503201f);
     memcpy(body+body_size+12,&nop,4);
-    for (unsigned bit=0;bit<64;++bit) {
+    if (number<=4095) {
+        /* SUB (not SUBS) preserves NZCV and tests all 64 bits. The scratch
+         * value is reversible even on a mismatch; no guest stack or peer
+         * exclusion is needed. Signal recovery knows its exact three PCs. */
+        uint32_t guard[]={UINT32_C(0xd1000108)|((uint32_t)number<<10),
+            UINT32_C(0xb5000048),0,UINT32_C(0x91000108)|((uint32_t)number<<10),0};
+        error=md_svc_branch(destination+8,number==SYS_mmap ? destination+MAP_GUARD : body_pc,guard+2);
+        if (!error) error=md_svc_branch(destination+16,exits.mismatch,guard+4);
+        if (error) return error;
+        for (unsigned i=0;i<GUARD_BYTES;i+=4) memcpy(code+i,&nop,4);
+        memcpy(code,guard,sizeof(guard));
+        if (number==SYS_mmap) {
+            /* Reject nonreplacing/file-backed mappings before saving the full context.
+             * TBZ leaves args/NZCV untouched; x8 is still reversible scratch.
+             * These predicates never grant execution: the API checks the
+             * complete flag set and current mapping exclusions on every call. */
+            _Static_assert(MAP_FIXED==(1u<<4) && MAP_ANONYMOUS==(1u<<5),"AArch64 mmap flags");
+            for (unsigned i=0;i<2;++i) {
+                unsigned at=MAP_GUARD+4*i;
+                uint32_t test=UINT32_C(0x36000003)|((4+i)<<19)
+                    |(((uint32_t)((12-(int)at)/4)&0x3fff)<<5);
+                memcpy(code+at,&test,4);
+            }
+            uint32_t enter;
+            error=md_svc_branch(destination+MAP_GUARD_END,body_pc,&enter);
+            if (error) return error;
+            memcpy(code+MAP_GUARD_END,&enter,4);
+        }
+    } else for (unsigned bit=0;bit<64;++bit) {
         size_t offset=GUARD_BYTES+body_size+8-bit*4;
         if (offset>=32768) return -ERANGE;
         /* TBZ/TBNZ inspect x8 without writing a GPR or NZCV, even for values
@@ -109,6 +138,9 @@ int md_svc_direct_recover(const struct md_svc_direct_context *c,struct user_pt_r
     uintptr_t body=c->gate+GUARD_BYTES,pc=r->pc,frame=0;
     size_t size=md_svc_direct_size(),body_size=md_svc_single_size();
     if ((pc>=c->gate && pc<body) || pc==body+body_size+8) {
+        if (c->number<=4095 && (pc==c->gate+4 || pc==c->gate+8 || pc==c->gate+12
+                || (c->number==SYS_mmap && pc>=c->gate+MAP_GUARD && pc<=c->gate+MAP_GUARD_END)))
+            r->regs[8]+=c->number;
         r->pc=c->svc;
         return 1;
     }

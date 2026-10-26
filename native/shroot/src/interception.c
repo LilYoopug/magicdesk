@@ -90,6 +90,7 @@ extern long md_guest_buffer_control(unsigned, unsigned long, unsigned long);
 extern char md_guest_task_control[], md_guest_task_call[], md_guest_task_return[];
 extern char md_guest_task_abort[], md_guest_task_abort_return[];
 extern char md_guest_task_collect[], md_guest_task_collected[];
+extern char md_guest_task_completed[], md_guest_watch_completed[];
 extern char md_guest_buffer_admitted[];
 #include "epoll_calls.h"
 #include "poll_calls.h"
@@ -150,8 +151,8 @@ static long dispatch_files(const struct md_fs *fs, long nr, unsigned long a0, un
         MD_SOCKET_CALLS(CALL)
             return md_socket_call(fs, md_executable, nr, args,prepared);
 #undef CALL
-        case SYS_execve: return md_guest_exec(fs, (void *)a0, (void *)a1, (void *)a2);
-        case SYS_execveat: return md_guest_execat(fs, a0, (void *)a1, (void *)a2, (void *)a3, a4);
+        case SYS_execve: return md_guest_execat(fs, AT_FDCWD, (void *)a0, (void *)a1, (void *)a2, 0, prepared);
+        case SYS_execveat: return md_guest_execat(fs, a0, (void *)a1, (void *)a2, (void *)a3, a4, prepared);
         default: return -ENOSYS;
     }
 }
@@ -208,6 +209,7 @@ static const struct md_interception_abi abi = {
     .native_end=(uintptr_t)md_cooperative_native_end,
     .task_control=(uintptr_t)md_guest_task_control_checkpoint, .task_call=(uintptr_t)md_guest_task_call,
     .task_return=(uintptr_t)md_guest_task_return, .task_abort=(uintptr_t)md_guest_task_abort,
+    .task_completed=(uintptr_t)md_guest_task_completed,
     .task_collect=(uintptr_t)md_guest_task_collect, .task_collected=(uintptr_t)md_guest_task_collected,
     .buffer_control=(uintptr_t)md_guest_buffer_control_checkpoint,
     .buffer_admit=(uintptr_t)md_guest_buffer_admitted,
@@ -231,24 +233,28 @@ static const struct md_interception_abi abi = {
     .copy_begin = (uintptr_t)md_guest_copy_begin, .copy_end = (uintptr_t)md_guest_copy_end,
     .watch_gate = (uintptr_t)md_guest_watch_gate,
     .watch_return = (uintptr_t)md_guest_watch_return,
+    .watch_completed = (uintptr_t)md_guest_watch_completed,
     .load_groups = (uintptr_t)md_guest_load_groups, .loaded_groups = (uintptr_t)md_guest_loaded_groups,
     .store_groups = (uintptr_t)md_guest_store_groups, .stored_groups = (uintptr_t)md_guest_stored_groups,
     .enter = (uintptr_t)md_enter_checkpoint
 };
 
-int md_interception_map_image(int fd, int loader) {
-    long result = RAW3(prctl, MD_GUEST_MAP_IMAGE, fd, loader);
+int md_interception_map_image(int fd) {
+    long result = RAW3(prctl, MD_GUEST_MAP_IMAGE, fd, 0);
     return result < 0 ? (int)result : 0;
 }
-int md_interception_enter_image(void *aux, unsigned count) {
-    long result = RAW3(prctl, MD_GUEST_ENTER_IMAGE, aux, count);
-    if (result > 0) result = RAW2(prctl, PR_SET_DUMPABLE, 0);
-    return (int)result;
+void md_interception_enter_image(uintptr_t entry,uintptr_t stack,const void *image,void *aux,unsigned count,int machine) {
+    long result=md_enter(entry,stack,image,aux,count,machine);
+    if (result==1) {
+        result=RAW2(prctl,PR_SET_DUMPABLE,0);
+        if (!result) result=md_enter(entry,stack,image,NULL,0,0);
+    }
+    md_die("enter guest image",result<0 ? result : -EPROTO);
 }
 
 int md_interception_install(int inherited) {
     long result = 0;
-    int listener = -1;
+    int listener = -1, capabilities=0;
     if (!inherited) {
         uintptr_t gate = (uintptr_t)md_raw_return;
         uintptr_t watch = (uintptr_t)md_guest_watch_return;
@@ -256,6 +262,13 @@ int md_interception_install(int inherited) {
         uintptr_t task=(uintptr_t)md_guest_task_return, abort_task=(uintptr_t)md_guest_task_abort_return;
         uintptr_t admit=(uintptr_t)md_guest_buffer_admitted;
         uintptr_t native=(uintptr_t)md_cooperative_native_return;
+        const uintptr_t sites[]={native,admit,abort_task,task,watch,capture,
+#define SITE(field,symbol) (uintptr_t)symbol+4,
+            MD_CHECKPOINT_SITES(SITE)
+#undef SITE
+        };
+        for (unsigned i=0;i<sizeof(sites)/sizeof(*sites);++i)
+            if (sites[i]>>32!=(uintptr_t)md_guest_ready>>32) return -EINVAL;
 #define COUNT(name) + 1
         enum { transport_instructions = 2 * (1 MD_GATE_TRANSPORT_CALLS(COUNT)),
             native_instructions = 2 * (0 MD_ENTRY_NATIVE_CALLS(COUNT)) };
@@ -272,12 +285,18 @@ int md_interception_install(int inherited) {
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_AARCH64, 1, 0),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
-            /* All service markers live in the fixed bootstrap text image.
+            /* Fixed-number service markers cannot alias these calls. Linux
+             * can cache these decisions without reading IP or arguments;
+             * later descriptor selectors and application filters still apply. */
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            MD_DOMAIN_WAIT_CALLS(NATIVE)
+            MD_DOMAIN_EXECUTION_CALLS(NATIVE)
+            /* All service gates live in the fixed bootstrap text image.
              * Ordinary guest code skips this table with one high-IP check. */
 #define COUNT_MARKER(field,symbol) +2
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
             BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)((uintptr_t)md_guest_ready>>32),0,
-                1 MD_CHECKPOINT_SITES(COUNT_MARKER)),
+                25+native_instructions MD_CHECKPOINT_SITES(COUNT_MARKER)),
 #undef COUNT_MARKER
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
 #define MARKER(field,symbol) \
@@ -287,16 +306,11 @@ int md_interception_install(int inherited) {
 #undef MARKER
             /* An admitted native effect retains its table turn and journal.
              * Application filters are still evaluated by the kernel. */
-            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
-            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(native>>32),0,3+native_instructions),
-            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
             BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)native,0,1+native_instructions),
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
             MD_ENTRY_NATIVE_CALLS(NATIVE)
             /* Descriptor admission has no dependency on application prctl
              * policy. Its exact site still runs every application filter. */
-            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
-            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(admit>>32),0,5),
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
             BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)admit,0,3),
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
@@ -305,13 +319,9 @@ int md_interception_install(int inherited) {
             /* Exact private-helper termination site. Application KILL_PROCESS
              * still has precedence; ERRNO on ordinary exit cannot strand its
              * private file table. Ordinary guest exits never use this site. */
-            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
-            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(abort_task>>32),0,3),
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
             BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)abort_task,0,1),
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_THREAD),
-            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
-            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(task>>32),0,6),
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
             BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)task,0,4),
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
@@ -320,13 +330,9 @@ int md_interception_install(int inherited) {
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_TASK),
             /* Declared on the original listener; a later listenerless filter
              * cannot acquire or inherit USER_NOTIF delivery. */
-            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer) + 4),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)(watch >> 32), 0, 3),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer)),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)watch, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
-            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer) + 4),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)(capture >> 32), 0, 5),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer)),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)capture, 0, 3),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
@@ -335,16 +341,15 @@ int md_interception_install(int inherited) {
             /* Descriptor metadata must remain serviceable after an application
              * installs a higher-precedence filter or becomes nondumpable. */
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_prctl, 0, 11),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_prctl, 0, 10),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_FD_CHANNEL, 7, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_BUFFER, 6, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_PROC_IMAGE, 5, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_PROC_FILE, 4, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_SHM, 3, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_IPC, 2, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_MAP_IMAGE, 1, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_ENTER_IMAGE, 0, 1),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_FD_CHANNEL, 6, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_BUFFER, 5, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_PROC_IMAGE, 4, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_PROC_FILE, 3, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_SHM, 2, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_IPC, 1, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, MD_GUEST_MAP_IMAGE, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
             DESCRIPTOR(clone) DESCRIPTOR(clone3) OBSERVE(chroot)
@@ -361,16 +366,15 @@ int md_interception_install(int inherited) {
 #undef FD_ARGUMENT
             NATIVE(read) NATIVE(write) NATIVE(readv) NATIVE(writev)
             NATIVE(pread64) NATIVE(pwrite64)
-            NATIVE(futex) NATIVE(set_robust_list) NATIVE(get_robust_list)
-            /* Internal mappings and descriptor-capacity queries use the
-             * native resources, not a second guest operation. */
+            /* Internal mappings, admitted regular-file cursors and descriptor
+             * capacity use native resources, not a second guest operation. */
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)+4),
-            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(gate>>32),0,13),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)(gate>>32),0,15),
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,instruction_pointer)),
-            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)gate,0,11),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(uint32_t)gate,0,13),
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
             NATIVE(mmap) NATIVE(munmap) NATIVE(mremap) NATIVE(mprotect)
-            NATIVE(prlimit64)
+            NATIVE(prlimit64) NATIVE(lseek)
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
             /* File mappings require their descriptor's live mount policy.
              * Anonymous non-replacing mappings and ordinary data IO stay native. */
@@ -390,12 +394,7 @@ int md_interception_install(int inherited) {
             BPF_JUMP(BPF_JMP|BPF_JSET|BPF_K,PROT_EXEC,0,1),
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_MEMORY),
             BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
-            NATIVE(madvise)
-            NATIVE(brk)
-            NATIVE(rt_sigaction) NATIVE(rt_sigprocmask) NATIVE(rt_sigreturn) NATIVE(sigaltstack)
             NATIVE(getpid) NATIVE(getppid) NATIVE(gettid)
-            NATIVE(getrandom) NATIVE(clock_gettime)
-            NATIVE(clock_nanosleep) NATIVE(nanosleep)
             NATIVE(eventfd2) NATIVE(timerfd_create) NATIVE(timerfd_settime) NATIVE(timerfd_gettime)
             NATIVE(exit) NATIVE(exit_group) NATIVE(set_tid_address)
             /* Only guest-owned limits need adaptation; all other limits keep
@@ -409,7 +408,7 @@ int md_interception_install(int inherited) {
             BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
             LIMIT(getrlimit,0) LIMIT(setrlimit,0) LIMIT(prlimit64,1)
 #undef LIMIT
-            MD_DOMAIN_KERNEL_CALLS(NATIVE)
+            MD_DOMAIN_KERNEL_CONTROL_CALLS(NATIVE)
             /* Compare the full policy argument, not only its low kernel int. */
 #define NATIVE_ARGUMENT(n, index, value) \
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_##n, 0, 6), \
@@ -433,18 +432,20 @@ int md_interception_install(int inherited) {
             UNAVAILABLE(mq_timedreceive) UNAVAILABLE(mq_notify) UNAVAILABLE(mq_getsetattr)
 #undef UNAVAILABLE
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer) + 4),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)(gate >> 32), 0, 12 + transport_instructions),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)(gate >> 32), 0, 22 + transport_instructions),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer)),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)gate, 0, 10 + transport_instructions),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)gate, 0, 20 + transport_instructions),
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
             /* Already unconditional kernel operations in every domain. The
              * original application call still enters its adapter, and every
              * application filter still evaluates these internal syscalls. */
             MD_GATE_TRANSPORT_CALLS(NATIVE)
-            /* Loader/adapter fstat already requests native descriptor metadata,
-             * never logical inode or admitted set-ID metadata. Keep application
-             * filters in force without a worker/supervisor round trip. */
-            NATIVE(fstat)
+            /* These internal queries already request native metadata/paths,
+             * never logical guest metadata. Application filters stay in force. */
+            NATIVE(fstat) NATIVE(readlinkat)
+            /* Runtime transport validates its native peer identity; guest
+             * credential queries use their original SVC, never this gate. */
+            NATIVE(getuid) NATIVE(geteuid) NATIVE(getgid) NATIVE(getegid)
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_chdir, 0, 1),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRACE | MD_INTERCEPT_CWD),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_fchdir, 0, 1),
@@ -497,10 +498,12 @@ int md_interception_install(int inherited) {
             if (result >= 0) { listener = (int)result; result = 0; }
         }
     } else if (RAW1(prctl, PR_GET_SECCOMP) != SECCOMP_MODE_FILTER) result = -EINVAL;
-    if (!result && !md_guest_ready(listener, md_files.endpoint, MD_INTERCEPTION_MAGIC, &abi))
-        md_cooperative_revoke();
+    if (!result) {
+        capabilities=md_guest_ready(listener, md_files.endpoint, MD_INTERCEPTION_MAGIC, &abi);
+        if (!(capabilities&MD_INTERCEPTION_COOPERATIVE)) md_cooperative_revoke();
+    }
     if (!result) md_fd_client_enable();
     if (listener >= 0) RAW1(close, listener);
     if (!result) result=md_adapter_buffer_install();
-    return result;
+    return result ? (int)result : capabilities;
 }

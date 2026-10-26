@@ -24,11 +24,16 @@ static void parse(void) {
     assert(v.major==1 && v.minor==10 && !v.shared && v.protection==(PROT_READ|PROT_EXEC));
     assert(md_mapping_parse("1000-2000 ---s 0 00:00 0",0,&v) && v.shared && !v.protection);
     assert(md_mapping_parse("1000-2000 rw-p 0 00:00 42 /truncated",1,&v));
+    assert(md_mapping_parse("1000-2000 r-xp ffffffffffffffff ffffffff:FFFFFFFF 00018446744073709551615",0,&v));
+    assert(v.offset==UINT64_MAX && v.major==UINT32_MAX && v.minor==UINT32_MAX && v.inode==UINT64_MAX);
     assert(!md_mapping_parse("1000-2000 rw-p 0 00:00 42",1,&v));
     const char *bad[]={"", "1000", "1000-1000 r-xp 0 00:00 1", "2000-1000 r-xp 0 00:00 1",
         "1000-2000 rwxp 0 00:00 18446744073709551616", "1000-2000 rwxp 10000000000000000 00:00 1",
         "1000-2000 rwxp 0 100000000:00 1", "1000-2000 rwxp 0 00:00 -1",
         "1000-2000 rwxp 0 00:00 12junk", "1000-2000 r-xq 0 00:00 1",
+        "1000-2000 rw-p 0 00:00 18446744073709551610a",
+        "1000-2000 rw-p 0 00:00 18446744073709551619",
+        "1000-2000 rw-p 1000000000000000f 00:00 1",
         "1000-2000 xxxx 0 00:00 1", "1000-2000 r-xp", "VmFlags: rd ex mr mw me"};
     for (size_t i=0;i<sizeof(bad)/sizeof(*bad);++i) assert(!md_mapping_parse(bad[i],0,&v));
 }

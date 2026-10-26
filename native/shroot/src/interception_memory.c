@@ -2,6 +2,7 @@
 #include "mapping_reader.h"
 #include "interception_memory.h"
 #include "svc_registry.h"
+#include "memory_admission.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -51,6 +52,8 @@ struct md_interception_memory {
     unsigned exposures;
     struct backing_pool *backings;
     struct md_svc_registry *svc;
+    struct md_memory_admission *admission;
+    unsigned admission_valid, admission_sites, admission_pools;
 };
 static unsigned backing_bucket(dev_t device, ino_t inode) {
     return ((uint64_t)device ^ (uint64_t)inode) % BACKING_BUCKETS;
@@ -84,6 +87,7 @@ static void file_ranges_release(struct md_memory_file_range *ranges, size_t coun
     free(ranges);
 }
 static void files_forget(struct md_interception_memory *s) {
+    s->admission_valid=0;
     file_ranges_release(s->files,s->file_count);
     s->files=NULL; s->file_count=s->file_capacity=0;
 }
@@ -106,7 +110,7 @@ struct md_interception_memory *md_memory_new(void) { return memory_new(NULL); }
 struct md_svc_registry *md_memory_svc(const struct md_interception_memory *s) { return s ? s->svc : NULL; }
 int md_memory_svc_set(struct md_interception_memory *s,struct md_svc_registry *registry) {
     if (!s || s->svc) return -EBUSY;
-    s->svc=registry; return 0;
+    s->svc=registry; s->admission_valid=0; return 0;
 }
 int md_memory_exposure_begin(struct md_interception_memory *s,struct md_interception_memory **lease) {
     if (!lease || *lease) return -EINVAL;
@@ -129,8 +133,13 @@ int md_memory_exposed(const struct md_interception_memory *s) { return s && (s->
 struct md_interception_memory *md_memory_new_image(struct md_interception_memory *s) {
     return memory_new(s->backings);
 }
+int md_memory_sole_owner(const struct md_interception_memory *s) { return s && s->references==1; }
 struct md_interception_memory *md_memory_fork(struct md_interception_memory *s, int shared) {
-    if (shared) { if (s->references==UINT_MAX) return NULL; s->references++; return s; }
+    if (shared) {
+        if (s->references==UINT_MAX) return NULL;
+        if (s->admission) atomic_store_explicit(&s->admission->enabled,0,memory_order_release);
+        s->references++; return s;
+    }
     struct md_interception_memory *copy = memory_new(s->backings);
     if (!copy) return NULL;
     /* fork inherits mappings, but not other threads or active continuations. */
@@ -152,16 +161,16 @@ struct md_interception_memory *md_memory_fork(struct md_interception_memory *s, 
     if (s->svc && !(copy->svc=md_svc_registry_copy(s->svc))) { md_memory_release(copy); return NULL; }
     if (s->file_count) {
         copy->files=malloc(s->file_count*sizeof(*copy->files));
-        if (copy->files) {
-            memcpy(copy->files,s->files,s->file_count*sizeof(*copy->files));
-            copy->file_count=copy->file_capacity=s->file_count;
-            for (size_t i=0;i<copy->file_count;++i) backing_retain(copy->files[i].backing);
-        }
+        if (!copy->files) { md_memory_release(copy); return NULL; }
+        memcpy(copy->files,s->files,s->file_count*sizeof(*copy->files));
+        copy->file_count=copy->file_capacity=s->file_count;
+        for (size_t i=0;i<copy->file_count;++i) backing_retain(copy->files[i].backing);
     }
     return copy;
 }
 void md_memory_release(struct md_interception_memory *s) {
     if (!s || --s->references) return;
+    assert(!s->admission);
     while (s->slots) { struct slot *next = s->slots->next; free(s->slots); s->slots = next; }
     md_buffers_release(s->buffers); md_resource_queue_destroy(&s->mappings); free(s->restrictions);
     if (s->access_ready) { close(s->access.maps); close(s->access.memory); close(s->access.pagemap); }
@@ -195,7 +204,7 @@ int md_memory_buffers_mapped(struct md_interception_memory *s, uintptr_t base, s
     if (!s || !s->buffers || !base || base%(size_t)getpagesize()
             || size!=md_buffers_size(s->buffers) || base>UINTPTR_MAX-size) return -EINVAL;
     if (s->buffer_base) return -EALREADY;
-    s->buffer_base=base; return 0;
+    s->buffer_base=base; s->admission_valid=0; return 0;
 }
 uintptr_t md_memory_buffer_address(struct md_interception_memory *s, const struct md_interception_buffer *b) {
     struct md_buffer_span span;
@@ -255,6 +264,65 @@ static int intersects(const struct md_interception_memory *s, uintptr_t first, s
     for (size_t i=0;i<s->ranges && s->restrictions[i].first<first+length;++i)
         if (s->restrictions[i].end>first) restrictions|=s->restrictions[i].restrictions;
     return (int)restrictions;
+}
+int md_memory_mapping_observe(const struct md_interception_memory *s,uintptr_t first,size_t length) {
+    if (s->references!=1 || s->policy_unknown) return 1;
+    size_t size;
+    if (rounded(length,&size) || first>UINTPTR_MAX-size) return 1;
+    if (!size) return 0;
+    if (intersects(s,first,size)) return 1;
+    for (size_t i=0;i<s->file_count && s->files[i].first<first+size;++i)
+        if (s->files[i].end>first) return 1;
+    return 0;
+}
+static int admission_range(struct md_memory_admission *p,uintptr_t first,uintptr_t end) {
+    if (first>=end) return 0;
+    unsigned at=0;
+    while (at<p->count && p->ranges[at].end<first) ++at;
+    unsigned last=at;
+    while (last<p->count && p->ranges[last].first<=end) {
+        if (p->ranges[last].first<first) first=p->ranges[last].first;
+        if (p->ranges[last].end>end) end=p->ranges[last].end;
+        ++last;
+    }
+    if (last==at && p->count==MD_MEMORY_ADMISSION_RANGES) return -ENOSPC;
+    memmove(p->ranges+at+1,p->ranges+last,(p->count-last)*sizeof(*p->ranges));
+    p->count=p->count-(last-at)+1;
+    p->ranges[at].first=first; p->ranges[at].end=end;
+    return 0;
+}
+void md_memory_admission_detach(struct md_interception_memory *s,struct md_memory_admission *p) {
+    atomic_store_explicit(&p->enabled,0,memory_order_release);
+    if (s && s->admission==p) { s->admission=NULL; s->admission_valid=0; }
+}
+void md_memory_admission_publish(struct md_interception_memory *s,struct md_memory_admission *p,int eligible) {
+    atomic_store_explicit(&p->enabled,0,memory_order_release);
+    if (!s || !eligible || s->references!=1 || s->policy_unknown || md_memory_exposed(s)) return;
+    if (s->admission && s->admission!=p) return;
+    const struct md_svc_registry *r=s->svc;
+    if (!r || r->disabled) return;
+    /* Resident sites and pools are append-only, including retired gates.
+     * Mapping commits invalidate the other exclusions. Eligibility is never
+     * cached: sharing, exposure and filter fences still revoke each publish. */
+    if (s->admission==p && s->admission_valid
+            && s->admission_sites==r->count && s->admission_pools==r->pool_count) {
+        atomic_store_explicit(&p->enabled,1,memory_order_release); return;
+    }
+    s->admission_valid=0;
+    s->admission=p; p->count=0;
+    for (size_t i=0;i<s->ranges;++i)
+        if (admission_range(p,s->restrictions[i].first,s->restrictions[i].end)) return;
+    for (size_t i=0;i<s->file_count;++i)
+        if (admission_range(p,s->files[i].first,s->files[i].end)) return;
+    if (s->buffer_base && admission_range(p,s->buffer_base,s->buffer_base+md_buffers_size(s->buffers))) return;
+    if (admission_range(p,r->native_begin,r->native_end)
+            || admission_range(p,r->frames,r->frames+MD_SVC_POOL_SIZE+MD_SVC_PAYLOAD_SIZE)) return;
+    for (unsigned i=0;i<r->pool_count;++i)
+        if (admission_range(p,r->pools[i].address,r->pools[i].address+MD_SVC_CODE_BYTES)) return;
+    for (unsigned i=0;i<r->count;++i)
+        if (r->sites[i].direct.gate && admission_range(p,r->sites[i].direct.svc,r->sites[i].direct.svc+4)) return;
+    s->admission_sites=r->count; s->admission_pools=r->pool_count; s->admission_valid=1;
+    atomic_store_explicit(&p->enabled,1,memory_order_release);
 }
 int md_memory_protect_check(const struct md_interception_memory *s, uintptr_t first, size_t length,unsigned protection) {
     if (first%(size_t)getpagesize()) return -EINVAL;
@@ -337,42 +405,78 @@ static void files_insert(struct md_interception_memory *s, struct md_memory_file
     memmove(s->files+i+1,s->files+i,(s->file_count-i)*sizeof(*s->files));
     r.backing=backing_retain(r.backing); s->files[i]=r; ++s->file_count;
 }
-int md_memory_mapping_backing(struct md_interception_memory *s, struct md_mapping_change *c, int fd, uint64_t offset) {
+static int backing_request(const struct md_mapping_change *c,uint64_t offset) {
     if (!c->prepared || c->operation!=MD_MAPPING_MAP || c->backing
             || (c->flags&MAP_TYPE)!=MAP_PRIVATE || (c->flags&MAP_ANONYMOUS)) return -EINVAL;
     if (offset%(size_t)getpagesize() || c->length>INT64_MAX
             || offset>(uint64_t)INT64_MAX-c->length) return -EINVAL;
+    return 0;
+}
+static int backing_reuse(struct md_interception_memory *s,struct md_mapping_change *c,
+        const struct stat *st,uint64_t offset) {
+    unsigned bucket=backing_bucket(st->st_dev,st->st_ino);
+    for (struct md_memory_backing *b=s->backings->buckets[bucket];b;b=b->next) {
+        if (b->device!=st->st_dev || b->inode!=st->st_ino) continue;
+        int error=files_reserve(s,4);
+        if (error) return error;
+        c->backing=backing_retain(b); c->offset=offset; return 1;
+    }
+    return 0;
+}
+/* Consumes an already admitted description. Capture callers establish its
+ * identity and access mode once; publication must not reopen it again. */
+static int backing_adopt(struct md_interception_memory *s,struct md_mapping_change *c,
+        int fd,const struct stat *st,uint64_t offset,int indexed) {
+    int error=files_reserve(s,4);
+    struct md_memory_backing *b=error ? NULL : malloc(sizeof(*b));
+    if (!b) { close(fd); return error ? error : -ENOMEM; }
+    unsigned bucket=backing_bucket(st->st_dev,st->st_ino);
+    *b=(struct md_memory_backing){.references=1,.fd=fd,.indexed=indexed,
+        .device=st->st_dev,.inode=st->st_ino,.pool=pool_retain(s->backings),
+        .next=s->backings->buckets[bucket]};
+    if (indexed) s->backings->buckets[bucket]=b;
+    c->backing=b; c->offset=offset; return 0;
+}
+int md_memory_mapping_pin(struct md_interception_memory *s,struct md_mapping_change *c,int pin,uint64_t offset) {
+    int error=backing_request(c,offset);
+    if (error) return error;
+    struct stat st;
+    if (fstat(pin,&st)) return -errno;
+    if (!S_ISREG(st.st_mode)) return 0;
+    error=backing_reuse(s,c,&st,offset);
+    if (error) return error;
+    /* The authenticated pin, not a guest pathname, selects the inode. Repair
+     * only uses positional reads, so it needs no application OFD state. Denied
+     * access retains exact task-affine capture; mmap itself is never granted
+     * by obtaining this optional source. */
+    char path[64]; snprintf(path,sizeof(path),"/proc/self/fd/%d",pin);
+    int fd=open(path,O_RDONLY|O_CLOEXEC|O_NONBLOCK);
+    if (fd<0) return -errno;
+    error=backing_adopt(s,c,fd,&st,offset,1);
+    return error ? error : 1;
+}
+int md_memory_mapping_backing(struct md_interception_memory *s, struct md_mapping_change *c, int fd, uint64_t offset) {
+    int error=backing_request(c,offset);
+    if (error) return error;
     struct stat st;
     if (fstat(fd,&st)) return -errno;
     if (!S_ISREG(st.st_mode)) return 0;
     int flags=fcntl(fd,F_GETFL);
     if (flags<0) return -errno;
     if ((flags&O_PATH) || (flags&O_ACCMODE)==O_WRONLY) return 0;
-    int error=files_reserve(s,4);
-    if (error) return error;
+    error=backing_reuse(s,c,&st,offset);
+    if (error) return error<0 ? error : 0;
     /* Backings serve positional file reads/mappings only, never application
      * IO offsets. The pool owns no cached reference: the final mapping or
      * pending change removes its entry and closes the exact retained file. */
-    unsigned bucket=backing_bucket(st.st_dev,st.st_ino);
-    for (struct md_memory_backing *b=s->backings->buckets[bucket];b;b=b->next) {
-        if (b->device==st.st_dev && b->inode==st.st_ino) {
-            c->backing=backing_retain(b); c->offset=offset; return 0;
-        }
-    }
-    struct md_memory_backing *b=malloc(sizeof(*b));
-    if (!b) return -ENOMEM;
     /* A pooled source has its own read-only open description. Guest F_SETFL
      * cannot change another address space's repair source. If native policy
      * prevents reopening, retain the admitted description without pooling. */
     char path[64]; snprintf(path,sizeof(path),"/proc/self/fd/%d",fd);
     int retained=open(path,O_RDONLY|O_CLOEXEC), indexed=retained>=0;
     if (retained<0) retained=fcntl(fd,F_DUPFD_CLOEXEC,0);
-    if (retained<0) { int error=-errno; free(b); return error; }
-    *b=(struct md_memory_backing){.references=1,.fd=retained,.indexed=indexed,
-        .device=st.st_dev,.inode=st.st_ino,.pool=pool_retain(s->backings),
-        .next=s->backings->buckets[bucket]};
-    if (indexed) s->backings->buckets[bucket]=b;
-    c->backing=b; c->offset=offset; return 0;
+    if (retained<0) return -errno;
+    return backing_adopt(s,c,retained,&st,offset,indexed);
 }
 int md_memory_file_view(const struct md_interception_memory *s, uintptr_t first, size_t size,
         int *fd, uint64_t *offset) {
@@ -392,26 +496,41 @@ int md_memory_file_view(const struct md_interception_memory *s, uintptr_t first,
     if (cursor!=end) return 0;
     *fd=backing->fd; *offset=position; return 1;
 }
-int md_memory_image_backing(struct md_interception_memory *s,pid_t pid,int fd) {
-    struct stat st;
-    if (fstat(fd,&st)) return -errno;
-    if (!S_ISREG(st.st_mode)) return -EINVAL;
+int md_memory_image_backings(struct md_interception_memory *s,pid_t pid,const int *fds,unsigned count) {
+    if (!fds || !count || count>2) return -EINVAL;
+    struct stat identity[2];
+    for (unsigned i=0;i<count;++i) {
+        if (fstat(fds[i],identity+i)) return -errno;
+        if (!S_ISREG(identity[i].st_mode)) return -EINVAL;
+    }
     char path[64]; snprintf(path,sizeof(path),"/proc/%d/maps",pid);
     int maps=open(path,O_RDONLY|O_CLOEXEC);
     if (maps<0) return -errno;
     struct md_mapping_reader reader={.fd=maps}; struct md_mapping_record v;
-    int error=0, captured=0, result=0;
+    struct md_memory_backing *backings[2]={0};
+    int error=0, result=0;
+    unsigned captured=0;
     while (!error && (result=md_mapping_next(&reader,&v))>0) {
-        if (v.shared || v.inode!=st.st_ino || makedev(v.major,v.minor)!=st.st_dev) continue;
-        struct md_mapping_change change={0};
-        error=md_memory_mapping_prepare(s,&change,MD_MAPPING_MAP,v.first,v.end-v.first,0,MAP_PRIVATE,0);
-        if (!error) error=md_memory_mapping_backing(s,&change,fd,v.offset);
-        if (!error && !change.backing) error=-EACCES;
-        md_memory_mapping_finish(s,&change,error ? error : (long)v.first);
-        if (!error) ++captured;
+        if (v.shared) continue;
+        for (unsigned i=0;!error && i<count;++i) {
+            if (v.inode!=identity[i].st_ino || makedev(v.major,v.minor)!=identity[i].st_dev) continue;
+            struct md_mapping_change change={0};
+            error=md_memory_mapping_prepare(s,&change,MD_MAPPING_MAP,v.first,v.end-v.first,0,MAP_PRIVATE,0);
+            if (!error && backings[i]) {
+                error=backing_request(&change,v.offset);
+                if (!error) { change.backing=backing_retain(backings[i]); change.offset=v.offset; }
+            } else if (!error) {
+                error=md_memory_mapping_backing(s,&change,fds[i],v.offset);
+                if (!error && !change.backing) error=-EACCES;
+                if (!error) backings[i]=backing_retain(change.backing);
+            }
+            md_memory_mapping_finish(s,&change,error ? error : (long)v.first);
+            if (!error) captured|=1u<<i;
+        }
     }
     if (!error && result<0) error=result;
-    close(maps); return error ? error : captured ? 0 : -ENOENT;
+    for (unsigned i=0;i<count;++i) backing_release(backings[i]);
+    close(maps); return error ? error : captured==(1u<<count)-1 ? 0 : -ENOENT;
 }
 static void change_release(struct md_mapping_change *c) {
     backing_release(c->backing); file_ranges_release(c->moving,c->moving_count);
@@ -482,6 +601,7 @@ int md_memory_mapping_prepare(struct md_interception_memory *s, struct md_mappin
 void md_memory_mapping_finish(struct md_interception_memory *s, struct md_mapping_change *c, long result) {
     if (!c->prepared) return;
     if (result>=0) {
+        s->admission_valid=0;
         if (c->operation==MD_MAPPING_UNMAP) {
             remove_range(s,c->address,c->length); files_remove(s,c->address,c->length);
         }

@@ -16,7 +16,9 @@ def main():
         suite.command(['chmod', '700', binary])
         output = suite.command(['timeout', '250', binary], timeout=270)
         assert 'PASS SVC arbitrary boundary:' in output
-        assert output.count('SVC_SIGNAL_PATH ') == 3
+        assert output.count('SVC_SIGNAL_PATH ') == 5
+        output = suite.command(['timeout', '60', binary, '--mmap-guard'], timeout=70)
+        assert 'PASS mmap argument guard:' in output
         for control in ('--unsafe-context', '--unsafe-checkpoint'):
             output = suite.command(['timeout', '20', binary, control], timeout=30)
             assert 'PASS negative signal control:' in output

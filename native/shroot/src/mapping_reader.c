@@ -26,12 +26,14 @@ int md_mapping_line(struct md_mapping_reader *r, char *out, size_t capacity) {
 }
 static int number(const char **text, unsigned base, uint64_t *out) {
     const char *p=*text; uint64_t value=0; unsigned count=0;
+    uint64_t limit=UINT64_MAX/base;
+    unsigned last=(unsigned)(UINT64_MAX%base);
     for (;;) {
         unsigned digit=*p>='0' && *p<='9' ? (unsigned)(*p-'0')
             : *p>='a' && *p<='f' ? (unsigned)(*p-'a'+10)
             : *p>='A' && *p<='F' ? (unsigned)(*p-'A'+10) : base;
         if (digit>=base) break;
-        if (value>(UINT64_MAX-digit)/base) return 0;
+        if (value>limit || (value==limit && digit>last)) return 0;
         value=value*base+digit; ++p; ++count;
     }
     if (!count) return 0;

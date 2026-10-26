@@ -18,16 +18,12 @@ static uintptr_t code_pool(uintptr_t entry) {
     }
     return 0;
 }
-void md_svc_runtime_prepare(uintptr_t program,uintptr_t loader,unsigned long capabilities) {
+void md_svc_runtime_prepare(uintptr_t program,uintptr_t loader,unsigned long capabilities,int statistics) {
     if (!(capabilities&HWCAP_ATOMICS) || md_page_size>16384) return;
     size_t length=2*MD_SVC_POOL_SIZE+MD_SVC_PAYLOAD_SIZE;
     long allocation=RAW6(mmap,0,length,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     if (allocation<0) return;
     uintptr_t frames=((uintptr_t)allocation+MD_SVC_POOL_SIZE-1)&~(uintptr_t)(MD_SVC_POOL_SIZE-1);
-    for (unsigned i=0;i<MD_SVC_SLOT_COUNT;++i) {
-        long error=RAW3(mprotect,frames+i*MD_SVC_SLOT_SIZE+16384,16384,PROT_NONE);
-        if (error) { RAW2(munmap,allocation,length); return; }
-    }
     uintptr_t first=code_pool(program),second=0;
     if (loader && (loader>program ? loader-program : program-loader)>0x2000000) second=code_pool(loader);
     if (!first && !second) { RAW2(munmap,allocation,length); return; }
@@ -36,6 +32,7 @@ void md_svc_runtime_prepare(uintptr_t program,uintptr_t loader,unsigned long cap
     RAW2(munmap,end,(uintptr_t)allocation+length-end);
     struct md_svc_payload_state *state=(void *)(frames+MD_SVC_POOL_SIZE);
     state->api=&md_cooperative_entry; state->admitted=1;
+    state->statistics=!!statistics;
     md_svc_runtime=(struct md_svc_runtime){.frames=frames,.dispatch=(uintptr_t)md_svc_payload_dispatch};
     if (first) md_svc_runtime.pools[md_svc_runtime.count++]=first;
     if (second) md_svc_runtime.pools[md_svc_runtime.count++]=second;

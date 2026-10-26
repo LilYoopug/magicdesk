@@ -17,11 +17,20 @@
 
 /* No adaptation, observation or logical identity in any domain. Shared with
  * seccomp so these kernel operations need no userspace policy round trip. */
-#define MD_DOMAIN_KERNEL_CALLS(X) \
+#define MD_DOMAIN_WAIT_CALLS(X) X(ppoll) X(pselect6) X(epoll_pwait) X(epoll_pwait2) X(epoll_ctl)
+/* Execution state belongs to the kernel. These calls precede address-based
+ * service gates in the base filter; PID/FD selectors and guest filters still
+ * apply. gettid is deliberately absent: it also carries service checkpoints. */
+#define MD_DOMAIN_EXECUTION_CALLS(X) \
+    X(futex) X(set_robust_list) X(get_robust_list) X(madvise) X(brk) \
+    X(rt_sigaction) X(rt_sigprocmask) X(rt_sigreturn) X(sigaltstack) \
+    X(getrandom) X(clock_gettime) X(clock_nanosleep) X(nanosleep)
+#define MD_DOMAIN_KERNEL_CONTROL_CALLS(X) \
     X(shutdown) X(waitid) \
-    X(ppoll) X(pselect6) X(epoll_pwait) X(epoll_pwait2) X(epoll_ctl) \
     X(sysinfo) X(sched_yield) X(sched_getaffinity) \
     X(getrusage) X(getrlimit) X(gettimeofday)
+#define MD_DOMAIN_KERNEL_CALLS(X) \
+    MD_DOMAIN_WAIT_CALLS(X) MD_DOMAIN_EXECUTION_CALLS(X) MD_DOMAIN_KERNEL_CONTROL_CALLS(X)
 #define MD_DOMAIN_KERNEL_ARGUMENTS(X) \
     X(fcntl, 1, F_GETFD) X(fcntl, 1, F_GETFL) X(fcntl, 1, F_SETFL) \
     X(prlimit64, 0, 0) \

@@ -190,7 +190,7 @@ int md_fd_origins_native(const struct md_fd_order *turn,int fd,struct md_fd_nati
     struct md_fs_anchor *origin=e && !e->uncertain && !e->loan ? md_fs_anchor_from_object(e->object) : NULL;
     int native=origin && !e->channel && md_fs_anchor_object(origin)==e->object
         && !md_fd_object_selectors(e->object);
-    if (native && out) *out=(struct md_fd_native){.kind=md_fs_anchor_kind(origin),.flags=e->flags};
+    if (native && out) *out=(struct md_fd_native){.kind=md_fs_anchor_kind(origin),.flags=e->flags,.origin=origin};
     pthread_mutex_unlock(&t->lock); return native;
 }
 int md_fd_origins_native_regular(const struct md_fd_order *turn,int fd) {

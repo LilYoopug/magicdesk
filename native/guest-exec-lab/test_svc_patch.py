@@ -102,6 +102,17 @@ def main():
             output = suite.command(command, quiet=True, timeout=60)
             assert 'PASS process title:' in output
         print('Protected cmdline/auxv native, Base and lazy PASS', flush=True)
+        for operation in ('unmap', 'protect', 'map', 'remap'):
+            for command in ([root + '/bin/mapping'],
+                            [*guest, '--env', 'SHROOT_MACHINE_ENTRY=0', '--', '/bin/mapping'],
+                            [*guest, '--statistics', '--', '/bin/mapping']):
+                output = suite.command([*command, 'native-' + operation], quiet=True, timeout=60)
+                assert 'PASS SVC native ' + operation + ':' in output
+                if '--statistics' in command:
+                    evidence = records(output, 'SVC_RUNTIME_STATS ')
+                    assert any(item['completed'] >= 8000 for item in evidence), output
+                    suite.report['native' + operation.title()] = evidence
+            print('Native ' + operation + ', signal reentry and filter revocation PASS', flush=True)
         runs = [('raw', False), ('mapping', False)]
         runs += [('go-stress', sandbox) for _ in range(args.rounds) for sandbox in (False, True)]
         for program, sandbox in runs:

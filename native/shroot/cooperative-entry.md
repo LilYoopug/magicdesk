@@ -16,7 +16,7 @@ Source-built libc integration and its deployment registry have been removed.
 ## Call Contract
 
 `cooperative_entry.h` accepts a syscall number and six original 64-bit arguments,
-with one zero-initialized opaque handle per thread. ABI version 6 supplies a
+with one zero-initialized opaque handle per thread. ABI version 9 supplies a
 runtime-owned syscall-offer table and a caller-compiled action driver,
 `md_entry_invoke`, with these terminal results:
 
@@ -31,6 +31,23 @@ libc TLS. It returns the runtime's native thread key, not a guest PID namespace
 number. It must not run after helper admission has been revoked by a filter.
 The lazy machine-entry frontend uses this callback to avoid collisions
 between separate PID-1 processes.
+
+The resident frontend's optional `try_identified` entry reuses that native
+identity instead of performing a second `gettid`. For a sole address-space
+owner, the supervisor publishes the identity at an owned stop, so even the
+first query is unnecessary. Before fork children or CLONE_VM peers resume,
+their publication replaces or clears the hint. Shared address spaces query the
+kernel on every entry; generic API callers retain their own identity check.
+Neither a cached guest PID nor thread-local libc layout is used. These changes
+do not enlarge worker bursts or spin budgets.
+
+The private frame pool reserves its address space at image entry, but protects
+each stack's 16 KiB guard on first use, under that slot's exclusive ownership.
+The bootstrap uses only its small C frame before protection; no guest callback
+or recursive handler runs there. A failed `mprotect` permanently declines that
+slot to Base. Fork inherits both guards and their publication state. This avoids
+64 protection syscalls and 129 initial VMAs in short-lived executables without
+removing overflow protection from an active accelerated stack.
 
 The runtime can yield a cancellation checkpoint, the original kernel call, or
 one admitted native effect to this driver. The action executes after the runtime
@@ -60,6 +77,7 @@ threads run. The implementation routes offered calls as follows:
 | Worker | Stat/statx/statfs, directory reads, readlink, mkdir/unlink/rename/link/symlink, access/ownership/mode/timestamp operations and path/link/FD xattrs use the existing filesystem dispatcher and checked task-memory copying. |
 | Value | Scalar UID/GID reads use current registry credentials and the same user-namespace translation as the ordinary supervisor path. They neither retain a filesystem operation window nor cache caller credentials. |
 | FD | Existing regular-file/directory `openat` and `openat2`, including O_PATH and writable/append/truncate flags, can use a checked native plan. Known ordinary-file close, dup/dup3, lseek and supported fcntl commands share that protocol and the existing file-table owner. Other open/fsopen calls retain their exact kernel publication carrier. |
+| Memory | The resident SVC driver can execute private untracked `munmap`/nonfixed `mremap`, ordinary-range `mprotect` and anonymous private `MAP_FIXED` replacement directly in the caller, using a supervisor-published exclusion snapshot. Shared address spaces, tracked mappings and generic API callers keep ordered kernel interception. |
 | Task | Other FD producers, filesystem/control calls, networking, credential mutations and pointer-bearing queries, UTS, namespaces and SysV IPC enter the existing kernel-admitted dispatcher and completion owners in the original guest thread. |
 
 The task route, failed registration and a worker's explicit pre-execution decline
@@ -94,6 +112,56 @@ a fresh client registers separately. Thread exit returns its slot, and exec
 replaces the descriptor and pool.
 
 ## Execution Ownership
+
+### Native Memory Effects
+
+`interception_memory` publishes the memory admission snapshot only while the
+sole address-space owner is stopped. It excludes retained file/policy ranges,
+shared buffers, resident code, frames and patched source instructions. The
+caller validates alignment, overflow and page-rounded overlap before invoking
+native `munmap`, nonfixed `mremap`, ordinary-range `mprotect` or anonymous private `MAP_FIXED`;
+neither the worker nor supervisor
+is entered for that effect. Protection growth flags and unknown flags decline:
+their effects cannot be bounded by the supplied interval. Discovery still
+uses existing interceptions, including executable protection changes, and
+does not trap previously native read/write-only protection sites.
+Unknown policy, SysV attachments, exposure, or an exclusion set exceeding the
+fixed capacity declines acceleration, not the application operation.
+
+The native-memory callback receives the resident frame's original argument
+vector and writes one result. An admitted effect does not initialize the larger
+cooperative request/continuation object; declined effects retain that ordinary
+route. This changes transport cost, not the exclusion or ownership proof.
+
+The owner reuses the exclusion set while its mappings, buffer placement and
+append-only SVC site/pool counts remain unchanged. Eligibility, sole ownership,
+exposure and registry revocation are still checked at every publication. Fork
+starts a separate snapshot; mapping changes and channel retirement invalidate
+the cached set. This avoids rebuilding an unchanged range list on every resume.
+
+Anonymous replacement uses exactly `MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED`.
+It creates no file provenance and cannot discard an excluded range. Other mmap
+flags and file-backed mappings retain their existing owners; all arguments and
+native errors are still validated by Linux.
+
+Remapping admits only a nonempty untracked source with flags zero or
+`MREMAP_MAYMOVE`. Linux chooses any new address without replacing unrelated
+mappings. Zero-length cloning, `MREMAP_FIXED`, `MREMAP_DONTUNMAP`, tracked sources
+and unknown flags retain ordered observation. The initial mmap entry guard
+rejects clearly unsuitable arguments before saving a private register frame;
+that early rejection never grants authority to execute an operation.
+
+Sharing an address space revokes the snapshot before another task can run.
+Fork receives independent admission; exec and channel retirement detach the
+borrowed snapshot before releasing its storage. Filter/debugger fences retain
+their existing revocation owners. This route relies on the resident SVC frame
+deferring asynchronous application handlers until completion, so a handler
+cannot alter mappings between validation and the effect. Ordinary cooperative
+API clients lack that guarantee and retain their original kernel continuation.
+No signal-mask syscall, mapping query, allocation or worker exchange is added
+to the accelerated call. All effects and errors still come from Linux.
+
+### Shared Dispatch
 
 `namespace_broker` routes kernel notifications and cooperative requests through
 the same operation owner, task snapshot, argument decoder, FS/file-table ordering,
@@ -131,14 +199,27 @@ including a signal interrupting metadata notification cancellation. Ordered
 replay preserves original siginfo ahead of later kernel arrivals; a queue
 handoff during non-leader exec retains its carrier identity.
 
+At an unfiltered seccomp-entry stop, a known native fallback transfers the
+still-unexecuted call to the ordinary syscall owner without rewriting the PC.
+The resident alias executes the native SVC and branches to the original
+post-SVC instruction. This removes a redundant SETREGSET, not an admission
+check. It does not cancel the call, single-step, or repeat entry.
+Unknown syscall numbers retain original-site discovery; application filters,
+debuggers and exposed address spaces retain the conservative path. This is a
+continuation translation, not permission to bypass memory or FD admission.
+
 An interrupted native SVC alias retains its PC until the kernel has chosen
-restart versus EINTR. `svc_machine` queues PTRACE_INTERRUPT at the real signal
+restart versus EINTR. `svc_machine` queues
+PTRACE_INTERRUPT at the real signal
 stop; the resulting stop precedes handler execution and owns translation of
 the saved signal-frame PC (or the live PC for ignored/suppressed signals).
 Filter/dumpability fences wait for that boundary instead of translating early.
 Only this interrupted-alias case adds a stop. Metadata notification cancellation
 uses the same read-only replay owner for original SVCs and native aliases.
 A restored delivery is not requeued merely because other signals remain pending.
+An alias can also return without a signal. A requested drain is reconciled at
+the next observed ordinary guest boundary even with no pending signal; a
+completed alias must not leave a filter barrier waiting on stale drain state.
 
 `task_checkpoint` owns all normal bootstrap control markers: selective TRACE
 outside application filters, scoped SYSEMU inside them, and a synthetic
@@ -151,18 +232,33 @@ call entry/exit and exact continuation restoration without a return BRK.
 Marker decoding uses the PC and seccomp cookie from `PTRACE_GET_SYSCALL_INFO`;
 it does not read the full register set merely to identify a known site.
 Stop decoding hands each exact observation to its consumer once, without another
-kernel read: registers for a completed checkpoint, or registers and event cookie
-for an ordinary TRACE inside the adapter. These two retained observations may be
-consumed in either order. All caller ptrace requests use this owner; any other
+kernel read: registers for a completed checkpoint, or registers, syscall info
+and event cookie for an ordinary TRACE inside the adapter. These observations
+may be consumed in any order, once each. All caller ptrace requests use this owner; any other
 request or kernel event discards the remaining snapshot. There is no register
 cache across execution, signals or debugger writes.
 Checkpoint registers retain the kernel's post-SVC PC. Consumers identify the
 marker at PC-4 and resume from the unchanged continuation; there is no preliminary
 register write just to rewind the marker. Native-call entry/exit stops remain
 distinct from this typed event, including when they share a helper's code site.
-The C-facing gates in `checkpoint_entry.S` set x8 explicitly before the marker:
+The C-facing gates in `checkpoint_entry.S` and register-copy gates in
+`interception_entry.S` set x8 explicitly before the marker:
 ARM64 otherwise replaces x0 with ENOSYS before tracing syscall(-1). Entry and
-marker addresses are distinct; this adds one instruction, not another stop.
+marker addresses are distinct. Group-copy gates preserve their x8 payload in
+x19. Native-call returns and their following markers have separate ABI fields;
+a native syscall number never doubles as the marker's number.
+MAPPED, TAKE, RELEASE and the filesystem CALL, EXEC_PREPARE,
+EXEC_CANCEL and PROC_LINK commands return scalar values to C and can complete
+at syscall entry, as can a ready marker whose ABI is already admitted.
+Full-context completion and native-call injection retain the post-syscall
+boundary needed to restore x7. FD-control commands retain that boundary too:
+selector installation can lend the stopped task to a native-call owner.
+
+The base filter resolves native waits and kernel execution-state operations
+before consulting service addresses. This permits the kernel's syscall-number
+allow cache; stacked descriptor/PID selectors and application filters still
+apply. Memory operations with mapping provenance, FD IO and service `gettid`
+are not part of this unconditional path.
 See [protocol coverage](../guest-exec-lab/sandbox-research.md#signal-neutral-checkpoints).
 
 Known separate limitation: a fault in a fallback userspace memory copy can
@@ -269,6 +365,21 @@ table turn, without temporary object references or a data-OFD capture. Unknown,
 uncertain, provisional, channel and typed-wrapper slots are not native authority;
 regular IO additionally requires a known regular-file kind. A dup3 destination
 must also have an unambiguous selector observation.
+
+An admitted existing regular-file open or seek on an exclusively owned table
+can also issue a single revocable FD lease. Open binds that lease only to its
+completed native result, never an expected FD or a provisional file birth.
+Subsequent `lseek` calls on that FD execute in the
+identified resident entry, without another worker request. Linux still owns the
+shared OFD cursor and validates the offset and whence. `F_GETFD` and unchanged
+`F_SETFD` use the authoritative descriptor flags; `F_GETFL` reads the actual
+kernel OFD. Changing flags retains the ordinary mutation owner. Every new channel request,
+ordinary kernel notification, task stop/resume or borrowed execution revokes
+the lease. Shared tables never receive it. The explicit entry API does not use
+this shortcut: only the resident private frame defers signal handlers until the
+call completes. No descriptor bitmap, cached offset, or predicted future close
+is involved. Direct cursor calls use the existing raw service gate; application
+filter installation revokes the channel before that gate can be used.
 
 The original file-table turn owns the operation until result bookkeeping and pin
 retirement complete. The journal distinguishes not-started, executing, completed,
@@ -382,6 +493,10 @@ publication. The existing worker drains a round-robin burst, bounded by 32
 requests and a 100 us between-request budget, then services other work. An idle
 channel does not add a periodic polling loop. Each endpoint uses a bounded 25 us
 spin; four unsuccessful spins select immediate parking for 128 subsequent waits.
+Caller feedback is independent for an open plan, completion of its native
+effect, and an ordinary reply. A slow creation therefore cannot put unrelated
+short metadata replies into the same cooldown. All phases retain the same time
+limit; no additional worker or supervisor spin is introduced.
 Only progress actually observed within the spin budget counts as a hit. A reply
 already ready after a blocking wake, or seen after descheduling beyond the
 deadline, cannot reset the miss history. The notification wake is acknowledged
@@ -430,7 +545,7 @@ of an in-flight channel.
 `execution_window` is transport-independent bounded resource reuse. The inode
 provider holds only the store gate and its validated catalogue generation, not
 a transaction or an unfinished read operation. Stat, FD metadata, access,
-readlink, xattrs, creation, rename, link/unlink and attribute changes can share
+readlink, directory reads, xattrs, creation, rename, link/unlink and attribute changes can share
 that gate in a single uncomplicated store. Each operation resets its own
 authorization checks, watch context and transaction state; writes commit or
 roll back independently before completion. Local row invalidation remains
@@ -441,6 +556,8 @@ Native attributes and policy are never cached by the window. COW and promotion
 may therefore complete without discarding the gate or replaying preparation.
 Explicit nested read scopes retain their stricter no-write contract and the
 internal pre-effect `MD_OPEN_NEEDS_WRITE` result.
+Directory reads retain their exact OFD and cursor turn; a captured descriptor
+must match the directory anchor before joining the same store window.
 An interrupted preflight is not an executed operation: the original
 signal/restart owner retains EINTR/SA_RESTART semantics instead of a saved
 cancellation errno. Ready resource waiters use the same window admission as
@@ -587,7 +704,10 @@ tests also kill owners while their operation window is still held.
 Another 2000 concurrent park/publication
 checks cover both requests and completed native effects.
 `--statistics` reports direct completions, declines and kernel notification wakes
-separately. `cooperativeDescriptors` counts FD-request adoptions and
+separately. The ready handshake enables resident payload counters only in this
+mode; ordinary entry performs no atomic increment for diagnostic completions or
+declines. Revocation and client ownership are independent of instrumentation.
+`cooperativeDescriptors` counts FD-request adoptions and
 `cooperativeNativeYields` counts avoided idle spins. FD receipts also contribute
 to `cooperativeCompleted`; that total is not an SVC-free syscall count.
 `nativeOpen`, `nativeClose`, `nativeFlags`, `nativeDuplicate` and `nativeSeek` count admitted native plans/flag

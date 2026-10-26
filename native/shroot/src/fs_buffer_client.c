@@ -126,8 +126,8 @@ long md_guest_buffer_result(unsigned flags,unsigned mode,struct md_fs_buffer_fra
 }
 static long exchange(const struct md_fs_request *q, struct md_fs_response *out,
         int (*deliver)(void *, const void *, size_t), void *context, unsigned command,
-        struct md_command_recipe *recipe) {
-    long address=md_adapter_buffer_take();
+        struct md_command_recipe *recipe, unsigned long prepared) {
+    long address=prepared ? (long)prepared : md_adapter_buffer_take();
     if (address<0) return address;
     struct md_fs_buffer_frame *frame=(void *)address;
     long result=0;
@@ -180,7 +180,7 @@ static long exchange(const struct md_fs_request *q, struct md_fs_response *out,
     }
     if (!result && recipe) memcpy(recipe,&frame->command,sizeof(*recipe));
     if (!result && out) result=receive_result(frame,q,out,deliver,context);
-    long released=md_adapter_buffer_release();
+    long released=prepared ? 0 : md_adapter_buffer_release();
     return result ? result : released;
 }
 long md_fs_buffer_proc_link(int process, void *out, size_t capacity) {
@@ -227,7 +227,7 @@ long md_fs_buffer_snapshot(unsigned flags, long (*produce)(void *, void *, size_
 long md_fs_buffer_call(const struct md_fs_request *q, struct md_fs_response *out,
         int (*deliver)(void *, const void *, size_t), void *context) {
     if (!md_fs_buffer_accepts(q)) return -EINVAL;
-    return exchange(q,out,deliver,context,MD_FS_BUFFER_CALL,NULL);
+    return exchange(q,out,deliver,context,MD_FS_BUFFER_CALL,NULL,0);
 }
 long md_fs_buffer_inspect(const int *indices, unsigned count, struct md_received_message *out) {
     if (!count || count>253) return -EINVAL;
@@ -330,8 +330,9 @@ long md_fs_buffer_publish(enum md_received_source source, const int *indices, co
     long released=md_adapter_buffer_release();
     return finished ? finished : released;
 }
-long md_fs_buffer_exec_prepare(const struct md_fs_request *q, struct md_command_recipe *recipe) {
-    return exchange(q,NULL,NULL,NULL,MD_FS_BUFFER_EXEC_PREPARE,recipe);
+long md_fs_buffer_exec_prepare(const struct md_fs_request *q, struct md_command_recipe *recipe,
+        unsigned long prepared) {
+    return exchange(q,NULL,NULL,NULL,MD_FS_BUFFER_EXEC_PREPARE,recipe,prepared);
 }
 void md_fs_buffer_exec_cancel(void) {
     md_guest_buffer_control(MD_FS_BUFFER_EXEC_CANCEL,0,0);

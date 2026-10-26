@@ -1177,13 +1177,56 @@ static void mutation_cache(void) {
     }
     CHECK(!stats.write_admissions && stats.step.calls==16 && !stats.transaction.calls);
     for (unsigned i=0;i<16;++i) {
+        CHECK(!mdi_begin(s,0));
+        struct mdi_location cached;
+        CHECK(!mdi_walk(s,-1,"/stable/value",MDI_FOLLOW,0,&cached));
+        const char *root_id=mdi_root(s);
+        struct mdi_dependency deps[]={
+            mdi_cache_dependency(s,MDI_DEP_OBJECT,root_id,32,NULL,0),
+            mdi_cache_dependency(s,MDI_DEP_OBJECT,cached.parent.id,32,NULL,0),
+            mdi_cache_dependency(s,MDI_DEP_OBJECT,cached.node.id,32,NULL,0),
+            mdi_cache_dependency(s,MDI_DEP_ENTRY,root_id,32,"stable",6),
+            mdi_cache_dependency(s,MDI_DEP_ENTRY,cached.parent.id,32,"value",5)};
+        CHECK(!mdi_finish(s,0));
         fd=md_inode_create(s,-1,"/busy/changed",0600); CHECK(fd>=0); close(fd);
+        CHECK(!mdi_begin(s,0));
+        /* The bounded dependency table intentionally retires hash collisions.
+         * Require zero repeated queries whenever the actual proof survives. */
+        int intact=mdi_cache_dependencies_current(s,deps,sizeof(deps)/sizeof(*deps));
         uint64_t before=stats.step.calls;
         CHECK(!md_inode_stat(s,-1,"/stable/value",0,&st));
-        CHECK(stats.step.calls-before==1);
+        if (stats.step.calls!=before)
+            fprintf(stderr,"mutation cache: iteration=%u queries=%llu dependencies=%s\n",
+                i,(unsigned long long)(stats.step.calls-before),intact ? "current" : "invalidated");
+        CHECK(!intact || stats.step.calls==before);
+        CHECK(st.st_ino==cached.node.logical_inode && st.st_nlink==1);
+        before=stats.step.calls;
+        CHECK(!md_inode_stat(s,-1,"/stable/value",0,&st) && stats.step.calls==before);
+        CHECK(!mdi_finish(s,0));
         CHECK(!md_inode_unlink(s,-1,"/busy/changed",0));
     }
     CHECK(stats.write_admissions==32);
+    CHECK(!mdi_begin(s,0));
+    struct mdi_location stable, busy;
+    CHECK(!mdi_walk(s,-1,"/stable/value",MDI_FOLLOW,0,&stable));
+    CHECK(!mdi_walk(s,-1,"/busy",MDI_FOLLOW,0,&busy));
+    struct mdi_dependency collision=mdi_cache_dependency(s,MDI_DEP_OBJECT,stable.parent.id,32,NULL,0);
+    char collided[64]; unsigned candidate;
+    for (candidate=0;candidate<65536;++candidate) {
+        snprintf(collided,sizeof(collided),"/busy/collision-%u",candidate);
+        struct mdi_dependency changed=mdi_cache_dependency(s,MDI_DEP_ENTRY,busy.node.id,32,
+            collided+6,strlen(collided+6));
+        if (changed.slot==collision.slot) break;
+    }
+    CHECK(candidate<65536 && !mdi_finish(s,0));
+    fd=md_inode_create(s,-1,collided,0600); CHECK(fd>=0); close(fd);
+    CHECK(!mdi_begin(s,0) && !mdi_cache_dependencies_current(s,&collision,1));
+    uint64_t queries=stats.step.calls;
+    CHECK(!md_inode_stat(s,-1,"/stable/value",0,&st) && st.st_ino==stable.node.logical_inode);
+    CHECK(stats.step.calls>queries);
+    queries=stats.step.calls;
+    CHECK(!md_inode_stat(s,-1,"/stable/value",0,&st) && stats.step.calls==queries);
+    CHECK(!mdi_finish(s,0) && !md_inode_unlink(s,-1,collided,0));
     /* Exact negative entries, trigger-maintained counts, and rollback are
      * checked inside the same write snapshot, not only after a new admission. */
     CHECK(!mdi_begin(s,1));
@@ -1661,6 +1704,17 @@ static void native_birth_acl(void) {
         struct md_acl *actual=(void *)bytes;
         CHECK(md_acl_mode(actual,sizeof(bytes),0)==0640 && actual->entries[1].id==1000
             && actual->entries[1].permissions==4);
+        struct md_identity reader=md_identity_new(1000,1000);
+        const char *name=staged ? "prepared" : "ordinary";
+        s->identity=&reader;
+        struct md_open_completion plan;
+        pin=md_inode_plan_open(s,directory,name,O_RDONLY,0,0,&plan,1,NULL);
+        CHECK(pin>=0 && plan.kind==MD_OPEN_PLAN && plan.native_leaf && !close(pin));
+        CHECK(md_inode_plan_open(s,directory,name,O_WRONLY,0,0,&plan,1,NULL)==-EACCES);
+        CHECK(md_inode_plan_open(s,directory,name,O_RDONLY|O_NOATIME,0,0,&plan,1,NULL)==-EPERM);
+        s->identity=&ids; md_identity_release(&reader);
+        pin=md_inode_plan_open(s,directory,name,O_RDONLY|O_NOATIME,0,0,&plan,1,NULL);
+        CHECK(pin>=0 && !close(pin));
         if (staged) {
             CHECK(!md_inode_link(s,directory,"prepared",directory,"alias",0));
             md_inode_acl(s,&q,&result,&output);

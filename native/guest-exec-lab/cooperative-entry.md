@@ -5,7 +5,7 @@
 
 Shroot uses lazy entry in stock programs by default. Shroot Base uses ordinary
 interception. Neither replaces package-owned libc files. The internal caller
-boundary remains ABI 6; explicit API fixtures exercise it independently of
+boundary uses ABI 8; explicit API fixtures exercise it independently of
 machine-code discovery. Superseded captured-request transports and private FD
 relay experiments live in Git history, not in a parallel laboratory engine.
 

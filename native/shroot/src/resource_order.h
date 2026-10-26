@@ -1,6 +1,7 @@
 #ifndef MD_RESOURCE_ORDER_H
 #define MD_RESOURCE_ORDER_H
 #include <pthread.h>
+#include <stdatomic.h>
 
 struct md_resource_wakeup;
 struct md_resource_order;
@@ -14,11 +15,12 @@ enum md_resource_order_state { MD_RESOURCE_ORDER_IDLE, MD_RESOURCE_ORDER_QUEUED,
     MD_RESOURCE_ORDER_READY, MD_RESOURCE_ORDER_RUNNING, MD_RESOURCE_ORDER_CANCELLING };
 /* Caller-owned, zero-initialized storage. One serialized owner starts, cancels
  * or completes it; sharing that owner across threads requires external locking.
- * Queue mutation and cross-loop readiness are synchronized. */
+ * Queue mutation is locked; readiness is release-published for acquire-only
+ * observation. Observers must retain the record and serialize with its owner. */
 struct md_resource_order {
     struct md_resource_queue *queue;
     struct md_resource_order *previous, *next;
-    enum md_resource_order_state state;
+    atomic_uint state;
     struct md_resource_wakeup *wakeup;
 };
 int md_resource_queue_init(struct md_resource_queue *);

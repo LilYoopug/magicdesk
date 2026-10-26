@@ -34,6 +34,7 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/vfs.h>
 #include <sys/xattr.h>
 #include <sys/syscall.h>
@@ -82,11 +83,29 @@ static void fd_discovery(void) {
         long flags=discovery_fd(SYS_fcntl,alias,F_GETFL,0);
         assert(flags>=0 && (flags&O_ACCMODE)==O_RDWR);
         assert(discovery_fd(SYS_lseek,alias,0,SEEK_CUR)==0);
+        for (unsigned seek=1;seek<=64;++seek) {
+            assert(discovery_fd(SYS_lseek,alias,1,SEEK_CUR)==seek);
+            assert(discovery_fd(SYS_lseek,alias,-1,SEEK_SET)==-EINVAL);
+        }
+        assert(lseek(fd,0,SEEK_CUR)==64);
         assert(!discovery_close(alias) && !discovery_close(fd));
         retired=fd;
     }
     /* Error admission must not warm the valid-close site for this test. */
     assert(discovery_close(retired)==-EBADF && discovery_close(-1)==-EBADF);
+    int fd=open(name,O_RDWR); assert(fd>=0);
+    assert(discovery_fd(SYS_lseek,fd,0,SEEK_SET)==0);
+    assert(discovery_fd(SYS_lseek,fd,1,SEEK_CUR)==1);
+    int pipes[2]; assert(!pipe(pipes));
+    assert(dup3(pipes[0],fd,O_CLOEXEC)==fd);
+    assert(discovery_fd(SYS_lseek,fd,0,SEEK_CUR)==-ESPIPE);
+    assert(!close(pipes[0]) && !close(pipes[1]) && !close(fd));
+    int directory=open("/tmp",O_DIRECTORY|O_RDONLY); assert(directory>=0);
+    char entries[4096];
+    assert(discovery_fd(SYS_lseek,directory,0,SEEK_SET)==0);
+    assert(syscall(SYS_getdents64,directory,entries,sizeof(entries))>0);
+    assert(discovery_fd(SYS_lseek,directory,0,SEEK_CUR)>0);
+    assert(!close(directory));
     assert(!unlink(name));
     puts("PASS native FD discovery: executed close, dup, fcntl and lseek sites without explicit entry API");
 }
@@ -109,6 +128,90 @@ static void reap(pid_t child) {
     while (waitpid(child,&status,0)<0) assert(errno==EINTR);
     if (!WIFEXITED(status) || WEXITSTATUS(status)) fprintf(stderr,"child status=%#x\n",status);
     assert(WIFEXITED(status) && !WEXITSTATUS(status));
+}
+struct cursor_peer { int target, source, command, reply; };
+static int cursor_replace(void *argument) {
+    struct cursor_peer *p=argument;
+    char byte;
+    assert(read(p->command,&byte,1)==1);
+    assert(dup3(p->source,p->target,O_CLOEXEC)==p->target);
+    assert(write(p->reply,"x",1)==1);
+    assert(read(p->command,&byte,1)==1);
+    return 0;
+}
+static volatile sig_atomic_t cursor_signals;
+static void cursor_signal(int sig) { (void)sig; ++cursor_signals; }
+static void cursor_contracts(void) {
+    const char *name="/tmp/cursor-lease";
+    int fd=open(name,O_CREAT|O_RDWR,0600); assert(fd>=0);
+    assert(!close(fd));
+    for (unsigned i=0;i<64;++i) {
+        int flags=i&1 ? FD_CLOEXEC : 0;
+        fd=open(name,O_RDWR|(flags ? O_CLOEXEC : 0)); assert(fd>=0);
+        assert(discovery_fd(SYS_fcntl,fd,F_GETFD,0)==flags);
+        assert(!discovery_fd(SYS_fcntl,fd,F_SETFD,flags));
+        assert((discovery_fd(SYS_fcntl,fd,F_GETFL,0)&O_ACCMODE)==O_RDWR);
+        assert(!discovery_fd(SYS_fcntl,fd,F_SETFD,flags^FD_CLOEXEC));
+        assert(discovery_fd(SYS_fcntl,fd,F_GETFD,0)==(flags^FD_CLOEXEC));
+        assert(!discovery_close(fd));
+        assert(discovery_fd(SYS_fcntl,fd,F_GETFD,0)==-EBADF);
+    }
+    fd=open(name,O_RDWR); assert(fd>=0);
+    struct sigaction action={.sa_handler=cursor_signal,.sa_flags=SA_RESTART},previous;
+    sigemptyset(&action.sa_mask);
+    assert(!sigaction(SIGALRM,&action,&previous));
+    struct itimerval timer={.it_interval={0,100},.it_value={0,100}};
+    assert(!setitimer(ITIMER_REAL,&timer,NULL));
+    for (unsigned i=1;i<=16384;++i) assert(discovery_fd(SYS_lseek,fd,1,SEEK_CUR)==i);
+    timer=(struct itimerval){0};
+    assert(!setitimer(ITIMER_REAL,&timer,NULL) && cursor_signals>0);
+    assert(!sigaction(SIGALRM,&previous,NULL)); alarm(60);
+    assert(lseek(fd,0,SEEK_CUR)==16384);
+    int command[2],reply[2],replacement[2];
+    assert(!pipe(command) && !pipe(reply) && !pipe(replacement));
+    struct cursor_peer peer={fd,replacement[0],command[0],reply[1]};
+    size_t size=512*1024;
+    void *stack=mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    assert(stack!=MAP_FAILED);
+    assert(discovery_fd(SYS_lseek,fd,0,SEEK_SET)==0);
+    pid_t child=clone(cursor_replace,(char *)stack+size,CLONE_FILES|SIGCHLD,&peer);
+    assert(child>=0);
+    /* Read/write stay native: no unrelated intercepted call may revoke an
+     * incorrectly issued exclusive-table lease after these seeks. */
+    assert(discovery_fd(SYS_lseek,fd,1,SEEK_CUR)==1);
+    assert(discovery_fd(SYS_lseek,fd,1,SEEK_CUR)==2);
+    assert(write(command[1],"x",1)==1);
+    char byte; assert(read(reply[0],&byte,1)==1);
+    assert(discovery_fd(SYS_fcntl,fd,F_GETFD,0)==FD_CLOEXEC);
+    assert(discovery_fd(SYS_lseek,fd,0,SEEK_CUR)==-ESPIPE);
+    assert(write(command[1],"x",1)==1);
+    reap(child); assert(!munmap(stack,size));
+    assert(!close(fd));
+    for (unsigned i=0;i<2;++i) { close(command[i]); close(reply[i]); close(replacement[i]); }
+    child=fork(); assert(child>=0);
+    if (!child) {
+        fd=open(name,O_RDWR); assert(fd>=0);
+        assert(discovery_fd(SYS_lseek,fd,0,SEEK_SET)==0);
+        assert(discovery_fd(SYS_lseek,fd,1,SEEK_CUR)==1);
+        struct sock_filter code[]={
+            BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_lseek,1,0),
+            BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_fcntl,0,1),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|EACCES),
+            BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+        };
+        struct sock_fprog program={sizeof(code)/sizeof(*code),code};
+        assert(!prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0));
+        assert(!syscall(SYS_seccomp,SECCOMP_SET_MODE_FILTER,0,&program));
+        for (unsigned i=0;i<64;++i) {
+            assert(discovery_fd(SYS_lseek,fd,1,SEEK_CUR)==-EACCES);
+            assert(discovery_fd(SYS_fcntl,fd,F_GETFD,0)==-EACCES);
+            assert(discovery_fd(SYS_fcntl,fd,F_SETFD,0)==-EACCES);
+        }
+        assert(!close(fd)); _exit(0);
+    }
+    reap(child); assert(!unlink(name));
+    puts("PASS native cursor lease: flags, FD reuse, signal-exact offsets, shared-table replacement and seccomp revocation");
 }
 struct jit_entry_peer { atomic_int stage; };
 static void jit_stage(struct jit_entry_peer *peer,int stage) {
@@ -1389,6 +1492,9 @@ static void filtered_close(void) {
     reap(child);
     puts("PASS filtered close: actual syscall FD, forged TRACE cookie, kernel denial and EBADF preserve slot ownership");
 }
+static enum md_entry_outcome identified_entry(struct md_entry_client *owner,struct md_entry_call *call) {
+    return api->try_identified(owner,api->thread_identity(),call);
+}
 static void contracts(const char *executable) {
     assert(sizeof(struct md_entry_client)==3*sizeof(uintptr_t));
     struct md_entry_api invalid=*api;
@@ -1398,6 +1504,7 @@ static void contracts(const char *executable) {
     invalid.try_syscall=NULL; assert(!md_entry_api_valid(&invalid)); invalid=*api;
     invalid.offers=NULL; assert(!md_entry_api_valid(&invalid)); invalid=*api;
     invalid.thread_identity=NULL; assert(!md_entry_api_valid(&invalid)); invalid=*api;
+    invalid.try_identified=NULL; assert(md_entry_api_valid(&invalid)); invalid=*api;
     invalid.reserved=1; assert(!md_entry_api_valid(&invalid)); invalid=*api;
     invalid.size+=16; assert(md_entry_api_valid(&invalid));
     assert(!md_entry_api_valid(NULL) && !md_entry_offered(NULL,SYS_openat,MD_ENTRY_ORDINARY));
@@ -1407,6 +1514,7 @@ static void contracts(const char *executable) {
         enum md_entry_route route=md_entry_route(nr);
         assert(!!md_entry_offered(api,nr,MD_ENTRY_ORDINARY)==(route!=MD_ENTRY_CALLER));
         assert(!!md_entry_offered(api,nr,MD_ENTRY_CANCELLATION)==(route==MD_ENTRY_FD));
+        assert(!!md_entry_offered(api,nr,MD_ENTRY_NATIVE_MEMORY)==(route==MD_ENTRY_MEMORY));
     }
     puts("PASS cooperative ABI: runtime-owned offers, opaque client, bounds and descriptor admission");
     struct md_entry_client unused={0};
@@ -1429,6 +1537,12 @@ static void contracts(const char *executable) {
     struct stat st,native; long result;
     enum md_entry_outcome first=stat_try(&client,&st,&result);
     assert(first==MD_ENTRY_COMPLETED && !result && st.st_size==7);
+    assert(api->try_identified);
+    struct md_entry_api identified=*api;
+    identified.try_syscall=identified_entry;
+    struct md_entry_call sampled={.number=SYS_newfstatat,
+        .args={AT_FDCWD,(uintptr_t)path,(uintptr_t)&st}};
+    assert(md_entry_invoke(&identified,&client,&sampled)==MD_ENTRY_COMPLETED && !sampled.result && st.st_size==7);
     assert(!stat(path,&native) && st.st_ino==native.st_ino && st.st_mode==native.st_mode);
     assert(call6(SYS_fstat,fd,(uintptr_t)&st,0,0,0,0)==0 && st.st_size==7);
     assert(call6(SYS_newfstatat,AT_FDCWD,(uintptr_t)path,1,0,0,0)==-EFAULT);
@@ -1461,6 +1575,11 @@ static void contracts(const char *executable) {
          * Its disabled channel takes the original kernel call without a
          * helper identity probe; an enabled foreign channel declines. */
         assert(outcome==MD_ENTRY_DECLINED || (outcome==MD_ENTRY_COMPLETED && !result && st.st_size==7));
+        assert(inherited->sequence==sequence && !atomic_load(&inherited->caller));
+        sampled=(struct md_entry_call){.number=SYS_newfstatat,
+            .args={AT_FDCWD,(uintptr_t)path,(uintptr_t)&st}};
+        outcome=md_entry_invoke(&identified,&client,&sampled);
+        assert(outcome==MD_ENTRY_DECLINED || (outcome==MD_ENTRY_COMPLETED && !sampled.result && st.st_size==7));
         assert(inherited->sequence==sequence && !atomic_load(&inherited->caller));
         struct md_entry_client fresh={0};
         assert(stat_try(&fresh,&st,&result)==MD_ENTRY_COMPLETED && !result);
@@ -1532,6 +1651,9 @@ int main(int argc,char **argv) {
     }
     if (argc>1 && !strcmp(argv[1],"--fd-discovery")) {
         fd_discovery(); return 0;
+    }
+    if (argc>1 && !strcmp(argv[1],"--cursor-lease")) {
+        cursor_contracts(); return 0;
     }
     if (argc>1 && !strcmp(argv[1],"--site-discovery")) {
         site_discovery(); return 0;

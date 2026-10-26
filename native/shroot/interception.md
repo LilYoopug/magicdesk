@@ -32,11 +32,13 @@ changing x7 at an ARM64 syscall stop: the
 [kernel restores that register](https://github.com/torvalds/linux/blob/v5.15/arch/arm64/kernel/ptrace.c#L1694-L1726)
 after the stop. Notification cancellation, ordinary
 seccomp entry and debugger syscall stepping share this entry contract.
-For recvmsg and poll adapters, x10 can carry an already leased input-buffer
+For recvmsg, poll and managed exec adapters, x10 can carry an already leased input-buffer
 address. The assembly gate passes it as the ninth C argument. Missing mappings,
 pool pressure and unsupported calls retain ordinary TAKE admission; this is not
 a per-thread buffer cache. Completion releases even an unclaimed lease after
-early argument failure.
+early argument failure. Exec keeps that lease through preparation until kernel
+exec replaces the address space, or dispatch returns an error; neither TAKE nor
+RELEASE requires a separate checkpoint when the lease was supplied at entry.
 Before task-affine admission, a signal-delivery stop retires an unexecuted
 notification if it wins the race with the requested ptrace interruption.
 Blocking calls retain kernel EINTR and SA_RESTART semantics. For nonblocking
@@ -63,14 +65,21 @@ The new bootstrap takes each lease with ADDFD_SEND
 after kernel file-table separation, validates the load segments and maps them
 without reopening filenames or reparsing the command. Failed exec or task loss
 releases the leases; nonleader exec transfers them to the resulting task identity.
+Program publication also prepares logical exec credentials from that same retained
+image. The final entry checkpoint registers actual mappings from those retained
+backings, commits credentials, updates both live and proc-snapshot auxv, and
+enters the loader. Secure entry first
+returns to the bootstrap to lower native dumpability, then completes at the same
+checkpoint. Ordinary entry needs no separate image-admission or entry notification;
+atomic descriptor publication, noexec, set-ID and application-filter checks remain.
 Queued cancellation and task death also retire in-progress worker resources,
 without leaving temporary image FDs in a surviving CLONE_FILES peer.
 The native-root laboratory path retains its inherited-image handoff.
 The opened program's object ID and canonical dentry path are captured
 in the opening transaction and passed through the bootstrap handoff; descriptor
 exec obtains identity from the retained FD. Bootstrap does not issue a second
-object lookup. Namespace image admission and logical credential publication remain
-separate from this handoff.
+object lookup. Namespace authority still comes from the captured image and credential
+owners, not bootstrap arguments.
 Same-thread descriptor aliases and the current executable are captured before
 worker admission. Unresolved proc magic links are rejected rather than resolved
 against a supervisor descriptor or the native bootstrap image.

@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <linux/futex.h>
+#include <sys/mman.h>
 #include <time.h>
 
 extern long md_guest_entry_kernel(long,const uint64_t *);
@@ -23,7 +24,8 @@ void md_cooperative_init(const void *vdso,size_t first_page) {
     for (unsigned i=0;i<sizeof(offers);++i) {
         enum md_entry_route route=md_entry_route(i);
         offers[i]=(route!=MD_ENTRY_CALLER ? MD_ENTRY_ORDINARY : 0)
-            |(route==MD_ENTRY_FD ? MD_ENTRY_CANCELLATION : 0);
+            |(route==MD_ENTRY_FD ? MD_ENTRY_CANCELLATION : 0)
+            |(route==MD_ENTRY_MEMORY ? MD_ENTRY_NATIVE_MEMORY : 0);
         strings[i]=(unsigned char)md_fs_syscall_strings(i);
     }
 }
@@ -105,6 +107,22 @@ static enum md_entry_outcome resume_native(struct md_entry_client *client,struct
     return progress(client,call);
 }
 static void native_effect(void *context) { md_cooperative_native(context); }
+static int native_memory(struct md_entry_client *client,long tid,long number,const uint64_t *args,int64_t *result) {
+    if (tid<=0 || (uintptr_t)tid!=client->opaque[MD_ENTRY_CLIENT_OWNER]) return 0;
+    /* Growth flags can affect pages outside the supplied range. Such calls
+     * need the ordinary memory owner, as do unknown protection semantics. */
+    if (!md_memory_native_arguments(number,args[2],args[3])) return 0;
+    struct md_entry_channel *c=(void *)client->opaque[MD_ENTRY_CLIENT_CHANNEL];
+    if (!c || !atomic_load_explicit(&c->enabled,memory_order_acquire)
+            || !md_memory_admission_allows(&c->memory,args[0],args[1],md_page_size)) return 0;
+    /* Anonymous replacement/remap creates no backing provenance. The same
+     * exclusion proof as unmap owns the old range; Linux validates all args. */
+    *result=number==SYS_mmap ? RAW6(mmap,args[0],args[1],args[2],args[3],args[4],args[5])
+        : number==SYS_munmap ? RAW2(munmap,args[0],args[1])
+        : number==SYS_mremap ? RAW5(mremap,args[0],args[1],args[2],args[3],args[4])
+        : RAW3(mprotect,args[0],args[1],args[2]);
+    return 1;
+}
 static enum md_entry_outcome offer_native(struct md_entry_client *client,struct md_entry_call *call) {
     struct md_entry_channel *c=continuation(client,call);
     if (!c) return finish(client,call,MD_ENTRY_UNKNOWN);
@@ -112,7 +130,7 @@ static enum md_entry_outcome offer_native(struct md_entry_client *client,struct 
     call->effect=native_effect; call->effect_context=&c->native; call->next=resume_native;
     return MD_ENTRY_NATIVE_EFFECT;
 }
-static enum md_entry_outcome invoke(struct md_entry_client *client,struct md_entry_call *call) {
+static enum md_entry_outcome invoke_identified(struct md_entry_client *client,long tid,struct md_entry_call *call) {
     if (!client || !call || call->reserved || !md_entry_supported(call->number)) return MD_ENTRY_DECLINED;
     call->next=NULL;
     uintptr_t control=__atomic_fetch_or(&client->opaque[MD_ENTRY_CLIENT_CONTROL],MD_ENTRY_CLIENT_BUSY,__ATOMIC_ACQUIRE);
@@ -147,7 +165,7 @@ static enum md_entry_outcome invoke(struct md_entry_client *client,struct md_ent
         c=(void *)address;
         client->opaque[MD_ENTRY_CLIENT_CHANNEL]=(uintptr_t)c;
         client->opaque[MD_ENTRY_CLIENT_OWNER]=(uintptr_t)c->owner;
-    } else if ((uintptr_t)RAW0(gettid)!=client->opaque[MD_ENTRY_CLIENT_OWNER]) goto done;
+    } else if ((uintptr_t)(tid>0 ? tid : RAW0(gettid))!=client->opaque[MD_ENTRY_CLIENT_OWNER]) goto done;
     if (!atomic_load_explicit(&c->enabled,memory_order_acquire)) goto kernel;
     /* Different entry adapters in one thread share the channel. The client
      * guard alone cannot exclude a signal handler using another adapter. */
@@ -159,6 +177,25 @@ static enum md_entry_outcome invoke(struct md_entry_client *client,struct md_ent
     if (!atomic_load_explicit(&c->enabled,memory_order_acquire)
             || (available!=MD_ENTRY_IDLE && available!=MD_ENTRY_RETIRING)
             || c->sequence==UINT64_MAX) goto done;
+    if (tid>0 && (call->number==SYS_lseek || call->number==SYS_fcntl)
+            && (int)call->args[0]>=0 && md_entry_regular_descriptor(c)==(int)call->args[0]) {
+        /* The kernel still owns the shared OFD offset and validates whence.
+         * No cached result or predicted next operation is involved. */
+        if (call->number==SYS_lseek) {
+            call->result=RAW3(lseek,call->args[0],call->args[1],call->args[2]);
+            return finish(client,call,MD_ENTRY_COMPLETED);
+        }
+        unsigned command=(unsigned)call->args[1];
+        if (command==F_GETFD || (command==F_SETFD && (call->args[2]&FD_CLOEXEC)==c->native_flags)) {
+            call->result=command==F_GETFD ? c->native_flags : 0;
+            return finish(client,call,MD_ENTRY_COMPLETED);
+        }
+        if (command==F_GETFL) {
+            call->result=RAW3(fcntl,call->args[0],command,call->args[2]);
+            return finish(client,call,MD_ENTRY_COMPLETED);
+        }
+    }
+    if (md_entry_route(call->number)==MD_ENTRY_MEMORY) goto kernel;
     int native=md_entry_native_fd(call->number,call->args)
         || md_entry_native_open(call->number,call->args);
     int descriptor=md_entry_route(call->number)==MD_ENTRY_FD && !native;
@@ -178,9 +215,13 @@ kernel:
     outcome=kernel_call(call);
     goto done;
 }
+static enum md_entry_outcome invoke(struct md_entry_client *client,struct md_entry_call *call) {
+    return invoke_identified(client,0,call);
+}
 static enum md_entry_outcome publish(struct md_entry_client *client,struct md_entry_call *call) {
     struct md_entry_channel *c=continuation(client,call);
     if (!c) return finish(client,call,MD_ENTRY_UNKNOWN);
+    atomic_store_explicit(&c->native_regular,0,memory_order_release);
     unsigned flags=(unsigned)call->continuation[CONT_FLAGS];
     int native=!!(flags&CALL_NATIVE),descriptor=!!(flags&CALL_DESCRIPTOR);
     if (!native || md_entry_open(call->number)) capture_paths(c,call);
@@ -206,8 +247,11 @@ static enum md_entry_outcome progress(struct md_entry_client *client,struct md_e
     int descriptor=!!(flags&CALL_DESCRIPTOR);
     long descriptor_result=call->result;
     enum md_entry_outcome outcome=MD_ENTRY_UNKNOWN;
-    struct md_spin_policy policy=c->feedback;
     unsigned budget=0, parked=0, checks=0, spun=0, native_sent=!!(flags&CALL_NATIVE_SENT);
+    /* The native plan and its publication are independent waits. A slow
+     * creation must not disable bounded spinning for short metadata replies. */
+    enum md_entry_wait kind=md_entry_wait_kind(call->number,native_sent);
+    struct md_spin_policy policy=c->feedback[kind];
     uint64_t spin=0, time=0;
     for (;;) {
         unsigned state=atomic_load_explicit(&c->state,memory_order_acquire);
@@ -216,7 +260,7 @@ static enum md_entry_outcome progress(struct md_entry_client *client,struct md_e
              * caller-side execution and retirement are a separate phase. */
             if (budget && (spun || parked))
                 md_spin_observed(&policy,!parked,now(),spin);
-            c->feedback=policy;
+            c->feedback[kind]=policy;
             if (atomic_load_explicit(&c->native.state,memory_order_acquire)==MD_NATIVE_READY) {
                 /* Reenter libc's cancellation check before the effect, never
                  * after a successful open. Filtered callers cannot get a plan. */
@@ -271,7 +315,7 @@ static enum md_entry_outcome progress(struct md_entry_client *client,struct md_e
      * that spinning helped. Nor is a response observed after descheduling. */
     if (budget && (spun || parked))
         md_spin_observed(&policy,!parked && outcome==MD_ENTRY_COMPLETED,now(),spin);
-    c->feedback=policy;
+    c->feedback[kind]=policy;
     /* DECLINED is an explicit pre-execution transfer of ownership. Once the
      * worker accepts a call, UNKNOWN is terminal and must never enter here. */
     if (outcome==MD_ENTRY_DECLINED) {
@@ -282,5 +326,6 @@ static enum md_entry_outcome progress(struct md_entry_client *client,struct md_e
 static long thread_identity(void) { return RAW0(gettid); }
 const struct md_entry_api md_cooperative_entry={
     .version=MD_ENTRY_VERSION,.size=sizeof(struct md_entry_api),.try_syscall=invoke,
-    .offers=offers,.syscall_count=sizeof(offers),.thread_identity=thread_identity
+    .offers=offers,.syscall_count=sizeof(offers),.thread_identity=thread_identity,.native_memory=native_memory,
+    .try_identified=invoke_identified
 };

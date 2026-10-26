@@ -330,7 +330,7 @@ int md_inode_plan_reopen(struct md_inode_store *s, int original, int flags, int 
     if (!r && write && (mutable || node.kind==S_IFREG) && mdi_readonly(s)) r=-EROFS;
     int device=!r && (node.kind==S_IFCHR || node.kind==S_IFBLK) && !(flags&O_PATH);
     if (device && s->nodev) r=-EACCES;
-    if (!r) r = mdi_open_permission(s, &node, flags);
+    if (!r) r = mdi_open_permission(s, &node, flags,NULL);
     if (!r) r=mdi_landlock_object(s,&node,s->image_open ? MD_LL_EXECUTE : md_landlock_open_access(flags,node.kind));
     if (!r && mutable && (flags & O_PATH) && s->identity) {
         struct stat st;

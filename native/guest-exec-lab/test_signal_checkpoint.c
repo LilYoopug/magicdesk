@@ -2,6 +2,8 @@
 #include "task_call.h"
 #include "task_checkpoint.h"
 #include "task_birth.h"
+#include "adapter_buffer.h"
+#include "fs_buffer.h"
 #include "signal_delivery.h"
 #include <assert.h>
 #include <elf.h>
@@ -1031,11 +1033,12 @@ static long task_trace(int request,pid_t pid,void *address,void *data) {
     return ptrace(request,pid,address,data);
 }
 static int checkpoint_restricted;
-static unsigned checkpoint_register_reads,checkpoint_register_writes,checkpoint_event_reads;
+static unsigned checkpoint_register_reads,checkpoint_register_writes,checkpoint_event_reads,checkpoint_info_reads;
 static long checkpoint_trace(int request,pid_t pid,void *address,void *data) {
     if (request==PTRACE_GETREGSET && (uintptr_t)address==NT_PRSTATUS) ++checkpoint_register_reads;
     if (request==PTRACE_SETREGSET && (uintptr_t)address==NT_PRSTATUS) ++checkpoint_register_writes;
     if (request==PTRACE_GETEVENTMSG) ++checkpoint_event_reads;
+    if (request==PTRACE_GET_SYSCALL_INFO) ++checkpoint_info_reads;
     return ptrace(request,pid,address,data);
 }
 static int checkpoint_policy(pid_t pid) { (void)pid; return checkpoint_restricted; }
@@ -1045,15 +1048,15 @@ __asm__(".text\n.balign 4\n.global unified_native\nunified_native:\nsvc #0\n"
 static int checkpoint_site(uintptr_t pc) { return pc==(uintptr_t)md_guest_buffer_control_checkpoint+4; }
 extern char entry_scalar_gate[],entry_scalar_return[],md_guest_done_checkpoint[];
 __asm__(".text\n.balign 4\n.global entry_scalar_gate\nentry_scalar_gate:\n"
-    "mov x0,#42\nbl md_guest_buffer_control\n"
+    "mov x0,x22\nbl md_guest_buffer_control\n"
     ".global entry_scalar_return\nentry_scalar_return:\nstr x0,[x23]\nb md_guest_done\n");
 static int scalar_site(uintptr_t pc) {
     return checkpoint_site(pc) || pc==(uintptr_t)md_guest_done_checkpoint+4;
 }
 static int scalar_entry(uintptr_t pc,unsigned long command) {
-    return checkpoint_site(pc) && command==42;
+    return checkpoint_site(pc) && (md_adapter_buffer_scalar(command) || md_fs_buffer_scalar(command));
 }
-static void scalar_checkpoint(int protected,int restricted) {
+static void scalar_checkpoint(int protected,int restricted,unsigned command) {
     volatile uint64_t *output=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
     assert(output!=MAP_FAILED);
     int start[2]; assert(!pipe(start));
@@ -1083,6 +1086,7 @@ static void scalar_checkpoint(int protected,int restricted) {
     assert(write(start[1],"s",1)==1 && stopped(pid)==SIGSTOP);
     struct user_pt_regs saved=registers(pid),gate=saved;
     gate.pc=(uintptr_t)entry_scalar_gate; gate.regs[23]=(uintptr_t)output;
+    gate.regs[22]=command;
     checkpoint_restricted=restricted;
     struct md_task_checkpoints runtime={.trace=checkpoint_trace,.restricted=checkpoint_policy,
         .marker=scalar_site,.entry_marker=scalar_entry,.begin=1,.end=UINTPTR_MAX};
@@ -1097,7 +1101,7 @@ static void scalar_checkpoint(int protected,int restricted) {
         assert((unsigned)status>>16==MD_TASK_CHECKPOINT_EVENT);
         gate=registers(pid);
         if (!seen++) {
-            assert(stops==1 && gate.pc==(uintptr_t)md_guest_buffer_control_checkpoint+4 && gate.regs[0]==42);
+            assert(stops==1 && gate.pc==(uintptr_t)md_guest_buffer_control_checkpoint+4 && gate.regs[0]==command);
             gate.regs[0]=0x9876;
         } else {
             assert(stops==3 && gate.pc==(uintptr_t)md_guest_done_checkpoint+4 && output[0]==0x9876);
@@ -1166,29 +1170,43 @@ static void unified_checkpoint(int protected,int restricted,int denied,int inval
     int status,native_stops=0;
     for (unsigned stops=0;;++stops) {
         assert(stops<16 && waitpid(pid,&status,0)==pid && WIFSTOPPED(status));
+        unsigned before_registers=checkpoint_register_reads;
         int owned=md_task_checkpoint_event(&runtime,pid,&status);
         assert(owned>=0);
         if (owned) continue;
         if ((unsigned)status>>16==PTRACE_EVENT_SECCOMP) {
             assert(!denied && !native_stops++);
-            unsigned reads=checkpoint_register_reads,events=checkpoint_event_reads;
+            assert(checkpoint_register_reads==before_registers);
+            unsigned reads=checkpoint_register_reads,events=checkpoint_event_reads,infos=checkpoint_info_reads;
             struct user_pt_regs actual=registers(pid),delivered;
+            struct ptrace_syscall_info actual_info={0},delivered_info={0};
+            long size=ptrace(PTRACE_GET_SYSCALL_INFO,pid,(void *)sizeof(actual_info),&actual_info);
+            assert(size>0 && (unsigned long)size<=sizeof(actual_info));
             unsigned long cookie=0;
             io=(struct iovec){&delivered,sizeof(delivered)};
             if (protected) {
                 uint64_t mask;
                 assert(!md_task_checkpoint_trace(&runtime,PTRACE_GETSIGMASK,pid,(void *)sizeof(mask),&mask));
             }
-            /* Both consumer orders retain exactly the same kernel stop. */
+            /* All three observations retain exactly the same kernel stop,
+             * including the production info-before-registers consumer order. */
+            if (!invalid_number) assert(md_task_checkpoint_trace(&runtime,PTRACE_GET_SYSCALL_INFO,
+                pid,(void *)sizeof(delivered_info),&delivered_info)==size);
             if (invalid_number) assert(!md_task_checkpoint_trace(&runtime,PTRACE_GETREGSET,pid,(void *)NT_PRSTATUS,&io));
             assert(!md_task_checkpoint_trace(&runtime,PTRACE_GETEVENTMSG,pid,NULL,&cookie));
+            if (invalid_number) assert(md_task_checkpoint_trace(&runtime,PTRACE_GET_SYSCALL_INFO,
+                pid,(void *)sizeof(delivered_info),&delivered_info)==size);
             if (!invalid_number) assert(!md_task_checkpoint_trace(&runtime,PTRACE_GETREGSET,pid,(void *)NT_PRSTATUS,&io));
             assert(cookie==73 && !memcmp(&actual,&delivered,sizeof(actual)));
-            assert(checkpoint_register_reads==reads+protected && checkpoint_event_reads==events+protected);
+            assert(!memcmp(&actual_info,&delivered_info,sizeof(actual_info)) && checkpoint_info_reads==infos+protected);
+            assert(checkpoint_register_reads==reads+1 && checkpoint_event_reads==events+protected);
+            assert(md_task_checkpoint_trace(&runtime,PTRACE_GET_SYSCALL_INFO,
+                pid,(void *)sizeof(delivered_info),&delivered_info)==size);
+            assert(checkpoint_info_reads==infos+protected+1);
             assert(!md_task_checkpoint_trace(&runtime,PTRACE_GETEVENTMSG,pid,NULL,&cookie));
             assert(cookie==73 && checkpoint_event_reads==events+protected+1);
             assert(!md_task_checkpoint_trace(&runtime,PTRACE_GETREGSET,pid,(void *)NT_PRSTATUS,&io));
-            assert(checkpoint_register_reads==reads+protected+1 && !memcmp(&actual,&delivered,sizeof(actual)));
+            assert(checkpoint_register_reads==reads+2 && !memcmp(&actual,&delivered,sizeof(actual)));
             assert(!md_task_checkpoint_trace(&runtime,PTRACE_CONT,pid,NULL,NULL));
             continue;
         }
@@ -1792,9 +1810,15 @@ int main(int argc,char **argv) {
         puts("PASS retained job control");
         return 0;
     }
-    for (int protected=0;protected<2;++protected)
-        for (int restricted=0;restricted<2;++restricted) scalar_checkpoint(protected,restricted);
-    puts("PASS scalar checkpoint: 4 cases; entry-only C return, full-register completion, strict seccomp and blocked SIGTRAP");
+    const unsigned scalar_commands[]={MD_BUFFER_MAPPED,MD_BUFFER_TAKE,MD_BUFFER_RELEASE,
+        MD_FS_BUFFER_CALL,MD_FS_BUFFER_EXEC_PREPARE,MD_FS_BUFFER_EXEC_CANCEL,MD_FS_BUFFER_PROC_LINK};
+    assert(!md_adapter_buffer_scalar(MD_BUFFER_FINISH) && !md_adapter_buffer_scalar(MD_BUFFER_PROC_START));
+    assert(!md_fs_buffer_scalar(MD_FS_BUFFER_RESULT_REPLAY) && !md_fs_buffer_scalar(MD_BUFFER_FINISH));
+    for (unsigned i=0;i<sizeof(scalar_commands)/sizeof(*scalar_commands);++i)
+        for (int protected=0;protected<2;++protected)
+            for (int restricted=0;restricted<2;++restricted) scalar_checkpoint(protected,restricted,scalar_commands[i]);
+    printf("PASS scalar checkpoint: %zu cases; entry-only C return, full-register completion, strict seccomp and blocked SIGTRAP\n",
+        4*sizeof(scalar_commands)/sizeof(*scalar_commands));
     for (int protected=0;protected<2;++protected)
         for (int restricted=0;restricted<2;++restricted)
             for (int denied=0;denied<2;++denied) for (int invalid=0;invalid<2;++invalid)

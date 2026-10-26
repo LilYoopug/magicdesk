@@ -40,7 +40,7 @@ int md_inode_open_object(struct md_inode_store *s, const char *id, int flags) {
     struct stat st;
     if (!r) r = mdi_backing_stat(s, &node, &st);
     if (!r && node.kind != S_IFREG) r = -EINVAL;
-    if (!r) r = mdi_open_permission(s, &node, flags);
+    if (!r) r = mdi_open_permission(s, &node, flags,NULL);
     if (!r) r=mdi_landlock_object(s,&node,s->image_open ? MD_LL_EXECUTE : md_landlock_open_access(flags,node.kind));
     int fd = -1;
     int directory = r ? -1 : mdi_backing_directory(s, &node);
@@ -252,7 +252,12 @@ static int open_resolved(struct md_inode_store *s, int dirfd, const char *path, 
     if (!r && image && loc.node.kind != S_IFREG) r = -EACCES;
     int device=!r && (loc.node.kind==S_IFCHR || loc.node.kind==S_IFBLK) && !(flags&O_PATH);
     if (device && s->nodev) r=-EACCES;
-    if (!r) r = image ? mdi_permission(s, &loc.node, X_OK, 0) : mdi_open_permission(s, &loc.node, flags);
+    struct stat observed=pin.physical;
+    if (!r && pin.fd>=0) mdi_stat_project(&loc.node,&observed);
+    /* The pinned lookup already checked backing identity. Reuse only this
+     * operation's observation, never permission metadata from an earlier open. */
+    if (!r) r = image ? mdi_permission(s, &loc.node, X_OK, 0)
+        : mdi_open_permission(s,&loc.node,flags,pin.fd>=0 ? &observed : NULL);
     if (!r) r=mdi_landlock(s,&loc.node,&loc.parent,image ? MD_LL_EXECUTE : md_landlock_open_access(flags,loc.node.kind));
     /* Decline special endpoints before copy-up or any data-open effect. */
     if (!r && native_plan && !md_open_native_kind(flags,loc.node.kind)) r=-EXDEV;
@@ -353,7 +358,9 @@ int md_inode_unlink(struct md_inode_store *s, int dirfd, const char *path, int f
     if (!r) r=mdi_landlock(s,&loc.parent,NULL,loc.node.kind==S_IFDIR ? MD_LL_REMOVE_DIR : MD_LL_REMOVE_FILE);
     if (!r) r=mdi_super_preserve_writer(s,&loc.node);
     if (!r && loc.node.native) {
-        r=unlinkat(s->objects,loc.node.backing,0) ? -errno : 0;
+        int directory=mdi_directory_pin(s,&loc.parent);
+        r=unlinkat(directory<0 ? s->objects : directory,
+            directory<0 ? loc.node.backing : loc.name,0) ? -errno : 0;
         return mdi_finish(s,r);
     }
     if (!r) r=mdi_write(s);
@@ -416,7 +423,11 @@ int md_inode_rename(struct md_inode_store *s, int sourcefd, const char *source,
         char target[NAME_MAX+34];
         int n=snprintf(target,sizeof(target),"%s/%s",b.parent.backing,b.name);
         if (n<0 || (size_t)n>=sizeof(target)) r=-ENAMETOOLONG;
-        else if (renameat2(s->objects,a.node.backing,s->objects,target,flags)) r=-errno;
+        else {
+            int from=mdi_directory_pin(s,&a.parent),to=mdi_directory_pin(s,&b.parent);
+            if (renameat2(from<0 ? s->objects : from,from<0 ? a.node.backing : a.name,
+                    to<0 ? s->objects : to,to<0 ? target : b.name,flags)) r=-errno;
+        }
         return mdi_finish(s,r);
     }
     if (!r) r=mdi_leaf_promote(s,&a.node);

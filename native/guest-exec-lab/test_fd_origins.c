@@ -242,7 +242,8 @@ static void native_io_proofs(struct md_mount_namespace *view,struct md_fs_anchor
     assert(md_fd_origins_native_poll_vector(&turn,vector,4));
     allocation_budget=0;
     struct md_fd_native native={0};
-    assert(md_fd_origins_native(&turn,8,&native) && native.kind==S_IFREG && !native.flags);
+    assert(md_fd_origins_native(&turn,8,&native) && native.kind==S_IFREG && !native.flags
+        && native.origin==file);
     assert(md_fd_origins_native(&turn,9,&native) && native.kind==S_IFDIR);
     assert(md_fd_origins_native_regular(&turn,8));
     assert(!md_fd_origins_native_regular(&turn,9));
@@ -580,9 +581,11 @@ static void *ordered_writer(void *opaque) {
             do { n=read(fd,&hints,sizeof(hints)); } while (n<0 && errno==EINTR);
             assert(n==sizeof(hints));
         }
-        assert(!md_fd_order_start(&op));
-        assert(atomic_fetch_add(owner->inside,1)==0);
+        /* READY publishes the preceding owner's writes before taking the
+         * queue mutex again in start(), not merely its wakeup hint. */
         unsigned previous=*owner->committed;
+        assert(!md_fd_order_start(&op));
+        assert(*owner->committed==previous && atomic_fetch_add(owner->inside,1)==0);
         assert(!md_fd_origins_set_flags(owner->table,9,previous&1 ? FD_CLOEXEC : 0));
         *owner->committed=previous+1;
         assert(atomic_fetch_sub(owner->inside,1)==1);
@@ -591,6 +594,19 @@ static void *ordered_writer(void *opaque) {
     close(fd); md_resource_wakeup_release(wakeup); return NULL;
 }
 static void event_ordering(struct md_fs_anchor *origin) {
+    struct md_resource_queue queue;
+    struct md_resource_order observed={0}, next={0};
+    assert(!md_resource_queue_init(&queue));
+    assert(md_resource_order_begin(&queue,&observed,NULL)==1);
+    assert(!md_resource_order_begin(&queue,&next,NULL));
+    pthread_mutex_lock(&queue.lock);
+    assert(md_resource_order_state(&observed)==MD_RESOURCE_ORDER_READY);
+    assert(md_resource_order_state(&next)==MD_RESOURCE_ORDER_QUEUED);
+    pthread_mutex_unlock(&queue.lock);
+    assert(!md_resource_order_cancel(&observed));
+    assert(md_resource_order_state(&next)==MD_RESOURCE_ORDER_READY);
+    assert(!md_resource_order_cancel(&next));
+    md_resource_queue_destroy(&queue);
     struct md_fd_origins *table=md_fd_origins_new(); assert(table);
     put(table,9,origin,0);
     pthread_barrier_t start; assert(!pthread_barrier_init(&start,NULL,3));

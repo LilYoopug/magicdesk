@@ -35,9 +35,6 @@ md_enter:
 .global md_enter_checkpoint
 md_enter_checkpoint:
     svc #0
-    mov x9, x0
-    mov sp, x1
-    mov x0, xzr
-    br x9
+    ret
 .size md_enter, .-md_enter
 .section .note.GNU-stack,"",%progbits

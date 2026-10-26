@@ -1,6 +1,15 @@
 #include <asm/unistd.h>
 .text
 .balign 4
+/* Markers have a fixed syscall identity, never a register-copy payload or the
+ * preceding native call's number. x19 preserves x8 for bounded group loads. */
+.macro MARKER name
+    mov x19, x8
+    mov x8, #__NR_gettid
+.global \name
+\name:
+    svc #0
+.endm
 .global md_guest_entry_kernel
 .type md_guest_entry_kernel, %function
 md_guest_entry_kernel:
@@ -38,7 +47,7 @@ md_guest_task_call:
     svc #0
 .global md_guest_task_return
 md_guest_task_return:
-    svc #0
+    MARKER md_guest_task_completed
 .global md_guest_task_abort
 md_guest_task_abort:
     mov x0, #0
@@ -91,27 +100,21 @@ md_guest_watch_gate:
     svc #0
 .global md_guest_watch_return
 md_guest_watch_return:
-    svc #0
+    MARKER md_guest_watch_completed
 .global md_guest_store
 md_guest_store:
     stp x2, x3, [x0]
-.global md_guest_stored
-md_guest_stored:
-    svc #0
+    MARKER md_guest_stored
 .global md_guest_load_byte
 md_guest_load_byte:
     ldrb w2, [x0]
-.global md_guest_loaded_byte
-md_guest_loaded_byte:
-    svc #0
+    MARKER md_guest_loaded_byte
 .global md_guest_store_ids
 md_guest_store_ids:
     str w3, [x0]
     str w4, [x1]
     str w5, [x2]
-.global md_guest_stored_ids
-md_guest_stored_ids:
-    svc #0
+    MARKER md_guest_stored_ids
 /* Bounded task-affine credential transfer, including nondumpable programs.
  * x0 points at 1..16 gids, x1 is their count, w3..w18 carry their values. */
 .global md_guest_load_groups
@@ -119,21 +122,19 @@ md_guest_load_groups:
 .irp reg,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18
     ldr w\reg, [x0], #4
     subs x1, x1, #1
-    b.eq md_guest_loaded_groups
+    b.eq 1f
 .endr
-.global md_guest_loaded_groups
-md_guest_loaded_groups:
-    svc #0
+1:
+    MARKER md_guest_loaded_groups
 .global md_guest_store_groups
 md_guest_store_groups:
 .irp reg,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18
     str w\reg, [x0], #4
     subs x1, x1, #1
-    b.eq md_guest_stored_groups
+    b.eq 1f
 .endr
-.global md_guest_stored_groups
-md_guest_stored_groups:
-    svc #0
+1:
+    MARKER md_guest_stored_groups
 .global md_guest_allocate
 .type md_guest_allocate, %function
 md_guest_allocate:
@@ -148,7 +149,7 @@ md_guest_allocate:
     mov x5, #0
     mov x8, #__NR_mmap
     bl md_raw_syscall
-    tbnz x0, #63, md_guest_allocated
+    tbnz x0, #63, 2f
     mov x19, x0
     add x0, x0, x20
     mov x1, #0x80000
@@ -158,7 +159,7 @@ md_guest_allocate:
     tbnz x0, #63, 1f
     add x0, x19, #0x80000
     add x0, x0, x20
-    b md_guest_allocated
+    b 2f
 1:
     mov x21, x0
     mov x0, x19
@@ -167,8 +168,7 @@ md_guest_allocate:
     mov x8, #__NR_munmap
     bl md_raw_syscall
     mov x0, x21
-.global md_guest_allocated
-md_guest_allocated:
-    svc #0
+2:
+    MARKER md_guest_allocated
 .size md_guest_allocate, .-md_guest_allocate
 .section .note.GNU-stack,"",%progbits

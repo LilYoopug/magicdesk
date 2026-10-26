@@ -10,7 +10,7 @@
 
 /* Runtime gates normally share one code mapping. Group their high words so
  * every persistent selector does not spend five instructions per gate. */
-static void prefix(const struct md_fd_filter_gates *gates,struct md_fd_filter_program *out) {
+static void exemptions(const struct md_fd_filter_gates *gates,struct md_fd_filter_program *out) {
     const uintptr_t addresses[]={gates->raw,gates->watch,gates->task,gates->native};
     unsigned seen=0;
     for (unsigned i=0;i<sizeof(addresses)/sizeof(*addresses);++i) {
@@ -33,7 +33,26 @@ static void prefix(const struct md_fd_filter_gates *gates,struct md_fd_filter_pr
             out->code[out->count++]=(struct sock_filter)BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW);
         }
     }
-    out->code[out->count++]=(struct sock_filter)BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr));
+}
+static int finish(const struct md_fd_filter_gates *gates,struct md_fd_filter_program *out) {
+    unsigned count=out->count,actions[3],targets[3],used=0;
+    /* Resolve policy first. Unrelated syscall numbers return ALLOW without an
+     * IP/argument load, preserving the kernel's seccomp allow cache. Only the
+     * selected TRACE decisions need the exact internal-gate exemptions. */
+    for (unsigned i=0;i<count;++i) {
+        struct sock_filter *insn=&out->code[i];
+        if (insn->code!=(BPF_RET|BPF_K) || (insn->k&SECCOMP_RET_ACTION_FULL)!=SECCOMP_RET_TRACE) continue;
+        unsigned action=insn->k,j=0;
+        while (j<used && actions[j]!=action) ++j;
+        if (j==used) {
+            if (used==3 || out->count+21>MD_FD_FILTER_INSTRUCTIONS) return -E2BIG;
+            actions[used]=action; targets[used++]=out->count;
+            exemptions(gates,out);
+            out->code[out->count++]=(struct sock_filter)BPF_STMT(BPF_RET|BPF_K,action);
+        }
+        *insn=(struct sock_filter)BPF_STMT(BPF_JMP|BPF_JA,targets[j]-i-1);
+    }
+    return 0;
 }
 int md_fd_filter_build(enum md_fd_selector_kind kind,int fd,
         const struct md_fd_filter_gates *gates,struct md_fd_filter_program *out) {
@@ -41,7 +60,7 @@ int md_fd_filter_build(enum md_fd_selector_kind kind,int fd,
     out->count=0;
     if (!gates || fd< -1 || kind<0 || kind>=MD_FD_SELECTOR_KINDS) return -EINVAL;
     unsigned mask=fd==-1 ? 0 : MD_FD_SELECTOR_MASK;
-    prefix(gates,out);
+    out->code[out->count++]=(struct sock_filter)BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr));
 #define ADAPT(n) BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_##n,0,1), \
     BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_TRACE|MD_INTERCEPT_DISPATCH),
 #define DUPLICATES \
@@ -62,9 +81,9 @@ int md_fd_filter_build(enum md_fd_selector_kind kind,int fd,
 #define PROC(n,argument) CONTROL(n,argument,MD_INTERCEPT_PROC)
 #define COPY_PROGRAM(...) do { \
     struct sock_filter code[]={__VA_ARGS__}; \
-    _Static_assert(21+sizeof(code)/sizeof(*code)<=MD_FD_FILTER_INSTRUCTIONS,"FD filter capacity"); \
+    _Static_assert(1+3*21+sizeof(code)/sizeof(*code)<=MD_FD_FILTER_INSTRUCTIONS,"FD filter capacity"); \
     for (unsigned i=0;i<sizeof(code)/sizeof(*code);++i) out->code[out->count++]=code[i]; \
-    return 0; \
+    return finish(gates,out); \
 } while (0)
     if (kind==MD_FD_SELECTOR_WATCH) COPY_PROGRAM(
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_read,5,0),

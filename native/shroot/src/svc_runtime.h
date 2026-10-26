@@ -9,5 +9,5 @@ struct md_svc_runtime {
     unsigned count, reserved;
 };
 extern struct md_svc_runtime md_svc_runtime;
-void md_svc_runtime_prepare(uintptr_t program,uintptr_t loader,unsigned long capabilities);
+void md_svc_runtime_prepare(uintptr_t program,uintptr_t loader,unsigned long capabilities,int statistics);
 #endif

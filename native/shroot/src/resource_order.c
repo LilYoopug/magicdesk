@@ -50,29 +50,25 @@ int md_resource_wakeup_signal(struct md_resource_wakeup *wake) {
 }
 int md_resource_order_begin(struct md_resource_queue *q, struct md_resource_order *op, struct md_resource_wakeup *wake) {
     if (!q || !op) return -EINVAL;
-    if (op->state!=MD_RESOURCE_ORDER_IDLE || op->queue || op->previous || op->next) return -EBUSY;
+    if (md_resource_order_state(op)!=MD_RESOURCE_ORDER_IDLE || op->queue || op->previous || op->next) return -EBUSY;
     op->queue=q; op->wakeup=md_resource_wakeup_retain(wake);
     pthread_mutex_lock(&q->lock);
     op->previous=q->last;
     if (q->last) q->last->next=op; else q->first=op;
     q->last=op;
-    op->state=q->first==op ? MD_RESOURCE_ORDER_READY : MD_RESOURCE_ORDER_QUEUED;
-    int ready=op->state==MD_RESOURCE_ORDER_READY;
+    int ready=q->first==op;
+    atomic_store_explicit(&op->state,ready ? MD_RESOURCE_ORDER_READY : MD_RESOURCE_ORDER_QUEUED,memory_order_release);
     pthread_mutex_unlock(&q->lock); return ready;
 }
 enum md_resource_order_state md_resource_order_state(const struct md_resource_order *op) {
-    if (!op || !op->queue) return MD_RESOURCE_ORDER_IDLE;
-    struct md_resource_queue *q=op->queue;
-    pthread_mutex_lock(&q->lock);
-    enum md_resource_order_state state=op->state;
-    pthread_mutex_unlock(&q->lock); return state;
+    return op ? atomic_load_explicit(&op->state,memory_order_acquire) : MD_RESOURCE_ORDER_IDLE;
 }
 int md_resource_order_start(struct md_resource_order *op) {
     if (!op || !op->queue) return -EINVAL;
     struct md_resource_queue *q=op->queue;
     pthread_mutex_lock(&q->lock);
-    int error=op->state!=MD_RESOURCE_ORDER_READY ? -EINVAL : 0;
-    if (!error) op->state=MD_RESOURCE_ORDER_RUNNING;
+    int error=md_resource_order_state(op)!=MD_RESOURCE_ORDER_READY ? -EINVAL : 0;
+    if (!error) atomic_store_explicit(&op->state,MD_RESOURCE_ORDER_RUNNING,memory_order_release);
     pthread_mutex_unlock(&q->lock); return error;
 }
 static int retire(struct md_resource_order *op) {
@@ -83,7 +79,7 @@ static int retire(struct md_resource_order *op) {
     if (op->next) op->next->previous=op->previous; else q->last=op->previous;
     *op=(struct md_resource_order){0};
     if (first && q->first) {
-        q->first->state=MD_RESOURCE_ORDER_READY;
+        atomic_store_explicit(&q->first->state,MD_RESOURCE_ORDER_READY,memory_order_release);
         next=md_resource_wakeup_retain(q->first->wakeup);
     }
     pthread_mutex_unlock(&q->lock);
@@ -93,7 +89,7 @@ static int retire(struct md_resource_order *op) {
 }
 int md_resource_order_move(struct md_resource_order *from,struct md_resource_order *to) {
     if (!from || !from->queue || !to || from==to) return -EINVAL;
-    if (to->queue || to->state!=MD_RESOURCE_ORDER_IDLE || to->wakeup || to->previous || to->next) return -EBUSY;
+    if (to->queue || md_resource_order_state(to)!=MD_RESOURCE_ORDER_IDLE || to->wakeup || to->previous || to->next) return -EBUSY;
     struct md_resource_queue *q=from->queue;
     pthread_mutex_lock(&q->lock);
     *to=*from;
@@ -106,10 +102,12 @@ int md_resource_order_cancel(struct md_resource_order *op) {
     if (!op || !op->queue) return -EINVAL;
     struct md_resource_queue *q=op->queue;
     pthread_mutex_lock(&q->lock);
-    if (op->state==MD_RESOURCE_ORDER_RUNNING || op->state==MD_RESOURCE_ORDER_CANCELLING) {
-        op->state=MD_RESOURCE_ORDER_CANCELLING; pthread_mutex_unlock(&q->lock); return 1;
+    unsigned state=md_resource_order_state(op);
+    if (state==MD_RESOURCE_ORDER_RUNNING || state==MD_RESOURCE_ORDER_CANCELLING) {
+        atomic_store_explicit(&op->state,MD_RESOURCE_ORDER_CANCELLING,memory_order_release);
+        pthread_mutex_unlock(&q->lock); return 1;
     }
-    if (op->state!=MD_RESOURCE_ORDER_QUEUED && op->state!=MD_RESOURCE_ORDER_READY) {
+    if (state!=MD_RESOURCE_ORDER_QUEUED && state!=MD_RESOURCE_ORDER_READY) {
         pthread_mutex_unlock(&q->lock); return -EINVAL;
     }
     return retire(op);
@@ -118,7 +116,8 @@ int md_resource_order_complete(struct md_resource_order *op) {
     if (!op || !op->queue) return -EINVAL;
     struct md_resource_queue *q=op->queue;
     pthread_mutex_lock(&q->lock);
-    if (op->state!=MD_RESOURCE_ORDER_RUNNING && op->state!=MD_RESOURCE_ORDER_CANCELLING) {
+    unsigned state=md_resource_order_state(op);
+    if (state!=MD_RESOURCE_ORDER_RUNNING && state!=MD_RESOURCE_ORDER_CANCELLING) {
         pthread_mutex_unlock(&q->lock); return -EINVAL;
     }
     return retire(op);

@@ -63,9 +63,10 @@ static void cancel_collected(void) {
 }
 int main(int argc,char **argv) {
     int idle=argc==2 && !strcmp(argv[1],"--idle");
-    assert(argc==1 || idle);
+    int small=argc==2 && !strcmp(argv[1],"--small");
+    assert(argc==1 || idle || small);
     enum { CAPACITY=388 };
-    unsigned hot=idle ? 4 : 48, total=idle ? CAPACITY : hot, requests=idle ? 2048 : 128;
+    unsigned hot=idle || small ? 4 : 48, total=idle ? CAPACITY : hot, requests=idle || small ? 2048 : 128;
     sigset_t mask;
     sigemptyset(&mask); sigaddset(&mask,SIGCHLD);
     assert(!sigprocmask(SIG_BLOCK,&mask,NULL));

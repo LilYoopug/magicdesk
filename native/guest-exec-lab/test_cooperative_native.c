@@ -156,6 +156,25 @@ static void boundary(uintptr_t pc,int kind) {
     assert(!close(fd) && !munmap(n,4096));
 }
 static struct md_entry_channel channel;
+static void descriptor_lease(void) {
+    struct md_entry_channel c={0};
+    assert(md_entry_regular_descriptor(&c)==-1);
+    atomic_store(&c.native_regular,43);
+    assert(md_entry_regular_descriptor(&c)==42);
+    atomic_store(&c.native_regular,MD_ENTRY_RESULT_FD);
+    c.native.number=SYS_openat; c.native.result=42;
+    for (unsigned state=MD_NATIVE_EMPTY;state<=MD_NATIVE_CANCELLED;++state) {
+        atomic_store(&c.native.state,state);
+        assert(md_entry_regular_descriptor(&c)==(state==MD_NATIVE_DONE ? 42 : -1));
+    }
+    atomic_store(&c.native.state,MD_NATIVE_DONE);
+    c.native.result=-ENOENT; assert(md_entry_regular_descriptor(&c)==-1);
+    c.native.result=INT64_MAX; assert(md_entry_regular_descriptor(&c)==-1);
+    c.native.result=42; c.native.number=SYS_close; assert(md_entry_regular_descriptor(&c)==-1);
+    c.native.number=SYS_openat; atomic_store(&c.native_regular,0);
+    assert(md_entry_regular_descriptor(&c)==-1);
+    puts("PASS native descriptor lease: exact FD or successful open, cancellation, failure and revocation");
+}
 static pthread_barrier_t phase;
 static atomic_int wake_requested;
 static void barrier(void) {
@@ -217,6 +236,7 @@ static void park_handoff(void) {
 }
 int main(void) {
     alarm(30); unsigned count=0;
+    descriptor_lease();
     string_operands();
     open_admission();
     park_handoff();

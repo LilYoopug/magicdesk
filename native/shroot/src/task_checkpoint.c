@@ -20,9 +20,11 @@ struct md_task_checkpoint {
     pid_t pid;
     int scoped,stage;
     uintptr_t marker;
-    int registers_valid,event_valid;
+    int registers_valid,event_valid,info_valid;
+    long info_size;
     unsigned long event;
     struct user_pt_regs registers;
+    struct ptrace_syscall_info info;
 };
 static struct md_task_checkpoint *find(struct md_task_checkpoints *m,pid_t pid,int create) {
     struct md_task_checkpoint **bucket=&m->buckets[(unsigned)pid%MD_TASK_CHECKPOINT_BUCKETS];
@@ -53,13 +55,14 @@ static void forget(struct md_task_checkpoints *m,pid_t pid) {
 }
 long md_task_checkpoint_trace(struct md_task_checkpoints *m,int request,pid_t pid,void *address,void *data) {
     struct md_task_checkpoint *c=find(m,pid,0);
-    if (c && (c->registers_valid || c->event_valid)) {
+    if (c && (c->registers_valid || c->event_valid || c->info_valid)) {
         /* Each observation is handed off once within this stop. Only the
-         * other retained observation may intervene; all other requests,
+         * other retained observations may intervene; all other requests,
          * including failed mutations, discard the remaining snapshot. */
-        if (c->registers_valid && request==PTRACE_GETREGSET && (uintptr_t)address==NT_PRSTATUS && data) {
+        if (request==PTRACE_GETREGSET && (uintptr_t)address==NT_PRSTATUS && data) {
             struct iovec *io=data;
             if (io->iov_base && io->iov_len>=sizeof(c->registers)) {
+                if (!c->registers_valid) return m->trace(request,pid,address,data);
                 memcpy(io->iov_base,&c->registers,sizeof(c->registers));
                 io->iov_len=sizeof(c->registers);
                 c->registers_valid=0;
@@ -70,7 +73,13 @@ long md_task_checkpoint_trace(struct md_task_checkpoints *m,int request,pid_t pi
             *(unsigned long *)data=c->event; c->event_valid=0;
             return 0;
         }
-        c->registers_valid=c->event_valid=0;
+        if (c->info_valid && request==PTRACE_GET_SYSCALL_INFO && data
+                && (uintptr_t)address>=(unsigned long)c->info_size) {
+            memcpy(data,&c->info,c->info_size);
+            c->info_valid=0;
+            return c->info_size;
+        }
+        c->registers_valid=c->event_valid=c->info_valid=0;
     }
     if (request==PTRACE_SETREGSET && (uintptr_t)address==NT_PRSTATUS && data) {
         struct iovec *io=data;
@@ -116,7 +125,7 @@ static int marker(struct md_task_checkpoints *m,struct md_task_checkpoint *c,pid
 static int checkpoint_event(struct md_task_checkpoints *m,pid_t pid,int *status) {
     if (WIFEXITED(*status) || WIFSIGNALED(*status)) { forget(m,pid); return 0; }
     struct md_task_checkpoint *c=find(m,pid,0);
-    if (c) c->registers_valid=c->event_valid=0;
+    if (c) c->registers_valid=c->event_valid=c->info_valid=0;
     if (!WIFSTOPPED(*status)) return 0;
     unsigned event=(unsigned)*status>>16;
     int signal=WSTOPSIG(*status);
@@ -129,16 +138,20 @@ static int checkpoint_event(struct md_task_checkpoints *m,pid_t pid,int *status)
     if (event==PTRACE_EVENT_SECCOMP) {
         if (m->begin && (!c || !c->scoped)) return 0;
         struct ptrace_syscall_info info={0};
-        int error=trace(m,PTRACE_GET_SYSCALL_INFO,pid,(void *)sizeof(info),&info);
-        if (error) return error;
+        long size=m->trace(PTRACE_GET_SYSCALL_INFO,pid,(void *)sizeof(info),&info);
+        if (size<0) return -errno;
         if (info.op!=PTRACE_SYSCALL_INFO_SECCOMP) return -EPROTO;
         unsigned long cookie=info.seccomp.ret_data;
         if (cookie!=MD_INTERCEPT_CHECKPOINT && (!c || !c->scoped)) return 0;
         if (cookie!=MD_INTERCEPT_CHECKPOINT && !m->marker(info.instruction_pointer)) {
-            struct user_pt_regs r;
-            error=regs(m,pid,PTRACE_GETREGSET,&r); if (error) return error;
-            c->registers=r; c->registers_valid=1;
+            /* Ordinary syscall owners may need only this entry record.
+             * Do not eagerly capture full registers for compact handlers. */
             c->event=cookie; c->event_valid=1;
+            /* Preserve the kernel's exact byte count. Future larger records
+             * fall back instead of publishing a truncated snapshot. */
+            if (size>0 && (unsigned long)size<=sizeof(info)) {
+                c->info=info; c->info_size=size; c->info_valid=1;
+            }
             return 0;
         }
         c=find(m,pid,1); if (!c) return -ENOMEM;

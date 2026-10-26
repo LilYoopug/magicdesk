@@ -8,15 +8,23 @@
     bfi \reg,\reg,#16,#6
     and \reg,\reg,#0xffffffffffffffc0
 .endm
-.macro md_svc_save_gprs base
-    .irp n,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29
-    str x\n,[\base,#8*\n]
+.macro md_svc_gpr_pair paired,single,base,lo,hi,omit=-1
+    .if \lo == \omit
+    \single x\hi,[\base,#8*\hi]
+    .elseif \hi == \omit
+    \single x\lo,[\base,#8*\lo]
+    .else
+    \paired x\lo,x\hi,[\base,#8*\lo]
+    .endif
+.endm
+.macro md_svc_gprs paired,single,base,omit=-1
+    .irp pair,"0,1","2,3","4,5","6,7","8,9","10,11","12,13","14,15","16,17","18,19","20,21","22,23","24,25","26,27","28,29"
+    md_svc_gpr_pair \paired,\single,\base,\pair,\omit
     .endr
 .endm
+.macro md_svc_save_gprs base
+    md_svc_gprs stp,str,\base
+.endm
 .macro md_svc_restore_gprs base, omit=-1
-    .irp n,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29
-    .if \n != \omit
-    ldr x\n,[\base,#8*\n]
-    .endif
-    .endr
+    md_svc_gprs ldp,ldr,\base,\omit
 .endm

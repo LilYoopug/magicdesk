@@ -155,6 +155,8 @@ void md_boot(uintptr_t *kernel_stack) {
     }
     r = md_interception_install(inherited);
     if (r < 0) md_die("install syscall adapter", r);
+    int machine_admitted=!!(r&MD_INTERCEPTION_MACHINE);
+    int statistics=!!(r&MD_INTERCEPTION_STATISTICS);
     if (namespace && !inherited) {
         /* Initial placement uses the same authenticated descriptor publication
          * and native cwd completion as later chdir, before loading guest code. */
@@ -210,27 +212,20 @@ void md_boot(uintptr_t *kernel_stack) {
         else if (md_equal(env[i],"SHROOT_MACHINE_ENTRY=1")) machine_entry=1;
         else md_die("SHROOT_MACHINE_ENTRY must be 0 or 1",-EINVAL);
     }
-    machine_entry=namespace && machine_entry
-        && md_guest_buffer_control(MD_BUFFER_MACHINE_ADMIT,0,0)==1;
+    machine_entry=namespace && machine_entry && machine_admitted;
     struct md_image program;
-    r = md_interception_map_image((int)fd, 0);
+    r = namespace && (!inherited || retained) ? 0 : md_interception_map_image((int)fd);
     if (!r) r = md_elf_load((int)fd, 0, &program);
-    if (!r && machine_entry && md_guest_buffer_control(MD_BUFFER_IMAGE_BACKING,fd,0)<0)
-        machine_entry=0;
-    RAW1(close, fd);
-    command.fd=-1;
     if (r < 0) md_die("map guest program", r);
     struct md_image image = {.entry = program.entry};
     if (command.interpreter_fd >= 0) {
         fd = command.interpreter_fd;
-        r = md_interception_map_image((int)fd, 1);
-        if (!r) r = md_elf_load((int)fd, 1, &image);
-        if (!r && machine_entry && md_guest_buffer_control(MD_BUFFER_IMAGE_BACKING,fd,0)<0)
-            machine_entry=0;
-        RAW1(close, fd);
-        command.interpreter_fd=-1;
+        r = md_elf_load((int)fd, 1, &image);
         if (r < 0) md_die("map stock loader", r);
     }
+    RAW1(close,command.fd); command.fd=-1;
+    if (command.interpreter_fd>=0) RAW1(close,command.interpreter_fd);
+    command.interpreter_fd=-1;
 
     const size_t stack_size = 8 * 1024 * 1024;
     /* Preserve the kernel's stack guard gap. A plain anonymous mapping lets
@@ -294,11 +289,10 @@ void md_boot(uintptr_t *kernel_stack) {
         case AT_EXECFN: guest_aux[i].a_un.a_val = (uintptr_t)execfn; break;
         }
     }
-    if (machine_entry) md_svc_runtime_prepare(program.entry,image.entry,capabilities);
-    r = md_interception_enter_image(guest_aux, (unsigned)auxc);
-    if (r < 0) md_die("enter guest image", r);
+    if (machine_entry) md_svc_runtime_prepare(program.entry,image.entry,capabilities,statistics);
     md_proc_image_init(&process_image, arguments, argument_bytes, environment_bytes, guest_aux, (auxc + 1) * sizeof(*guest_aux));
     command.execfd=-1; /* AT_EXECFD transfers ownership to the interpreter. */
     md_command_close(&command);
-    md_enter(image.entry, (uintptr_t)sp, &process_image);
+    md_interception_enter_image(image.entry,(uintptr_t)sp,&process_image,guest_aux,(unsigned)auxc,
+        md_svc_runtime.frames!=0);
 }

@@ -1,6 +1,5 @@
 #define _GNU_SOURCE
 #include "svc_registry.h"
-#include "entry_route.h"
 #include "mapping_reader.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -43,6 +42,20 @@ int md_svc_registry_write(pid_t pid,uintptr_t at,const void *data,size_t size) {
     }
     return 0;
 }
+int md_svc_registry_stage(pid_t pid,int memory_fd,uintptr_t at,const void *data,size_t size) {
+    if (size>PTRDIFF_MAX || size>UINTPTR_MAX-at) return -EFAULT;
+    if (!size) return 0;
+    /* Borrow this mm owner's retained proc descriptor while the task is
+     * stopped. Both writers maintain remote instruction caches; the block
+     * write avoids reopening proc or crossing the kernel once per word. */
+    if (memory_fd>=0) {
+        ssize_t n;
+        do n=pwrite(memory_fd,data,size,(off_t)at); while (n<0 && errno==EINTR);
+        if (n==(ssize_t)size) return 0;
+        if (!n) return -ESRCH;
+    }
+    return md_svc_registry_write(pid,at,data,size);
+}
 int md_svc_registry_executable(pid_t pid,uintptr_t address,size_t size) {
     if (!size || size>UINTPTR_MAX-address) return 0;
     char path[64]; snprintf(path,sizeof(path),"/proc/%d/maps",pid);
@@ -63,7 +76,7 @@ static struct md_svc_site *head(struct md_svc_registry *r,uintptr_t svc) {
             return &r->sites[i-1];
     return NULL;
 }
-static int extend(struct md_svc_registry *r,pid_t pid,uintptr_t svc,uint64_t number,
+static int extend(struct md_svc_registry *r,pid_t pid,int memory_fd,uintptr_t svc,uint64_t number,
         struct md_svc_site *previous) {
     if (!r || r->disabled || (svc&3) || svc<4 || r->count==MD_SVC_SITES
             || (svc>=r->native_begin && svc<r->native_end)) return 0;
@@ -72,8 +85,9 @@ static int extend(struct md_svc_registry *r,pid_t pid,uintptr_t svc,uint64_t num
     struct md_svc_site *s=&r->sites[r->count++];
     s->state=MD_SVC_RETIRED;
     s->direct.svc=svc;
-    uint32_t original;
-    if (md_svc_registry_read(pid,svc,&original,4) || original!=UINT32_C(0xd4000001)
+    uint32_t original=UINT32_C(0xd4000001),current;
+    if (md_svc_registry_read(pid,svc,&current,4)
+            || (current!=original && (!previous || current!=previous->replacement))
             || !md_svc_registry_executable(pid,svc,4)) return 0;
     size_t size=md_svc_direct_signal_size();
     unsigned char code[2048];
@@ -88,7 +102,7 @@ static int extend(struct md_svc_registry *r,pid_t pid,uintptr_t svc,uint64_t num
         int error=md_svc_direct_signal_plan(&context,r->dispatch,exits,code,sizeof(code),&replacement);
         if (!error) error=md_svc_direct_kernel(svc,alias,(void *)(code+size));
         if (error) continue;
-        error=md_svc_registry_write(pid,gate,code,size+8);
+        error=md_svc_registry_stage(pid,memory_fd,gate,code,size+8);
         if (error) return error;
         /* Publish only after the complete resident gate is visible. The
          * caller is stopped at this exact SVC; no predecessor is rewritten. */
@@ -102,11 +116,24 @@ static int extend(struct md_svc_registry *r,pid_t pid,uintptr_t svc,uint64_t num
     }
     return 0;
 }
-int md_svc_registry_direct(struct md_svc_registry *r,pid_t pid,uintptr_t svc,uint64_t number) {
-    if (!r) return 0;
-    for (unsigned i=0;i<r->count;++i) if (r->sites[i].direct.svc==svc)
-        return md_svc_registry_resume(r,pid,svc,number);
-    return extend(r,pid,svc,number,NULL);
+int md_svc_registry_direct(struct md_svc_registry *r,pid_t pid,int memory_fd,uintptr_t svc,uint64_t number) {
+    if (!r || r->disabled) return 0;
+    struct md_svc_site *s=head(r,svc);
+    if (s) {
+        for (unsigned i=0;i<r->count;++i)
+            if (r->sites[i].state==MD_SVC_PUBLISHED && r->sites[i].direct.svc==svc
+                    && r->sites[i].direct.number==number)
+                return md_svc_registry_resume(r,pid,svc);
+        uint32_t current;
+        int error=md_svc_registry_read(pid,svc,&current,4);
+        if (error || (current!=s->original && current!=s->replacement)) return error;
+        error=extend(r,pid,memory_fd,svc,number,s);
+        if (error) return error<0 ? error : 0;
+        return md_svc_registry_resume(r,pid,svc);
+    }
+    /* A retired site remains retired, including an admission that failed. */
+    for (unsigned i=0;i<r->count;++i) if (r->sites[i].direct.svc==svc) return 0;
+    return extend(r,pid,memory_fd,svc,number,NULL);
 }
 int md_svc_registry_suspend(struct md_svc_registry *r,pid_t pid,uintptr_t svc) {
     struct md_svc_site *s=head(r,svc);
@@ -117,24 +144,23 @@ int md_svc_registry_suspend(struct md_svc_registry *r,pid_t pid,uintptr_t svc) {
         error=md_svc_registry_write(pid,svc,&s->original,4);
     return error;
 }
-int md_svc_registry_resume(struct md_svc_registry *r,pid_t pid,uintptr_t svc,uint64_t number) {
+int md_svc_registry_resume(struct md_svc_registry *r,pid_t pid,uintptr_t svc) {
     struct md_svc_site *s=head(r,svc);
     if (!s || r->disabled) return 0;
     uint32_t current;
     int error=md_svc_registry_read(pid,svc,&current,4);
     if (error || current!=s->original) return error;
-    int known=0;
-    for (unsigned i=0;i<r->count;++i)
-        known|=r->sites[i].state==MD_SVC_PUBLISHED && r->sites[i].direct.svc==svc
-            && r->sites[i].direct.number==number;
-    if (!known && md_entry_supported((int)number)) {
-        error=extend(r,pid,svc,number,s);
-        if (error) return error<0 ? error : 0;
-    }
     return md_svc_registry_write(pid,svc,&s->replacement,4);
 }
+int md_svc_registry_context(const struct md_svc_registry *r,uintptr_t pc,uintptr_t sp) {
+    if (!r) return 0;
+    if (sp>r->frames && sp-r->frames<=MD_SVC_POOL_SIZE) return 1;
+    for (unsigned i=0;i<r->pool_count;++i)
+        if (pc>=r->pools[i].address && pc-r->pools[i].address<=r->pools[i].used) return 1;
+    return 0;
+}
 struct md_svc_site *md_svc_registry_direct_at(struct md_svc_registry *r,pid_t pid,uintptr_t pc,uintptr_t sp) {
-    if (!r) return NULL;
+    if (!md_svc_registry_context(r,pc,sp)) return NULL;
     uintptr_t owner=0;
     if (sp>r->frames && sp<=r->frames+MD_SVC_POOL_SIZE) {
         uintptr_t frame=(sp-1)&~(uintptr_t)(MD_SVC_SLOT_SIZE-1);
@@ -214,6 +240,15 @@ static int client_memory(pid_t pid,int fd,uintptr_t at,void *data,size_t size,in
      * its mm has no remaining users, even if a terminal event is still queued. */
     return n==(ssize_t)size ? 0 : n<0 ? -errno : !n ? -ESRCH : -EIO;
 }
+int md_svc_registry_identity(struct md_svc_registry *r,pid_t pid,int memory_fd,pid_t owner) {
+    if (!r || r->disabled || (r->identity_known && r->sole_owner==owner)) return 0;
+    if (owner<0 || (owner && owner!=pid)) return -EINVAL;
+    uint64_t identity=(uint64_t)owner;
+    int error=client_memory(pid,memory_fd,r->frames+MD_SVC_POOL_SIZE+
+        offsetof(struct md_svc_payload_state,sole_owner),&identity,sizeof(identity),1);
+    if (!error) { r->sole_owner=owner; r->identity_known=1; }
+    return error;
+}
 int md_svc_registry_collect_clients(struct md_svc_registry *r,pid_t pid,int memory_fd,
         int (*alive)(pid_t,void *),void *context) {
     if (!r || r->disabled || !r->clients_dirty) return 0;
@@ -254,7 +289,7 @@ struct md_svc_registry *md_svc_registry_new(uintptr_t frames,uintptr_t dispatch)
 struct md_svc_registry *md_svc_registry_copy(const struct md_svc_registry *r) {
     if (!r) return NULL;
     struct md_svc_registry *copy=malloc(sizeof(*copy));
-    if (copy) { *copy=*r; copy->clients_dirty=1; }
+    if (copy) { *copy=*r; copy->clients_dirty=1; copy->identity_known=0; }
     return copy;
 }
 int md_svc_registry_pool(struct md_svc_registry *r,uintptr_t address) {

@@ -17,15 +17,49 @@ discovery debugger. Bootstrap allocates private frames and near-code pools;
 First observed execution can publish a single SVC replacement without a peer
 stop, predecessor witness or hot-site threshold. Observed syscall numbers at
 one instruction share a chain of immutable guarded entries.
+For syscall numbers representable by an unsigned 12-bit immediate, the guard
+subtracts that number from x8 without changing NZCV and branches on the full
+64-bit result. A mismatch adds the number back before following the next guard;
+the matching body restores the known number through its existing replay slots.
+Signal recovery reverses the subtraction at the three intervening instruction
+boundaries. Larger numbers retain bit-test guards. Neither path borrows the
+guest stack or a second register, and publication still changes one instruction.
+The instruction-boundary suite covers matching calls, mismatches and identical
+low 32 bits with different high bits, including signal-edited contexts.
+Unpublished gate bodies are staged with a block write through `/proc/PID/mem`,
+with word-sized ptrace fallback when unavailable. Only the final source
+instruction uses the existing atomic publication path; no partial gate becomes
+reachable through a published branch. This reduces cold startup work without
+changing the warm entry path or making proc-write permission mandatory.
+
+A newly published worker/FD/value entry can also serve the first, unexecuted
+call. A cancelled notification already owns a post-kernel continuation; a
+TRACE stop cancels its syscall and restores the complete context at exit before
+entering the new gate. Existing gates and retained interrupted results keep
+their ordinary completion path, so a pre-execution decline cannot loop back
+through the same gate. Task-route calls do not acquire gates just to reach the
+same Base dispatcher. Site-discovery coverage includes all first calls, not
+only later warmed iterations.
 
 `svc_machine.c` owns logical signal contexts, deferred siginfo, checkpoint return
-and cold replay at the original instruction. It uses the existing interception
+and necessary replay at the original instruction. It uses the existing interception
 filter, not a filter per pool or exec. Broker notifications from resident gates
 return to this owner rather than being sampled as guest code. Machine entry
 uses the common per-thread channel and channel reentry guard; explicit API
 fixtures exercise the same transport independently of patch discovery.
 Memory changes retire overlapping entry points; resident continuations remain
 until address-space teardown. Debugger ownership disables machine admission.
+
+An unfiltered TRACE entry at a published site's native alias can use the same
+Base syscall owner even when its number is new to that chain. Discovery uses
+the authenticated original PC and actual arguments; it may publish another
+gate for subsequent calls without replaying the current syscall. Publication
+accepts only the exact original SVC or the current owned branch, stages the
+new gate first, and retains all earlier continuations. Restoring a suspended
+branch never implicitly admits another number. Memory profitability checks
+therefore apply equally to initial discovery, alias discovery and signal retry.
+Application filters, exposed address spaces and debugger ownership retain
+their original recovery and admission boundaries.
 
 Seccomp stops share one register snapshot between checkpoint recovery, executed
 site discovery and ordinary dispatch. Discovery precedes compact Base handlers:
@@ -34,6 +68,24 @@ The `--case fd-discovery` cooperative fixture uses ordinary SVC instructions,
 not the explicit entry API, and checks close/dup/fcntl/lseek completion counters
 as well as descriptor flags and EBADF. Base runs assert that these counters stay
 zero. Calls which already go straight to the kernel need no discovery stop.
+
+Native memory observation uses the number, PC, SP and six arguments already
+returned by `PTRACE_GET_SYSCALL_INFO`, including an exact unfiltered native
+alias outside private stacks. It captures full GPRs only before rewriting an
+error or entering a task-affine adapter. Exit observation still owns mapping
+publication, backing provenance and repair. Resident execution, filters and
+debuggers retain full-context recovery; compact operands are never restored as
+an application's register image. Supervisor-state and mapping/signal tests cover
+these boundaries.
+
+Private untracked `munmap` uses the same discovery ordering and an admitted
+native-memory callback. The sole address-space owner validates a snapshot of
+excluded mappings; it does not send a request to the filesystem worker. Shared,
+exposed, filtered or tracked cases retain ordinary interception. The mapping
+fixture verifies actual accelerated completions, page-rounded unmapping,
+misaligned-address rejection, signal-handler reentry and a subsequent seccomp
+denial. The ownership and revocation contract is described in
+[cooperative entry](../shroot/cooperative-entry.md#native-memory-effects).
 
 Broker discovery uses a bounded recent-address cache only to suppress repeated
 cold attempts. A cache miss always delegates, evicting an older address if
@@ -70,7 +122,7 @@ run the stock assembly/Go/libc fixtures directly, without the laboratory tracer.
 PRoot, Base and lazy entry. Explicit API callers remain correctness fixtures,
 not measurements of rebuilt libc. Source-built libc is not a supported launch mode.
 
-The normal writer uses ptrace against private RX mappings. Bootstrap
+Source-instruction publication uses ptrace against private RX mappings. Bootstrap
 registers the initial program and interpreter mappings with `interception_memory`
 while it still owns their exact source descriptors. Device/inode and offsets,
 not a later pathname lookup, identify those ranges. The existing private-memory

@@ -4,6 +4,7 @@
 #include "fs_buffer.h"
 #include "posix_acl.h"
 #include <assert.h>
+#include <asm/hwcap.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/stat.h>
@@ -19,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ipc.h>
+#include <sys/auxv.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/prctl.h>
@@ -49,6 +51,35 @@ static void reap(pid_t pid) {
 }
 struct context { int ready[2], done[2], file, unshare, root; };
 static const char *executable;
+static void processor_state_check(void) {
+    int policy=prctl(PR_GET_SPECULATION_CTRL,PR_SPEC_STORE_BYPASS,0,0,0);
+    if (policy<0 || !(policy&PR_SPEC_PRCTL) || !(getauxval(AT_HWCAP)&HWCAP_SSBS)) return;
+    unsigned long ssbs;
+    __asm__ volatile(".arch_extension ssbs\n\tmrs %0,SSBS" : "=r"(ssbs));
+    if (!!ssbs!=!!(policy&PR_SPEC_ENABLE))
+        fprintf(stderr,"processor policy=%#x SSBS=%#lx\n",policy,ssbs);
+    assert(!!ssbs==!!(policy&PR_SPEC_ENABLE));
+}
+static int processor_state(const char *self,int target) {
+    processor_state_check();
+    if (target) return 0;
+    const int policies[]={PR_SPEC_ENABLE,PR_SPEC_DISABLE,PR_SPEC_DISABLE_NOEXEC,PR_SPEC_FORCE_DISABLE};
+    for (unsigned i=0;i<sizeof(policies)/sizeof(*policies);++i) {
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            int policy=prctl(PR_GET_SPECULATION_CTRL,PR_SPEC_STORE_BYPASS,0,0,0);
+            if (policy>=0 && (policy&PR_SPEC_PRCTL) && !(policy&PR_SPEC_FORCE_DISABLE)) {
+                assert(!prctl(PR_SET_SPECULATION_CTRL,PR_SPEC_STORE_BYPASS,policies[i],0,0));
+                processor_state_check();
+            }
+            execl(self,self,"processor-state-exec",(char *)NULL);
+            perror("processor state exec"); _exit(1);
+        }
+        reap(child);
+    }
+    puts("PASS processor state: inherited policy, explicit protection and exec reset");
+    return 0;
+}
 static int mutate(void *argument) {
     struct context *c = argument;
     if (c->unshare == -2) {
@@ -2203,6 +2234,9 @@ int test_mutation_signal_guest(const char *, int, int);
 int test_shared_memory_guest(const char *, int, int);
 int test_fd_result_guest(const char *, int);
 int main(int argc, char **argv) {
+    if (argc==2 && (!strcmp(argv[1],"processor-state") || !strcmp(argv[1],"processor-state-exec"))) {
+        alarm(40); return processor_state(argv[0],!strcmp(argv[1],"processor-state-exec"));
+    }
     if (argc==4 && !strcmp(argv[1],"result-custody"))
         return test_fd_result_guest(argv[2],atoi(argv[3]));
     if (argc>=2 && !strcmp(argv[1],"keyring")) return test_keyring_guest(argc,argv);
