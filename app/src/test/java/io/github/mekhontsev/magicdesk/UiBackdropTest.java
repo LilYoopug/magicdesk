@@ -120,6 +120,21 @@ public final class UiBackdropTest {
                 """);
     }
 
+    @Test public void linkageErrorFromAnAbsentMethodNeverEscapes() throws Exception {
+        // Covers the catch arm on its own: a runtime whose Window lacks the method even though
+        // the SDK check let the call through. NoSuchMethodError is an Error, not a RuntimeException.
+        verify("""
+                android.os.Build.VERSION.SDK_INT = 34;
+                window.absent = true;
+                UiBackdrop.bind(window, paint);
+                view.attach();
+                check(window.background == paint, "linkage failure lost the fill");
+                view.detach();
+                UiBackdrop.unbind(window);
+                check(view.listeners.isEmpty(), "linkage failure blocked cleanup");
+                """);
+    }
+
     @Test public void softwareRenderingAndDisabledStyleRequestNoBlur() throws Exception {
         verify("""
                 UiBackdrop.bind(window, paint);
