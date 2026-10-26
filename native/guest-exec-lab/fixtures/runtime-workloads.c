@@ -4,10 +4,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <sys/inotify.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -90,8 +92,32 @@ static uint64_t now(void) {
     struct timespec t; assert(!clock_gettime(CLOCK_MONOTONIC, &t));
     return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec;
 }
+static void environment(const char *phase) {
+    assert(!strcmp(phase, "before") || !strcmp(phase, "after"));
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    assert(!sched_getaffinity(0, sizeof(mask), &mask));
+    int high = CPU_SETSIZE - 1;
+    while (high > 0 && !CPU_ISSET(high, &mask)) --high;
+    printf("MD_AFFINITY %s ", phase);
+    for (int group = high / 4; group >= 0; --group) {
+        unsigned value = 0;
+        for (unsigned bit = 0; bit < 4; ++bit)
+            if (CPU_ISSET(group * 4 + bit, &mask)) value |= 1u << bit;
+        printf("%x", value);
+    }
+    putchar('\n');
+    errno = 0;
+    int priority = getpriority(PRIO_PROCESS, 0);
+    assert(!errno);
+    printf("MD_NICE %s %d\n", phase, priority);
+}
 int main(int argc, char **argv) {
     assert(argc == 2 || argc == 3);
+    if (!strcmp(argv[1], "environment")) {
+        assert(argc == 3);
+        environment(argv[2]); return 0;
+    }
     int watch = -1, stop = -1; pid_t observer = -1;
     const char *mode = argc == 3 ? argv[2] : "none";
     if (!strcmp(mode, "self")) watch = watch_tree();

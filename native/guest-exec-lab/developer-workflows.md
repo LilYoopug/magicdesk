@@ -48,22 +48,47 @@ workload timing excludes watch registration/draining and launch preparation;
 the report retains thermal/power snapshots and verifies events without overflow.
 It measures neither compilation nor PRoot.
 
-`benchmark_compile.py` compares the same Debian GCC toolchain and SQLite
+`benchmark_compile.py` compares the same Debian or Alpine GCC toolchain and SQLite
 amalgamation under native chroot, Termux PRoot and the installed guest runtime.
-It builds the standalone CLI and PIC shared library with `-O3 -flto`, serial
-`make -B -j1`, no compiler cache and a fixed compiler random seed. GNU time
+It builds the standalone CLI and PIC shared library with `-O3 -flto`,
+`make -B -jN` (`--jobs`, default 1), no compiler cache and a fixed compiler random seed. GNU time
 runs inside each environment around make, excluding rootfs preparation,
 transport, environment startup and subsequent SQL validation. Both generated
-program/library paths must execute successfully; output hashes are recorded.
+program/library paths must execute successfully; all five object/CLI/library
+hashes must match across measured builds, not merely produce plausible timings.
 
 `--workload metadata` checks 4,096 stat/open/fstat/read operations over a prepared
 tree, including actual inode identity, link count and bytes. `--workload spawn`
 checks 128 fork/exec/wait cycles of the same `/bin/true`. Fixture compilation and
 tree preparation remain outside timing. The native tree is prepared as the Termux
-owner so sequential chroot and PRoot runs can reuse it without ownership changes.
+owner; after each native chroot invocation, the runner restores ownership and
+the original SELinux context of this benchmark tree outside the timed interval.
+Do not run another workload against the same sysroot or store concurrently.
+
+`--workload file-stat`, `file-open` and `file-cycle` reuse the readiness fixture:
+respectively fstatat, openat/close, and create/close/rename/unlink, without file
+payload writes or fsync. `--iterations` defaults to 1,024 operations per block;
+`--file-blocks` defaults to eight consecutive blocks in one process. All blocks,
+including the first encounter with each syscall site, contribute to elapsed time.
+The report also retains first-block and tail timings. `poll` and `epoll` use one
+block of ready, zero-timeout calls; use `--iterations 1000000` to avoid timing a
+sub-millisecond sample. These workloads and metadata/spawn use their monotonic
+internal timing, not GNU time's centisecond-rounded wall time.
 Use `--modes guest-baseline guest --baseline-runtime REFERENCE_BUNDLE` for an
 interleaved comparison of two immutable guest bundles under the same shell UID.
 The reference bundle must support the same store and command contract.
+
+For dispatch diagnosis, `fixtures/dispatch-benchmark.c` separates fork-only
+from fork/exec of a minimal static or dynamic child. Build it with the guest
+compiler and Linux UAPI headers (`-O2 -UNDEBUG`, and `-static` for the static
+child). Examples:
+`./dispatch fork 128 none`, `./dispatch exec 128 none /bench/dispatch-static`,
+and `./dispatch poll 1000000 address`. `number` and `address` install two
+allow-all seccomp controls that differ only in reading the syscall number or
+instruction pointer. This distinguishes filter evaluation from userspace
+interception; it is a diagnostic fixture, not a substitute for the full
+application/compilation comparison. Record CPU state and alternate modes as
+in the main harness.
 
 Prepare a new build-only sysroot with the authenticated package helper:
 
@@ -74,25 +99,47 @@ python native/guest-exec-lab/benchmark_compile.py build/guest-compile \
     --sqlite PATH_TO_SQLITE_AMALGAMATION --runtime INSTALLED_GUEST_BUNDLE
 ```
 
+An independently prepared Alpine sysroot can use stock `apk add build-base time
+coreutils` and a `manifest.json` recording the rootfs URL/hash and package
+versions. Keep repository signature checking enabled. The runner imports it
+through the image service, preserving hardlinks; it does not extract it with
+Android shell `tar` into a writable guest root. `--guest-store` reuses an explicit
+prepared store only after checking all fixture and compiler hashes.
+
 The default is one excluded warmup and three measured builds per mode, with
 rotating order. Root is explicitly used only for chroot; its bind mounts live
 in a private mount namespace and disappear on exit. PRoot uses the current
 Termux UID with seccomp acceleration enabled and no fake-root extension. Guest
 requires the existing MCP command service to be UID 2000 and imports its own
-store from identical source bytes. Neither the APK nor its access setting is
+store from identical source bytes, with guest UID 0 but host UID 2000. Neither the APK nor its access setting is
 changed. The phone must remain awake throughout the comparison.
 
 The JSON report retains tool/package/source/runtime identities, process CPU
 affinity, wall/CPU times, thermal and CPU-frequency samples, power source,
 all outputs and artifact hashes. Keep charging state unchanged; a detected
 change leaves the report incomplete rather than mixing power conditions.
-Caches are warmed, not globally dropped; governors and CPU affinity are not
-changed. Wall time is the comparable end-to-end build metric. GNU time's child
+Caches are warmed, not globally dropped, and CPU governors are unchanged.
+`--cpu-mask f` explicitly limits each runtime and its descendants to CPU 0-3;
+without it, affinity is inherited. The guest script records its effective mask
+before and after every invocation. Changed masks, or a mismatch with the
+requested mask, invalidate the series. Endpoint agreement cannot detect a
+temporary mid-sample Android scheduling-group change; keep the device's app
+foreground/background state stable as well. CPU masks do not equalize Android
+scheduling priorities or SELinux domains between executor identities.
+Wall time is the comparable end-to-end build metric. GNU time's child
 CPU accounting does not include every external supervisor/filesystem service.
 The compile workload does not establish metadata-intensive performance; use
 the separate workloads rather than generalizing one result. None establishes
-GUI latency or cross-device speed claims. Very short native runs can reach
-GNU time's output resolution; do not infer precise ratios from those values.
+GUI latency or cross-device speed claims. Increase workload length instead of
+inferring precise ratios from very short, noisy samples.
+
+When chroot, PRoot and guest are all measured, `performanceTarget` records
+`sqrt(T_chroot * T_proot)` for that workload, the guest/target ratio and whether
+the median meets it. This is an optimization target, not an aggregate score or
+a substitute for workload correctness. Improvements elsewhere must also retain
+the existing `file-stat`, `file-open` and `file-cycle` performance: interleave
+the candidate with the previous fast bundle on the same store. Merely remaining
+below the geometric target does not excuse a file-loop regression.
 
 Use `--guest-statistics --modes guest` for a separately labelled diagnostic run
 with aggregate syscall/ptrace/stop counters, filesystem/SQLite elapsed costs,

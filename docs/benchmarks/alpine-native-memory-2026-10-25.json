@@ -1,0 +1,2979 @@
+{
+  "schema": 1,
+  "date": "2026-10-25",
+  "device": {
+    "manufacturer": "nubia",
+    "model": "NX809J",
+    "sdk": 36,
+    "release": "16"
+  },
+  "kernel": "Linux localhost 6.12.23-android16-5-gf1bdb13583da-ab13761046-4k #1 SMP PREEMPT Wed Jul  9 10:22:53 UTC 2025 aarch64 Toybox\n",
+  "repositoryHead": "2fed4f74c0822c328d357f7ba94a4014ef0a2f95",
+  "candidate": "uncommitted performance fixes; runtime SHA-256 identifies each measured bundle",
+  "manifest": {
+    "suite": "alpine-3.23.6",
+    "architecture": "aarch64",
+    "profile": "build-only",
+    "source": "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/aarch64/alpine-minirootfs-3.23.6-aarch64.tar.gz",
+    "sha256": "b17a57958e29735ff0e6e64254d958e65903687a70ca30cc430b33a965ad49d7",
+    "preparation": "Stock apk add --no-cache build-base time coreutils in a private native chroot; same tree imported for Shroot",
+    "trust": "Pinned rootfs SHA256 from installer; signed APK repositories using bundled Alpine keys",
+    "databaseSha256": "48a3e37317bbf6f86103e185934f67fa98a7b03e8848399aeaede26d0b98e684",
+    "packages": [
+      {
+        "name": "acl-libs",
+        "version": "2.3.2-r1",
+        "checksum": "Q1ivkuYFapCcA5bg0k0oim5cNWFuI="
+      },
+      {
+        "name": "alpine-baselayout",
+        "version": "3.7.2-r0",
+        "checksum": "Q1QkUOKD6u7R2NPH0hNZLIoLCqxGI="
+      },
+      {
+        "name": "alpine-baselayout-data",
+        "version": "3.7.2-r0",
+        "checksum": "Q1T7JfQG4z3Ng25B508cv6zEZtjmg="
+      },
+      {
+        "name": "alpine-keys",
+        "version": "2.6-r0",
+        "checksum": "Q1ttok1Zot0OOAMgV+EWlX5I5y9DQ="
+      },
+      {
+        "name": "alpine-release",
+        "version": "3.23.6-r0",
+        "checksum": "Q1QWFIC5mh4GHIl0wQr2hIVJdfTvA="
+      },
+      {
+        "name": "apk-tools",
+        "version": "3.0.8-r0",
+        "checksum": "Q1WiNQYOdbMTbUkU6FA0UT1xWVsp4="
+      },
+      {
+        "name": "binutils",
+        "version": "2.45.1-r0",
+        "checksum": "Q1SPhO4swKEzfaB6w3vd+EQKoO+pc="
+      },
+      {
+        "name": "build-base",
+        "version": "0.5-r3",
+        "checksum": "Q1VlQh+WQRjObE1kTHbfZRMBThwDg="
+      },
+      {
+        "name": "busybox",
+        "version": "1.37.0-r30",
+        "checksum": "Q1ikqlwHVQiBbHyd5Y5R6TMlf4pN8="
+      },
+      {
+        "name": "busybox-binsh",
+        "version": "1.37.0-r30",
+        "checksum": "Q1/YFiyYlIXezr4VKV5b+L7sCjd1o="
+      },
+      {
+        "name": "ca-certificates-bundle",
+        "version": "20260909-r0",
+        "checksum": "Q1dD/z5PZ+8Th/D8GkYvcdlRqP95A="
+      },
+      {
+        "name": "coreutils",
+        "version": "9.8-r1",
+        "checksum": "Q1s2rkMlkrMOPGh5dRUjVGwGlwyFQ="
+      },
+      {
+        "name": "coreutils-env",
+        "version": "9.8-r1",
+        "checksum": "Q1tTgCu4xa5lhScq1wvRevjlOjACU="
+      },
+      {
+        "name": "coreutils-fmt",
+        "version": "9.8-r1",
+        "checksum": "Q1vAvtgznKhcx6d23ow0lKupK/WZE="
+      },
+      {
+        "name": "coreutils-sha512sum",
+        "version": "9.8-r1",
+        "checksum": "Q1yjuyCdfCUp7e1yMVPSYP4i5kMIg="
+      },
+      {
+        "name": "file",
+        "version": "5.46-r2",
+        "checksum": "Q14D+UHake8eXGR6pGn8YojdzNrnw="
+      },
+      {
+        "name": "fortify-headers",
+        "version": "1.1-r5",
+        "checksum": "Q1vwaF5j6173raLe0bryGkSQIuhls="
+      },
+      {
+        "name": "g++",
+        "version": "15.2.0-r2",
+        "checksum": "Q1kI/Bwlk2v0dsZuNTIArjyyzAVjA="
+      },
+      {
+        "name": "gcc",
+        "version": "15.2.0-r2",
+        "checksum": "Q1s5CnLIh6RbGp9hspdWXnc+UDtGw="
+      },
+      {
+        "name": "gmp",
+        "version": "6.3.0-r4",
+        "checksum": "Q1sRW2NquDrocwlCPlJNVixQoialE="
+      },
+      {
+        "name": "isl26",
+        "version": "0.26-r1",
+        "checksum": "Q1l+3aWvWgB1ZPFanLIboXZg4xtUI="
+      },
+      {
+        "name": "jansson",
+        "version": "2.14.1-r0",
+        "checksum": "Q1QigZsLLSvKWk9t9yAZ7X+TXtBF0="
+      },
+      {
+        "name": "libapk",
+        "version": "3.0.8-r0",
+        "checksum": "Q1swdmYlzMDgGdvj1w0ZwzAMX24Ro="
+      },
+      {
+        "name": "libatomic",
+        "version": "15.2.0-r2",
+        "checksum": "Q1az+Mam79nZc2j3ykQMeM07FmMWs="
+      },
+      {
+        "name": "libattr",
+        "version": "2.5.2-r2",
+        "checksum": "Q1iXw8RER6/1TqPeQextx1FduYE8U="
+      },
+      {
+        "name": "libcrypto3",
+        "version": "3.5.8-r0",
+        "checksum": "Q1NqpCMuLCrNtmk8S8hQAc1KnPoOc="
+      },
+      {
+        "name": "libgcc",
+        "version": "15.2.0-r2",
+        "checksum": "Q1OaFN9E99Md/C/xx1zL6SP0ElxQ8="
+      },
+      {
+        "name": "libgomp",
+        "version": "15.2.0-r2",
+        "checksum": "Q1FmjuuUm21q0YY2f8h/1bNeK/weM="
+      },
+      {
+        "name": "libmagic",
+        "version": "5.46-r2",
+        "checksum": "Q1D212CUIUtSjzsZxGf0DzJGmXvGY="
+      },
+      {
+        "name": "libssl3",
+        "version": "3.5.8-r0",
+        "checksum": "Q1hx3hzCQRsEq2apjgQ+k/GK+X15s="
+      },
+      {
+        "name": "libstdc++",
+        "version": "15.2.0-r2",
+        "checksum": "Q1CiwhEijgPIBPIGazqvseyTWbYMM="
+      },
+      {
+        "name": "libstdc++-dev",
+        "version": "15.2.0-r2",
+        "checksum": "Q19Koik22RcdEX0WHya6ogJvEdC5I="
+      },
+      {
+        "name": "make",
+        "version": "4.4.1-r3",
+        "checksum": "Q1Bos2DGwC0/DbxBC5NJ10OWOdj1c="
+      },
+      {
+        "name": "mpc1",
+        "version": "1.3.1-r1",
+        "checksum": "Q10EW/XEsy9pvc65jYWftHs/dWG+Q="
+      },
+      {
+        "name": "mpfr4",
+        "version": "4.2.2-r0",
+        "checksum": "Q1FTIiT9bg3CN4MC3g8lOhixUdulk="
+      },
+      {
+        "name": "musl",
+        "version": "1.2.5-r24",
+        "checksum": "Q1Gpmv84P2QM7qzmrxAM68h3dvVVQ="
+      },
+      {
+        "name": "musl-dev",
+        "version": "1.2.5-r24",
+        "checksum": "Q1D7DWt6D+lxUMphwQdhPa0uTvxxg="
+      },
+      {
+        "name": "musl-utils",
+        "version": "1.2.5-r23",
+        "checksum": "Q1tciDNWavSBIvy8D7i3Vju1wL+fc="
+      },
+      {
+        "name": "patch",
+        "version": "2.8-r0",
+        "checksum": "Q1qAMuyswQD4RoRihIk2CMAZO0FkM="
+      },
+      {
+        "name": "scanelf",
+        "version": "1.3.8-r2",
+        "checksum": "Q1n864lrGFcx4BDLQ3sfHVol7hNqw="
+      },
+      {
+        "name": "skalibs-libs",
+        "version": "2.14.4.0-r0",
+        "checksum": "Q1WgeIIN1tp0gcOt0EDaJYOi7PcUM="
+      },
+      {
+        "name": "ssl_client",
+        "version": "1.37.0-r30",
+        "checksum": "Q1gy9qWYcbvxYTV3MWRqCzY5fVHes="
+      },
+      {
+        "name": "time",
+        "version": "1.9-r1",
+        "checksum": "Q19UbM92uY44MOgN9DJvS3HKDR1oc="
+      },
+      {
+        "name": "utmps-libs",
+        "version": "0.1.3.1-r0",
+        "checksum": "Q1vfpp2IakmatTWRhz5it4i0d6xt4="
+      },
+      {
+        "name": "zlib",
+        "version": "1.3.2-r0",
+        "checksum": "Q16KxKLHZrgH2jspuUJ44nsWpSfZk="
+      },
+      {
+        "name": "zstd-libs",
+        "version": "1.5.7-r2",
+        "checksum": "Q1ppY2frZMXRXfIPzp1r0Fgwz3TnE="
+      }
+    ]
+  },
+  "prootVersion": " _____ _____              ___\n|  __ \\  __ \\_____  _____|   |_\n|   __/     /  _  \\/  _  \\    _|\n|__|  |__|__\\_____/\\_____/\\____| 5.1.107.92\n\nbuilt-in accelerators: process_vm = yes, seccomp_filter = yes\n\nVisit http://proot.me for help, bug reports, suggestions, patchs, ...\nCopyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.\n",
+  "prootPackage": "proot\t5.1.107.92\n",
+  "compilerHashes": [
+    "7072485772de4833a8dc945964e08346b0d39509825c401927a71cff541bcd14",
+    "6749bd20454cc36dd791260343f2d96751e9c0e14890cc420d520f991685bc7a"
+  ],
+  "cpuFrequencyScope": "policy-wide command envelope, including startup/teardown; not per-thread frequency",
+  "workloads": [
+    {
+      "id": "e9d99a2cafb949bb8e61263bd0035ed6",
+      "workload": "compile",
+      "policy": {
+        "jobs": 4,
+        "iterations": 1024,
+        "fileBlocks": 8,
+        "compilerCache": false,
+        "dropPageCache": false,
+        "guestStatistics": false,
+        "warmupsPerMode": 1,
+        "rounds": 3,
+        "affinityPinned": true,
+        "cpuMask": "0xf",
+        "cpuGovernorChanged": false,
+        "timing": "monotonic loop time for microbenchmarks; GNU time around make for compilation",
+        "identities": {
+          "proot": 10601,
+          "chroot": 0,
+          "guest": 2000,
+          "guest-baseline": 2000
+        }
+      },
+      "summary": {
+        "chroot": {
+          "medianSeconds": 61.42,
+          "seconds": [
+            62.51,
+            61.42,
+            57.64
+          ]
+        },
+        "proot": {
+          "medianSeconds": 62.95,
+          "seconds": [
+            62.95,
+            63.38,
+            61.39
+          ]
+        },
+        "guest-baseline": {
+          "medianSeconds": 114.9,
+          "seconds": [
+            100.47,
+            115.78,
+            114.9
+          ]
+        },
+        "guest": {
+          "medianSeconds": 72.8,
+          "seconds": [
+            73.4,
+            72.8,
+            71.16
+          ]
+        }
+      },
+      "identicalArtifacts": true,
+      "sourceHashes": {
+        "sqlite3.c": "9512509b1bccb7461f79bea8aad6280ae4699e925fa4804381b71f59e7efb0c5",
+        "shell.c": "4a5bde1b3e00f873caa7e0e7a4def2ea656b7dfae6cad5fb1e9c0d8f44f4397a",
+        "sqlite3.h": "19585c8b5230e9d4f223bf31b709ece7b6a0bb3faf00d8310625d8e58cda1b1d",
+        "sqlite3ext.h": "ea81fb7bd05882e0e0b92c4d60f677b205f7f1fbf085f218b12f0b5b3f0b9e48",
+        "Makefile": "96d13a4a18c1f72414dc862ae0f5b185278cd3621e44d7e113887d37953f4b0e",
+        "run.sh": "647da510790b2276fd1b659f112eee0e9ae52985874c9b615671784235ec9dca",
+        "verify-library.c": "b94cffcec56f124380c1da125bf7fe7f8970cdf1525b02bc66de8f26c70bbc18",
+        "runtime-workloads.c": "02a5c4ea4e0020901eae861f30e9556dcc9fbb1d833b66db1f8fe42550b8c4b6",
+        "readiness-benchmark.c": "b8188f903056608a73085f379e9348fc9c5fcb79b5855dae5529f022576a71d3"
+      },
+      "performanceTarget": {
+        "formula": "sqrt(chroot * proot)",
+        "seconds": 62.180294306154586,
+        "guestOverTarget": 1.170788926175833,
+        "met": false
+      },
+      "runtimeHashes": {
+        "libmagicdesk_guest_bootstrap.so": "524d8c880ef415d673d57548dc00dcd1709b89f847eecba51610f547e39479ad",
+        "libmagicdesk_guest_image.so": "d89a14e1eb53424cc31b024c0c74beb8e2badec530affefad6aad49717919ec4",
+        "libmagicdesk_guest_run.so": "1dd2879cb5ed9a6e32f1dc0a7851fdc7693fa8bf84140a0fcdc25b27368b7c91",
+        "libmagicdesk_guest_supervisor.so": "d4ced12f1453bfd861946903ba5ec9ac604b439e5d3eab6bf1f28d6bd977462e"
+      },
+      "baselineRuntimeHashes": {
+        "libmagicdesk_guest_bootstrap.so": "5b1f0c888300037e8b64d2eef06128f013062025f44e851ef95d5286a35332a6",
+        "libmagicdesk_guest_image.so": "d89a14e1eb53424cc31b024c0c74beb8e2badec530affefad6aad49717919ec4",
+        "libmagicdesk_guest_run.so": "1dd2879cb5ed9a6e32f1dc0a7851fdc7693fa8bf84140a0fcdc25b27368b7c91",
+        "libmagicdesk_guest_service.so": "be35ecfbdf51a4cfb2b804b91eb29a47c0106daee4e1286045b79724f8203880",
+        "libmagicdesk_guest_supervisor.so": "6a648b15406d5656cd747f375192405036601a7915e502438a2007dcf9bd6194"
+      },
+      "samples": [
+        {
+          "mode": "chroot",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 41.57,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:06:13.643452+00:00",
+          "finishedUtc": "2026-10-25T16:06:56.818460+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2723960.971011077,
+              "endpointLimitsDiffer": true,
+              "before": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "proot",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 54.19,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:06:56.819678+00:00",
+          "finishedUtc": "2026-10-25T16:07:52.981039+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2096053.4689429712,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1900800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 100.06,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:07:52.982674+00:00",
+          "finishedUtc": "2026-10-25T16:09:34.810476+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2088581.3870776526,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 883200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "guest",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 62.51,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:09:34.811723+00:00",
+          "finishedUtc": "2026-10-25T16:10:39.477590+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2103899.2936744625,
+              "endpointLimitsDiffer": true,
+              "before": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 883200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "chroot",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 62.51,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:10:39.480922+00:00",
+          "finishedUtc": "2026-10-25T16:11:43.781308+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1777329.929078014,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              },
+              "after": {
+                "scaling_cur_freq": 1785600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "proot",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 62.95,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:11:43.784567+00:00",
+          "finishedUtc": "2026-10-25T16:12:48.077704+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1845231.3479623825,
+              "endpointLimitsDiffer": true,
+              "before": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              },
+              "after": {
+                "scaling_cur_freq": 3187200,
+                "scaling_min_freq": 1113600,
+                "scaling_max_freq": 3187200
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 100.47,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:12:48.078991+00:00",
+          "finishedUtc": "2026-10-25T16:14:30.771405+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2103755.5162241887,
+              "endpointLimitsDiffer": true,
+              "before": {
+                "scaling_cur_freq": 2227200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2611200
+              },
+              "after": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 73.4,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:14:30.774204+00:00",
+          "finishedUtc": "2026-10-25T16:15:46.365317+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1775387.670136109,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              },
+              "after": {
+                "scaling_cur_freq": 1785600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "proot",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 63.38,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:15:46.367288+00:00",
+          "finishedUtc": "2026-10-25T16:16:51.259497+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1782673.371856942,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1785600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              },
+              "after": {
+                "scaling_cur_freq": 1324800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 115.78,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:16:51.263747+00:00",
+          "finishedUtc": "2026-10-25T16:18:49.909808+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1769038.9787234042,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 883200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              },
+              "after": {
+                "scaling_cur_freq": 1324800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 72.8,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:18:49.915995+00:00",
+          "finishedUtc": "2026-10-25T16:20:05.039650+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1781269.699014712,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1785600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              },
+              "after": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "chroot",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 61.42,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:20:05.043510+00:00",
+          "finishedUtc": "2026-10-25T16:21:08.408478+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1773829.7790585975,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              },
+              "after": {
+                "scaling_cur_freq": 1785600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 114.9,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:21:08.414954+00:00",
+          "finishedUtc": "2026-10-25T16:23:06.007557+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1823793.991416309,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              },
+              "after": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 71.16,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:23:06.010869+00:00",
+          "finishedUtc": "2026-10-25T16:24:19.770416+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1799170.7772589948,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1555200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              },
+              "after": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "chroot",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 57.64,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:24:19.777551+00:00",
+          "finishedUtc": "2026-10-25T16:25:19.343249+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1869707.2671443194,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1324800,
+                "scaling_min_freq": 883200,
+                "scaling_max_freq": 1785600
+              },
+              "after": {
+                "scaling_cur_freq": 1785600,
+                "scaling_min_freq": 883200,
+                "scaling_max_freq": 1785600
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "proot",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 61.39,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:25:19.349094+00:00",
+          "finishedUtc": "2026-10-25T16:26:22.721816+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1821946.046511628,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              },
+              "after": {
+                "scaling_cur_freq": 1785600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        }
+      ]
+    },
+    {
+      "id": "5628bb25865844d8b7680a8782cdc3d5",
+      "workload": "file-stat",
+      "policy": {
+        "jobs": 4,
+        "iterations": 1024,
+        "fileBlocks": 16,
+        "compilerCache": false,
+        "dropPageCache": false,
+        "guestStatistics": false,
+        "warmupsPerMode": 1,
+        "rounds": 5,
+        "affinityPinned": true,
+        "cpuMask": "0xf",
+        "cpuGovernorChanged": false,
+        "timing": "monotonic loop time for microbenchmarks; GNU time around make for compilation",
+        "identities": {
+          "proot": 10601,
+          "chroot": 0,
+          "guest": 2000,
+          "guest-baseline": 2000
+        }
+      },
+      "summary": {
+        "guest-baseline": {
+          "medianSeconds": 0.078103282,
+          "seconds": [
+            0.100277137,
+            0.088945731,
+            0.078103282,
+            0.074944948,
+            0.074234169
+          ]
+        },
+        "guest": {
+          "medianSeconds": 0.085119531,
+          "seconds": [
+            0.072991407,
+            0.064581197,
+            0.085119531,
+            0.132914686,
+            0.101811924
+          ]
+        }
+      },
+      "identicalArtifacts": null,
+      "sourceHashes": {
+        "sqlite3.c": "9512509b1bccb7461f79bea8aad6280ae4699e925fa4804381b71f59e7efb0c5",
+        "shell.c": "4a5bde1b3e00f873caa7e0e7a4def2ea656b7dfae6cad5fb1e9c0d8f44f4397a",
+        "sqlite3.h": "19585c8b5230e9d4f223bf31b709ece7b6a0bb3faf00d8310625d8e58cda1b1d",
+        "sqlite3ext.h": "ea81fb7bd05882e0e0b92c4d60f677b205f7f1fbf085f218b12f0b5b3f0b9e48",
+        "Makefile": "96d13a4a18c1f72414dc862ae0f5b185278cd3621e44d7e113887d37953f4b0e",
+        "run.sh": "647da510790b2276fd1b659f112eee0e9ae52985874c9b615671784235ec9dca",
+        "verify-library.c": "b94cffcec56f124380c1da125bf7fe7f8970cdf1525b02bc66de8f26c70bbc18",
+        "runtime-workloads.c": "02a5c4ea4e0020901eae861f30e9556dcc9fbb1d833b66db1f8fe42550b8c4b6",
+        "readiness-benchmark.c": "b8188f903056608a73085f379e9348fc9c5fcb79b5855dae5529f022576a71d3"
+      },
+      "runtimeHashes": {
+        "libmagicdesk_guest_bootstrap.so": "524d8c880ef415d673d57548dc00dcd1709b89f847eecba51610f547e39479ad",
+        "libmagicdesk_guest_image.so": "d89a14e1eb53424cc31b024c0c74beb8e2badec530affefad6aad49717919ec4",
+        "libmagicdesk_guest_run.so": "1dd2879cb5ed9a6e32f1dc0a7851fdc7693fa8bf84140a0fcdc25b27368b7c91",
+        "libmagicdesk_guest_supervisor.so": "d4ced12f1453bfd861946903ba5ec9ac604b439e5d3eab6bf1f28d6bd977462e"
+      },
+      "baselineRuntimeHashes": {
+        "libmagicdesk_guest_bootstrap.so": "769138073813e73bd925835af2be9a78b6ecfefc869dadea841b1fec011019b3",
+        "libmagicdesk_guest_image.so": "d89a14e1eb53424cc31b024c0c74beb8e2badec530affefad6aad49717919ec4",
+        "libmagicdesk_guest_run.so": "1dd2879cb5ed9a6e32f1dc0a7851fdc7693fa8bf84140a0fcdc25b27368b7c91",
+        "libmagicdesk_guest_supervisor.so": "d32f577c237bf50fa4e02e29097f5dbad7ed226022b52594f6cabac7335e7dbd"
+      },
+      "samples": [
+        {
+          "mode": "guest-baseline",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 0.089817185,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:33:33.104941+00:00",
+          "finishedUtc": "2026-10-25T16:33:35.304374+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1412044.8,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1555200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 0.08280953,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:33:35.307280+00:00",
+          "finishedUtc": "2026-10-25T16:33:37.679880+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1292800.0,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 0.100277137,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:33:37.682411+00:00",
+          "finishedUtc": "2026-10-25T16:33:39.962738+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1381818.1818181819,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1324800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 0.072991407,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:33:39.964878+00:00",
+          "finishedUtc": "2026-10-25T16:33:42.154383+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1426683.8709677418,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 883200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 0.064581197,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:33:42.157363+00:00",
+          "finishedUtc": "2026-10-25T16:33:44.247438+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1754842.7184466019,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 0.088945731,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:33:44.250445+00:00",
+          "finishedUtc": "2026-10-25T16:33:46.136203+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1385184.7328244275,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 0.078103282,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:33:46.138049+00:00",
+          "finishedUtc": "2026-10-25T16:33:47.724288+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1922921.7391304348,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 883200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 0.085119531,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:33:47.728263+00:00",
+          "finishedUtc": "2026-10-25T16:33:50.017889+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1523781.8181818181,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 3,
+          "workSeconds": 0.132914686,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:33:50.023363+00:00",
+          "finishedUtc": "2026-10-25T16:33:52.249497+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1261916.7785234898,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 883200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 3,
+          "workSeconds": 0.074944948,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:33:52.252261+00:00",
+          "finishedUtc": "2026-10-25T16:33:53.946525+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2053270.5882352942,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1440000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 4,
+          "workSeconds": 0.074234169,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:33:53.952228+00:00",
+          "finishedUtc": "2026-10-25T16:33:56.304025+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1429879.0697674418,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 883200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 4,
+          "workSeconds": 0.101811924,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:33:56.311595+00:00",
+          "finishedUtc": "2026-10-25T16:33:58.872898+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1317991.4893617022,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 883200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        }
+      ]
+    },
+    {
+      "id": "55a245a443a549faaa13b1dd3ee2cdf5",
+      "workload": "file-open",
+      "policy": {
+        "jobs": 4,
+        "iterations": 1024,
+        "fileBlocks": 16,
+        "compilerCache": false,
+        "dropPageCache": false,
+        "guestStatistics": false,
+        "warmupsPerMode": 1,
+        "rounds": 5,
+        "affinityPinned": true,
+        "cpuMask": "0xf",
+        "cpuGovernorChanged": false,
+        "timing": "monotonic loop time for microbenchmarks; GNU time around make for compilation",
+        "identities": {
+          "proot": 10601,
+          "chroot": 0,
+          "guest": 2000,
+          "guest-baseline": 2000
+        }
+      },
+      "summary": {
+        "guest-baseline": {
+          "medianSeconds": 0.203161771,
+          "seconds": [
+            0.18402927,
+            0.156604427,
+            0.203161771,
+            0.205582656,
+            0.215302137
+          ]
+        },
+        "guest": {
+          "medianSeconds": 0.186524946,
+          "seconds": [
+            0.19575651,
+            0.189092081,
+            0.186524946,
+            0.185729219,
+            0.181922863
+          ]
+        }
+      },
+      "identicalArtifacts": null,
+      "sourceHashes": {
+        "sqlite3.c": "9512509b1bccb7461f79bea8aad6280ae4699e925fa4804381b71f59e7efb0c5",
+        "shell.c": "4a5bde1b3e00f873caa7e0e7a4def2ea656b7dfae6cad5fb1e9c0d8f44f4397a",
+        "sqlite3.h": "19585c8b5230e9d4f223bf31b709ece7b6a0bb3faf00d8310625d8e58cda1b1d",
+        "sqlite3ext.h": "ea81fb7bd05882e0e0b92c4d60f677b205f7f1fbf085f218b12f0b5b3f0b9e48",
+        "Makefile": "96d13a4a18c1f72414dc862ae0f5b185278cd3621e44d7e113887d37953f4b0e",
+        "run.sh": "647da510790b2276fd1b659f112eee0e9ae52985874c9b615671784235ec9dca",
+        "verify-library.c": "b94cffcec56f124380c1da125bf7fe7f8970cdf1525b02bc66de8f26c70bbc18",
+        "runtime-workloads.c": "02a5c4ea4e0020901eae861f30e9556dcc9fbb1d833b66db1f8fe42550b8c4b6",
+        "readiness-benchmark.c": "b8188f903056608a73085f379e9348fc9c5fcb79b5855dae5529f022576a71d3"
+      },
+      "runtimeHashes": {
+        "libmagicdesk_guest_bootstrap.so": "524d8c880ef415d673d57548dc00dcd1709b89f847eecba51610f547e39479ad",
+        "libmagicdesk_guest_image.so": "d89a14e1eb53424cc31b024c0c74beb8e2badec530affefad6aad49717919ec4",
+        "libmagicdesk_guest_run.so": "1dd2879cb5ed9a6e32f1dc0a7851fdc7693fa8bf84140a0fcdc25b27368b7c91",
+        "libmagicdesk_guest_supervisor.so": "d4ced12f1453bfd861946903ba5ec9ac604b439e5d3eab6bf1f28d6bd977462e"
+      },
+      "baselineRuntimeHashes": {
+        "libmagicdesk_guest_bootstrap.so": "769138073813e73bd925835af2be9a78b6ecfefc869dadea841b1fec011019b3",
+        "libmagicdesk_guest_image.so": "d89a14e1eb53424cc31b024c0c74beb8e2badec530affefad6aad49717919ec4",
+        "libmagicdesk_guest_run.so": "1dd2879cb5ed9a6e32f1dc0a7851fdc7693fa8bf84140a0fcdc25b27368b7c91",
+        "libmagicdesk_guest_supervisor.so": "d32f577c237bf50fa4e02e29097f5dbad7ed226022b52594f6cabac7335e7dbd"
+      },
+      "samples": [
+        {
+          "mode": "guest-baseline",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 0.194116402,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:03.906551+00:00",
+          "finishedUtc": "2026-10-25T16:34:06.214537+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1486549.6402877697,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 0.165325988,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:06.216793+00:00",
+          "finishedUtc": "2026-10-25T16:34:08.733244+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1299285.9060402685,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 883200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 0.18402927,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:08.735412+00:00",
+          "finishedUtc": "2026-10-25T16:34:10.969012+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1410659.1549295774,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 0.19575651,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:10.972265+00:00",
+          "finishedUtc": "2026-10-25T16:34:13.131920+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1401861.224489796,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1324800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 0.189092081,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:13.133419+00:00",
+          "finishedUtc": "2026-10-25T16:34:14.605810+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2065260.606060606,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 0.156604427,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:14.607513+00:00",
+          "finishedUtc": "2026-10-25T16:34:16.498732+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1825435.5140186916,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 0.203161771,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:16.502878+00:00",
+          "finishedUtc": "2026-10-25T16:34:18.796252+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1466742.857142857,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 0.186524946,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:18.800226+00:00",
+          "finishedUtc": "2026-10-25T16:34:20.985787+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1348734.2465753425,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 3,
+          "workSeconds": 0.185729219,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:20.990280+00:00",
+          "finishedUtc": "2026-10-25T16:34:22.881398+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1534845.112781955,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1324800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 3,
+          "workSeconds": 0.205582656,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:22.884015+00:00",
+          "finishedUtc": "2026-10-25T16:34:24.378907+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2100636.7346938774,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1440000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 4,
+          "workSeconds": 0.215302137,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:24.381577+00:00",
+          "finishedUtc": "2026-10-25T16:34:26.651265+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1609107.6923076923,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 4,
+          "workSeconds": 0.181922863,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:26.660188+00:00",
+          "finishedUtc": "2026-10-25T16:34:29.023662+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1361466.6666666667,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        }
+      ]
+    },
+    {
+      "id": "e14923d143d44e38b7344f19e8e38150",
+      "workload": "file-cycle",
+      "policy": {
+        "jobs": 4,
+        "iterations": 1024,
+        "fileBlocks": 16,
+        "compilerCache": false,
+        "dropPageCache": false,
+        "guestStatistics": false,
+        "warmupsPerMode": 1,
+        "rounds": 5,
+        "affinityPinned": true,
+        "cpuMask": "0xf",
+        "cpuGovernorChanged": false,
+        "timing": "monotonic loop time for microbenchmarks; GNU time around make for compilation",
+        "identities": {
+          "proot": 10601,
+          "chroot": 0,
+          "guest": 2000,
+          "guest-baseline": 2000
+        }
+      },
+      "summary": {
+        "guest-baseline": {
+          "medianSeconds": 1.648899529,
+          "seconds": [
+            1.661735988,
+            1.523228695,
+            1.606357867,
+            1.674015053,
+            1.648899529
+          ]
+        },
+        "guest": {
+          "medianSeconds": 1.619192187,
+          "seconds": [
+            1.666691666,
+            1.558933485,
+            1.427276614,
+            1.619192187,
+            1.6505333850000001
+          ]
+        }
+      },
+      "identicalArtifacts": null,
+      "sourceHashes": {
+        "sqlite3.c": "9512509b1bccb7461f79bea8aad6280ae4699e925fa4804381b71f59e7efb0c5",
+        "shell.c": "4a5bde1b3e00f873caa7e0e7a4def2ea656b7dfae6cad5fb1e9c0d8f44f4397a",
+        "sqlite3.h": "19585c8b5230e9d4f223bf31b709ece7b6a0bb3faf00d8310625d8e58cda1b1d",
+        "sqlite3ext.h": "ea81fb7bd05882e0e0b92c4d60f677b205f7f1fbf085f218b12f0b5b3f0b9e48",
+        "Makefile": "96d13a4a18c1f72414dc862ae0f5b185278cd3621e44d7e113887d37953f4b0e",
+        "run.sh": "647da510790b2276fd1b659f112eee0e9ae52985874c9b615671784235ec9dca",
+        "verify-library.c": "b94cffcec56f124380c1da125bf7fe7f8970cdf1525b02bc66de8f26c70bbc18",
+        "runtime-workloads.c": "02a5c4ea4e0020901eae861f30e9556dcc9fbb1d833b66db1f8fe42550b8c4b6",
+        "readiness-benchmark.c": "b8188f903056608a73085f379e9348fc9c5fcb79b5855dae5529f022576a71d3"
+      },
+      "runtimeHashes": {
+        "libmagicdesk_guest_bootstrap.so": "524d8c880ef415d673d57548dc00dcd1709b89f847eecba51610f547e39479ad",
+        "libmagicdesk_guest_image.so": "d89a14e1eb53424cc31b024c0c74beb8e2badec530affefad6aad49717919ec4",
+        "libmagicdesk_guest_run.so": "1dd2879cb5ed9a6e32f1dc0a7851fdc7693fa8bf84140a0fcdc25b27368b7c91",
+        "libmagicdesk_guest_supervisor.so": "d4ced12f1453bfd861946903ba5ec9ac604b439e5d3eab6bf1f28d6bd977462e"
+      },
+      "baselineRuntimeHashes": {
+        "libmagicdesk_guest_bootstrap.so": "769138073813e73bd925835af2be9a78b6ecfefc869dadea841b1fec011019b3",
+        "libmagicdesk_guest_image.so": "d89a14e1eb53424cc31b024c0c74beb8e2badec530affefad6aad49717919ec4",
+        "libmagicdesk_guest_run.so": "1dd2879cb5ed9a6e32f1dc0a7851fdc7693fa8bf84140a0fcdc25b27368b7c91",
+        "libmagicdesk_guest_supervisor.so": "d32f577c237bf50fa4e02e29097f5dbad7ed226022b52594f6cabac7335e7dbd"
+      },
+      "samples": [
+        {
+          "mode": "guest-baseline",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 1.691499638,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:33.959303+00:00",
+          "finishedUtc": "2026-10-25T16:34:37.984480+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1759547.4747474748,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 1.752092551,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:37.987060+00:00",
+          "finishedUtc": "2026-10-25T16:34:41.942725+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1767155.4098360655,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 883200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 1.661735988,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:41.944878+00:00",
+          "finishedUtc": "2026-10-25T16:34:45.734264+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1790836.3636363635,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 1.666691666,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:45.736473+00:00",
+          "finishedUtc": "2026-10-25T16:34:49.726734+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1744466.440677966,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1440000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 1.558933485,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:49.730225+00:00",
+          "finishedUtc": "2026-10-25T16:34:53.754816+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1674097.2972972973,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 1.523228695,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:53.759401+00:00",
+          "finishedUtc": "2026-10-25T16:34:57.468968+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1692390.3114186851,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1324800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1324800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 1.606357867,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:34:57.471629+00:00",
+          "finishedUtc": "2026-10-25T16:35:01.035090+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1808069.5652173914,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 1.427276614,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:35:01.039544+00:00",
+          "finishedUtc": "2026-10-25T16:35:04.771835+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1699550.3649635036,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1440000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1996800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 3,
+          "workSeconds": 1.619192187,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:35:04.774338+00:00",
+          "finishedUtc": "2026-10-25T16:35:08.692587+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1795637.894736842,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1440000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 3,
+          "workSeconds": 1.674015053,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:35:08.698214+00:00",
+          "finishedUtc": "2026-10-25T16:35:12.506877+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1818897.902097902,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 4,
+          "workSeconds": 1.648899529,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:35:12.511067+00:00",
+          "finishedUtc": "2026-10-25T16:35:16.440296+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1744316.723549488,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1324800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 4,
+          "workSeconds": 1.6505333850000001,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:35:16.448640+00:00",
+          "finishedUtc": "2026-10-25T16:35:20.317187+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1723167.7852348993,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        }
+      ]
+    },
+    {
+      "id": "8e1e0d9afe5e4fd0a9a917fa83ce6b54",
+      "workload": "file-stat",
+      "policy": {
+        "jobs": 1,
+        "iterations": 1024,
+        "fileBlocks": 64,
+        "compilerCache": false,
+        "dropPageCache": false,
+        "guestStatistics": false,
+        "warmupsPerMode": 1,
+        "rounds": 9,
+        "affinityPinned": true,
+        "cpuMask": "0xf",
+        "cpuGovernorChanged": false,
+        "timing": "monotonic loop time for microbenchmarks; GNU time around make for compilation",
+        "identities": {
+          "proot": 10601,
+          "chroot": 0,
+          "guest": 2000,
+          "guest-baseline": 2000
+        }
+      },
+      "summary": {
+        "guest": {
+          "medianSeconds": 0.315770359,
+          "seconds": [
+            0.30776984,
+            0.310591562,
+            0.322349635,
+            0.315770359,
+            0.287717706,
+            0.358718599,
+            0.3132875,
+            0.319220421,
+            0.33473261
+          ]
+        },
+        "guest-baseline": {
+          "medianSeconds": 0.317800834,
+          "seconds": [
+            0.334142661,
+            0.326645839,
+            0.317800834,
+            0.355749737,
+            0.336196509,
+            0.267411982,
+            0.291794844,
+            0.2755375,
+            0.268988383
+          ]
+        }
+      },
+      "identicalArtifacts": null,
+      "sourceHashes": {
+        "sqlite3.c": "9512509b1bccb7461f79bea8aad6280ae4699e925fa4804381b71f59e7efb0c5",
+        "shell.c": "4a5bde1b3e00f873caa7e0e7a4def2ea656b7dfae6cad5fb1e9c0d8f44f4397a",
+        "sqlite3.h": "19585c8b5230e9d4f223bf31b709ece7b6a0bb3faf00d8310625d8e58cda1b1d",
+        "sqlite3ext.h": "ea81fb7bd05882e0e0b92c4d60f677b205f7f1fbf085f218b12f0b5b3f0b9e48",
+        "Makefile": "96d13a4a18c1f72414dc862ae0f5b185278cd3621e44d7e113887d37953f4b0e",
+        "run.sh": "647da510790b2276fd1b659f112eee0e9ae52985874c9b615671784235ec9dca",
+        "verify-library.c": "b94cffcec56f124380c1da125bf7fe7f8970cdf1525b02bc66de8f26c70bbc18",
+        "runtime-workloads.c": "02a5c4ea4e0020901eae861f30e9556dcc9fbb1d833b66db1f8fe42550b8c4b6",
+        "readiness-benchmark.c": "b8188f903056608a73085f379e9348fc9c5fcb79b5855dae5529f022576a71d3"
+      },
+      "runtimeHashes": {
+        "libmagicdesk_guest_bootstrap.so": "524d8c880ef415d673d57548dc00dcd1709b89f847eecba51610f547e39479ad",
+        "libmagicdesk_guest_image.so": "d89a14e1eb53424cc31b024c0c74beb8e2badec530affefad6aad49717919ec4",
+        "libmagicdesk_guest_run.so": "1dd2879cb5ed9a6e32f1dc0a7851fdc7693fa8bf84140a0fcdc25b27368b7c91",
+        "libmagicdesk_guest_supervisor.so": "d4ced12f1453bfd861946903ba5ec9ac604b439e5d3eab6bf1f28d6bd977462e"
+      },
+      "baselineRuntimeHashes": {
+        "libmagicdesk_guest_bootstrap.so": "769138073813e73bd925835af2be9a78b6ecfefc869dadea841b1fec011019b3",
+        "libmagicdesk_guest_image.so": "d89a14e1eb53424cc31b024c0c74beb8e2badec530affefad6aad49717919ec4",
+        "libmagicdesk_guest_run.so": "1dd2879cb5ed9a6e32f1dc0a7851fdc7693fa8bf84140a0fcdc25b27368b7c91",
+        "libmagicdesk_guest_supervisor.so": "d32f577c237bf50fa4e02e29097f5dbad7ed226022b52594f6cabac7335e7dbd"
+      },
+      "samples": [
+        {
+          "mode": "guest",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 0.27739452800000003,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:37:38.369569+00:00",
+          "finishedUtc": "2026-10-25T16:37:40.868669+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1496576.0,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1324800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 0.314339847,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:37:40.874657+00:00",
+          "finishedUtc": "2026-10-25T16:37:43.529953+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1470015.1898734176,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 0.30776984,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:37:43.534833+00:00",
+          "finishedUtc": "2026-10-25T16:37:46.072369+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1364114.2857142857,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1324800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 0.334142661,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:37:46.079481+00:00",
+          "finishedUtc": "2026-10-25T16:37:48.635917+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1422684.662576687,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 0.326645839,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:37:48.642961+00:00",
+          "finishedUtc": "2026-10-25T16:37:51.271046+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1370971.4285714286,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1555200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 0.310591562,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:37:51.277913+00:00",
+          "finishedUtc": "2026-10-25T16:37:53.950674+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1405789.0909090908,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1440000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 0.322349635,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:37:53.961295+00:00",
+          "finishedUtc": "2026-10-25T16:37:56.477423+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1536619.3548387096,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 0.317800834,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:37:56.482420+00:00",
+          "finishedUtc": "2026-10-25T16:37:59.103329+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1421035.5828220858,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 3,
+          "workSeconds": 0.355749737,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:37:59.117548+00:00",
+          "finishedUtc": "2026-10-25T16:38:01.605474+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1566619.6078431373,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1324800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1900800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 3,
+          "workSeconds": 0.315770359,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:38:01.620713+00:00",
+          "finishedUtc": "2026-10-25T16:38:04.016523+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1496596.0784313725,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 4,
+          "workSeconds": 0.287717706,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:38:04.031683+00:00",
+          "finishedUtc": "2026-10-25T16:38:06.174651+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1486863.1578947369,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 4,
+          "workSeconds": 0.336196509,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:38:06.181557+00:00",
+          "finishedUtc": "2026-10-25T16:38:08.271679+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1540862.3376623376,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 5,
+          "workSeconds": 0.267411982,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:38:08.279020+00:00",
+          "finishedUtc": "2026-10-25T16:38:09.854440+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2098338.4615384615,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1996800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 5,
+          "workSeconds": 0.358718599,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:38:09.862341+00:00",
+          "finishedUtc": "2026-10-25T16:38:12.562768+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1459665.4545454546,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1324800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 6,
+          "workSeconds": 0.3132875,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:38:12.580952+00:00",
+          "finishedUtc": "2026-10-25T16:38:14.735164+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1666946.762589928,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 6,
+          "workSeconds": 0.291794844,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:38:14.759504+00:00",
+          "finishedUtc": "2026-10-25T16:38:17.481950+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1439880.0,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 883200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 7,
+          "workSeconds": 0.2755375,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:38:17.502973+00:00",
+          "finishedUtc": "2026-10-25T16:38:19.916847+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1471608.163265306,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1324800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1670400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 7,
+          "workSeconds": 0.319220421,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:38:19.926992+00:00",
+          "finishedUtc": "2026-10-25T16:38:22.243389+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1513600.0,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1324800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 8,
+          "workSeconds": 0.33473261,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:38:22.267388+00:00",
+          "finishedUtc": "2026-10-25T16:38:24.852907+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1405879.5180722892,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 8,
+          "workSeconds": 0.268988383,
+          "affinity": {
+            "before": "0f",
+            "after": "0f"
+          },
+          "startedUtc": "2026-10-25T16:38:24.867605+00:00",
+          "finishedUtc": "2026-10-25T16:38:27.294050+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1682564.8854961833,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        }
+      ]
+    }
+  ]
+}

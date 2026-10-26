@@ -1,0 +1,1245 @@
+{
+  "schema": 1,
+  "date": "2026-10-26",
+  "device": {
+    "manufacturer": "nubia",
+    "model": "NX809J",
+    "sdk": 36,
+    "release": "16"
+  },
+  "kernel": "Linux localhost 6.12.23-android16-5-gf1bdb13583da-ab13761046-4k #1 SMP PREEMPT Wed Jul  9 10:22:53 UTC 2025 aarch64 Toybox\n",
+  "repositoryHead": "2fed4f74c0822c328d357f7ba94a4014ef0a2f95",
+  "candidate": "uncommitted performance fixes; runtime SHA-256 identifies each measured bundle",
+  "manifest": {
+    "suite": "alpine-3.23.6",
+    "architecture": "aarch64",
+    "profile": "build-only",
+    "source": "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/aarch64/alpine-minirootfs-3.23.6-aarch64.tar.gz",
+    "sha256": "b17a57958e29735ff0e6e64254d958e65903687a70ca30cc430b33a965ad49d7",
+    "preparation": "Stock apk add --no-cache build-base time coreutils in a private native chroot; same tree imported for Shroot",
+    "trust": "Pinned rootfs SHA256 from installer; signed APK repositories using bundled Alpine keys",
+    "databaseSha256": "48a3e37317bbf6f86103e185934f67fa98a7b03e8848399aeaede26d0b98e684",
+    "packages": [
+      {
+        "name": "acl-libs",
+        "version": "2.3.2-r1",
+        "checksum": "Q1ivkuYFapCcA5bg0k0oim5cNWFuI="
+      },
+      {
+        "name": "alpine-baselayout",
+        "version": "3.7.2-r0",
+        "checksum": "Q1QkUOKD6u7R2NPH0hNZLIoLCqxGI="
+      },
+      {
+        "name": "alpine-baselayout-data",
+        "version": "3.7.2-r0",
+        "checksum": "Q1T7JfQG4z3Ng25B508cv6zEZtjmg="
+      },
+      {
+        "name": "alpine-keys",
+        "version": "2.6-r0",
+        "checksum": "Q1ttok1Zot0OOAMgV+EWlX5I5y9DQ="
+      },
+      {
+        "name": "alpine-release",
+        "version": "3.23.6-r0",
+        "checksum": "Q1QWFIC5mh4GHIl0wQr2hIVJdfTvA="
+      },
+      {
+        "name": "apk-tools",
+        "version": "3.0.8-r0",
+        "checksum": "Q1WiNQYOdbMTbUkU6FA0UT1xWVsp4="
+      },
+      {
+        "name": "binutils",
+        "version": "2.45.1-r0",
+        "checksum": "Q1SPhO4swKEzfaB6w3vd+EQKoO+pc="
+      },
+      {
+        "name": "build-base",
+        "version": "0.5-r3",
+        "checksum": "Q1VlQh+WQRjObE1kTHbfZRMBThwDg="
+      },
+      {
+        "name": "busybox",
+        "version": "1.37.0-r30",
+        "checksum": "Q1ikqlwHVQiBbHyd5Y5R6TMlf4pN8="
+      },
+      {
+        "name": "busybox-binsh",
+        "version": "1.37.0-r30",
+        "checksum": "Q1/YFiyYlIXezr4VKV5b+L7sCjd1o="
+      },
+      {
+        "name": "ca-certificates-bundle",
+        "version": "20260909-r0",
+        "checksum": "Q1dD/z5PZ+8Th/D8GkYvcdlRqP95A="
+      },
+      {
+        "name": "coreutils",
+        "version": "9.8-r1",
+        "checksum": "Q1s2rkMlkrMOPGh5dRUjVGwGlwyFQ="
+      },
+      {
+        "name": "coreutils-env",
+        "version": "9.8-r1",
+        "checksum": "Q1tTgCu4xa5lhScq1wvRevjlOjACU="
+      },
+      {
+        "name": "coreutils-fmt",
+        "version": "9.8-r1",
+        "checksum": "Q1vAvtgznKhcx6d23ow0lKupK/WZE="
+      },
+      {
+        "name": "coreutils-sha512sum",
+        "version": "9.8-r1",
+        "checksum": "Q1yjuyCdfCUp7e1yMVPSYP4i5kMIg="
+      },
+      {
+        "name": "file",
+        "version": "5.46-r2",
+        "checksum": "Q14D+UHake8eXGR6pGn8YojdzNrnw="
+      },
+      {
+        "name": "fortify-headers",
+        "version": "1.1-r5",
+        "checksum": "Q1vwaF5j6173raLe0bryGkSQIuhls="
+      },
+      {
+        "name": "g++",
+        "version": "15.2.0-r2",
+        "checksum": "Q1kI/Bwlk2v0dsZuNTIArjyyzAVjA="
+      },
+      {
+        "name": "gcc",
+        "version": "15.2.0-r2",
+        "checksum": "Q1s5CnLIh6RbGp9hspdWXnc+UDtGw="
+      },
+      {
+        "name": "gmp",
+        "version": "6.3.0-r4",
+        "checksum": "Q1sRW2NquDrocwlCPlJNVixQoialE="
+      },
+      {
+        "name": "isl26",
+        "version": "0.26-r1",
+        "checksum": "Q1l+3aWvWgB1ZPFanLIboXZg4xtUI="
+      },
+      {
+        "name": "jansson",
+        "version": "2.14.1-r0",
+        "checksum": "Q1QigZsLLSvKWk9t9yAZ7X+TXtBF0="
+      },
+      {
+        "name": "libapk",
+        "version": "3.0.8-r0",
+        "checksum": "Q1swdmYlzMDgGdvj1w0ZwzAMX24Ro="
+      },
+      {
+        "name": "libatomic",
+        "version": "15.2.0-r2",
+        "checksum": "Q1az+Mam79nZc2j3ykQMeM07FmMWs="
+      },
+      {
+        "name": "libattr",
+        "version": "2.5.2-r2",
+        "checksum": "Q1iXw8RER6/1TqPeQextx1FduYE8U="
+      },
+      {
+        "name": "libcrypto3",
+        "version": "3.5.8-r0",
+        "checksum": "Q1NqpCMuLCrNtmk8S8hQAc1KnPoOc="
+      },
+      {
+        "name": "libgcc",
+        "version": "15.2.0-r2",
+        "checksum": "Q1OaFN9E99Md/C/xx1zL6SP0ElxQ8="
+      },
+      {
+        "name": "libgomp",
+        "version": "15.2.0-r2",
+        "checksum": "Q1FmjuuUm21q0YY2f8h/1bNeK/weM="
+      },
+      {
+        "name": "libmagic",
+        "version": "5.46-r2",
+        "checksum": "Q1D212CUIUtSjzsZxGf0DzJGmXvGY="
+      },
+      {
+        "name": "libssl3",
+        "version": "3.5.8-r0",
+        "checksum": "Q1hx3hzCQRsEq2apjgQ+k/GK+X15s="
+      },
+      {
+        "name": "libstdc++",
+        "version": "15.2.0-r2",
+        "checksum": "Q1CiwhEijgPIBPIGazqvseyTWbYMM="
+      },
+      {
+        "name": "libstdc++-dev",
+        "version": "15.2.0-r2",
+        "checksum": "Q19Koik22RcdEX0WHya6ogJvEdC5I="
+      },
+      {
+        "name": "make",
+        "version": "4.4.1-r3",
+        "checksum": "Q1Bos2DGwC0/DbxBC5NJ10OWOdj1c="
+      },
+      {
+        "name": "mpc1",
+        "version": "1.3.1-r1",
+        "checksum": "Q10EW/XEsy9pvc65jYWftHs/dWG+Q="
+      },
+      {
+        "name": "mpfr4",
+        "version": "4.2.2-r0",
+        "checksum": "Q1FTIiT9bg3CN4MC3g8lOhixUdulk="
+      },
+      {
+        "name": "musl",
+        "version": "1.2.5-r24",
+        "checksum": "Q1Gpmv84P2QM7qzmrxAM68h3dvVVQ="
+      },
+      {
+        "name": "musl-dev",
+        "version": "1.2.5-r24",
+        "checksum": "Q1D7DWt6D+lxUMphwQdhPa0uTvxxg="
+      },
+      {
+        "name": "musl-utils",
+        "version": "1.2.5-r23",
+        "checksum": "Q1tciDNWavSBIvy8D7i3Vju1wL+fc="
+      },
+      {
+        "name": "patch",
+        "version": "2.8-r0",
+        "checksum": "Q1qAMuyswQD4RoRihIk2CMAZO0FkM="
+      },
+      {
+        "name": "scanelf",
+        "version": "1.3.8-r2",
+        "checksum": "Q1n864lrGFcx4BDLQ3sfHVol7hNqw="
+      },
+      {
+        "name": "skalibs-libs",
+        "version": "2.14.4.0-r0",
+        "checksum": "Q1WgeIIN1tp0gcOt0EDaJYOi7PcUM="
+      },
+      {
+        "name": "ssl_client",
+        "version": "1.37.0-r30",
+        "checksum": "Q1gy9qWYcbvxYTV3MWRqCzY5fVHes="
+      },
+      {
+        "name": "time",
+        "version": "1.9-r1",
+        "checksum": "Q19UbM92uY44MOgN9DJvS3HKDR1oc="
+      },
+      {
+        "name": "utmps-libs",
+        "version": "0.1.3.1-r0",
+        "checksum": "Q1vfpp2IakmatTWRhz5it4i0d6xt4="
+      },
+      {
+        "name": "zlib",
+        "version": "1.3.2-r0",
+        "checksum": "Q16KxKLHZrgH2jspuUJ44nsWpSfZk="
+      },
+      {
+        "name": "zstd-libs",
+        "version": "1.5.7-r2",
+        "checksum": "Q1ppY2frZMXRXfIPzp1r0Fgwz3TnE="
+      }
+    ]
+  },
+  "prootVersion": " _____ _____              ___\n|  __ \\  __ \\_____  _____|   |_\n|   __/     /  _  \\/  _  \\    _|\n|__|  |__|__\\_____/\\_____/\\____| 5.1.107.92\n\nbuilt-in accelerators: process_vm = yes, seccomp_filter = yes\n\nVisit http://proot.me for help, bug reports, suggestions, patchs, ...\nCopyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.\n",
+  "prootPackage": "proot\t5.1.107.92\n",
+  "compilerHashes": [
+    "7072485772de4833a8dc945964e08346b0d39509825c401927a71cff541bcd14",
+    "6749bd20454cc36dd791260343f2d96751e9c0e14890cc420d520f991685bc7a"
+  ],
+  "cpuFrequencyScope": "policy-wide command envelope, including startup/teardown; not per-thread frequency",
+  "workloads": [
+    {
+      "id": "2ce52d160afa40859e862b465e10c75c",
+      "workload": "file-cycle",
+      "policy": {
+        "jobs": 4,
+        "iterations": 1024,
+        "fileBlocks": 16,
+        "compilerCache": false,
+        "dropPageCache": false,
+        "guestStatistics": false,
+        "preopenProc": false,
+        "affinityObservation": "sched_getaffinity/getpriority in an untimed child",
+        "warmupsPerMode": 1,
+        "rounds": 5,
+        "affinityPinned": true,
+        "cpuMask": "0x3",
+        "cpuGovernorChanged": false,
+        "nice": 0,
+        "hostNice": -10,
+        "timing": "monotonic loop time for microbenchmarks; GNU time around make for compilation",
+        "identities": {
+          "proot": 10601,
+          "chroot": 0,
+          "guest": 2000,
+          "guest-baseline": 2000
+        }
+      },
+      "summary": {
+        "guest-baseline": {
+          "medianSeconds": 1.624379531,
+          "seconds": [
+            1.624379531,
+            1.815013279,
+            1.569650938,
+            1.638538228,
+            1.601898803
+          ]
+        },
+        "guest": {
+          "medianSeconds": 1.615957605,
+          "seconds": [
+            1.535048803,
+            1.628454426,
+            1.563972189,
+            1.615957605,
+            1.667540521
+          ]
+        }
+      },
+      "identicalArtifacts": null,
+      "sourceHashes": {
+        "sqlite3.c": "9512509b1bccb7461f79bea8aad6280ae4699e925fa4804381b71f59e7efb0c5",
+        "shell.c": "4a5bde1b3e00f873caa7e0e7a4def2ea656b7dfae6cad5fb1e9c0d8f44f4397a",
+        "sqlite3.h": "19585c8b5230e9d4f223bf31b709ece7b6a0bb3faf00d8310625d8e58cda1b1d",
+        "sqlite3ext.h": "ea81fb7bd05882e0e0b92c4d60f677b205f7f1fbf085f218b12f0b5b3f0b9e48",
+        "Makefile": "96d13a4a18c1f72414dc862ae0f5b185278cd3621e44d7e113887d37953f4b0e",
+        "run.sh": "148b76801ba5d887f613143c653ef8d095e5d4d4523bc0bfb04884f58f27203a",
+        "verify-library.c": "b94cffcec56f124380c1da125bf7fe7f8970cdf1525b02bc66de8f26c70bbc18",
+        "runtime-workloads.c": "c4dd8b39e0715be0f4f825f3b1dfdb4d7e109c2621222e6f0139d3f1b3d5a319",
+        "readiness-benchmark.c": "e566bb78b81bd5a0391fb00de61544ceabe0e3848d84d52e3062192d3fc898f7"
+      },
+      "runtimeHashes": {
+        "libmagicdesk_guest_bootstrap.so": "8b35cef212d28ef713369b007eab4ff31f14f184f79950d9a51958a1c5c92926",
+        "libmagicdesk_guest_image.so": "a263df7410152b01debd4c8e22564b1fef0b7b47018bbeb5ecdd663595edf80e",
+        "libmagicdesk_guest_run.so": "1dd2879cb5ed9a6e32f1dc0a7851fdc7693fa8bf84140a0fcdc25b27368b7c91",
+        "libmagicdesk_guest_supervisor.so": "cd23323ca09e34a7b3d40a6e5c66ef7bcc3ccfeaf7f0ab45577ab49aa2f0ea16",
+        "libmagicdesk_guest_supervisor_state.so": "654499f642fc3904a0a29640a4a22be2da25898a2db96687b6f9519ab9f0465f",
+        "libmagicdesk_guest_task_wait.so": "465d8b6c4b698c399658f00ed7d64d3b4cb426e90094e41c3505bfe684619a02",
+        "libmagicdesk_guest_task_wait_live.so": "6c7ab8d707a9fdf740c87c8a64dbccaebd61d6e317759c807b64dd2ea998e7f9"
+      },
+      "baselineRuntimeHashes": {
+        "libmagicdesk_guest_bootstrap.so": "b509e4b7f04b5883235c5ff7cb61f11d6579dcd310c75d7847423873bf9f09a9",
+        "libmagicdesk_guest_image.so": "1c5fc9680b3d0e909e8065dd4165eaf15fedc8ccbb53f6e2d0351812e9b7707c",
+        "libmagicdesk_guest_run.so": "1dd2879cb5ed9a6e32f1dc0a7851fdc7693fa8bf84140a0fcdc25b27368b7c91",
+        "libmagicdesk_guest_supervisor.so": "46a9cfcb67db66c9e916b72845786d0ef43daf05f6c97407a1153889e30791fa",
+        "libmagicdesk_guest_test_cooperative_native.so": "b0366487a554f93f80326dc01700bc2c95ffa32e9622a56512081f0ef5c6609a",
+        "libmagicdesk_guest_test_svc_patch.so": "dd304a6f13142e3349553409b340dd60f2cc90cc204a22814d2386032db15b5b"
+      },
+      "samples": [
+        {
+          "mode": "guest-baseline",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 1.522527972,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:36:03.389997+00:00",
+          "finishedUtc": "2026-10-26T05:36:06.851653+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1641066.6666666667,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 1.656894425,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:36:06.854162+00:00",
+          "finishedUtc": "2026-10-26T05:36:10.559363+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1655083.9694656488,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 1.624379531,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:36:10.561878+00:00",
+          "finishedUtc": "2026-10-26T05:36:14.150185+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1680630.1158301157,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 883200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1900800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 1.535048803,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:36:14.152560+00:00",
+          "finishedUtc": "2026-10-26T05:36:17.597924+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1739724.5901639345,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 883200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 1.628454426,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:36:17.599987+00:00",
+          "finishedUtc": "2026-10-26T05:36:20.423919+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2099840.0,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 1.815013279,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:36:20.425730+00:00",
+          "finishedUtc": "2026-10-26T05:36:23.576394+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2074929.87012987,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 1.569650938,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:36:23.580903+00:00",
+          "finishedUtc": "2026-10-26T05:36:27.006864+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1829213.7931034483,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 1.563972189,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:36:27.010480+00:00",
+          "finishedUtc": "2026-10-26T05:36:30.268292+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1857057.391304348,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1440000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 3,
+          "workSeconds": 1.615957605,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:36:30.275194+00:00",
+          "finishedUtc": "2026-10-26T05:36:33.502098+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1802359.3220338982,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1555200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 3,
+          "workSeconds": 1.638538228,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:36:33.509261+00:00",
+          "finishedUtc": "2026-10-26T05:36:36.982086+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1662004.5627376426,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest-baseline",
+          "phase": "measured",
+          "round": 4,
+          "workSeconds": 1.601898803,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:36:36.988058+00:00",
+          "finishedUtc": "2026-10-26T05:36:40.656344+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1676598.4251968504,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 4,
+          "workSeconds": 1.667540521,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:36:40.663997+00:00",
+          "finishedUtc": "2026-10-26T05:36:44.319253+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1719845.5598455598,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1785600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {}
+        }
+      ]
+    },
+    {
+      "id": "1511a1b751c4425190726fa9c0ff6211",
+      "workload": "compile",
+      "policy": {
+        "jobs": 4,
+        "iterations": 1024,
+        "fileBlocks": 8,
+        "compilerCache": false,
+        "dropPageCache": false,
+        "guestStatistics": false,
+        "preopenProc": false,
+        "affinityObservation": "sched_getaffinity/getpriority in an untimed child",
+        "warmupsPerMode": 1,
+        "rounds": 3,
+        "affinityPinned": true,
+        "cpuMask": "0x3",
+        "cpuGovernorChanged": false,
+        "nice": 0,
+        "hostNice": -10,
+        "timing": "monotonic loop time for microbenchmarks; GNU time around make for compilation",
+        "identities": {
+          "proot": 10601,
+          "chroot": 0,
+          "guest": 2000,
+          "guest-baseline": 2000
+        }
+      },
+      "summary": {
+        "chroot": {
+          "medianSeconds": 77.86,
+          "seconds": [
+            59.29,
+            77.86,
+            99.38
+          ]
+        },
+        "proot": {
+          "medianSeconds": 61.71,
+          "seconds": [
+            61.01,
+            61.71,
+            102.35
+          ]
+        },
+        "guest": {
+          "medianSeconds": 70.89,
+          "seconds": [
+            62.0,
+            70.89,
+            93.19
+          ]
+        }
+      },
+      "identicalArtifacts": true,
+      "sourceHashes": {
+        "sqlite3.c": "9512509b1bccb7461f79bea8aad6280ae4699e925fa4804381b71f59e7efb0c5",
+        "shell.c": "4a5bde1b3e00f873caa7e0e7a4def2ea656b7dfae6cad5fb1e9c0d8f44f4397a",
+        "sqlite3.h": "19585c8b5230e9d4f223bf31b709ece7b6a0bb3faf00d8310625d8e58cda1b1d",
+        "sqlite3ext.h": "ea81fb7bd05882e0e0b92c4d60f677b205f7f1fbf085f218b12f0b5b3f0b9e48",
+        "Makefile": "96d13a4a18c1f72414dc862ae0f5b185278cd3621e44d7e113887d37953f4b0e",
+        "run.sh": "148b76801ba5d887f613143c653ef8d095e5d4d4523bc0bfb04884f58f27203a",
+        "verify-library.c": "b94cffcec56f124380c1da125bf7fe7f8970cdf1525b02bc66de8f26c70bbc18",
+        "runtime-workloads.c": "c4dd8b39e0715be0f4f825f3b1dfdb4d7e109c2621222e6f0139d3f1b3d5a319",
+        "readiness-benchmark.c": "e566bb78b81bd5a0391fb00de61544ceabe0e3848d84d52e3062192d3fc898f7"
+      },
+      "performanceTarget": {
+        "formula": "sqrt(chroot * proot)",
+        "seconds": 69.31623619326139,
+        "guestOverTarget": 1.0227041151275262,
+        "met": false
+      },
+      "runtimeHashes": {
+        "libmagicdesk_guest_bootstrap.so": "8b35cef212d28ef713369b007eab4ff31f14f184f79950d9a51958a1c5c92926",
+        "libmagicdesk_guest_image.so": "a263df7410152b01debd4c8e22564b1fef0b7b47018bbeb5ecdd663595edf80e",
+        "libmagicdesk_guest_run.so": "1dd2879cb5ed9a6e32f1dc0a7851fdc7693fa8bf84140a0fcdc25b27368b7c91",
+        "libmagicdesk_guest_supervisor.so": "cd23323ca09e34a7b3d40a6e5c66ef7bcc3ccfeaf7f0ab45577ab49aa2f0ea16",
+        "libmagicdesk_guest_supervisor_state.so": "654499f642fc3904a0a29640a4a22be2da25898a2db96687b6f9519ab9f0465f",
+        "libmagicdesk_guest_task_wait.so": "465d8b6c4b698c399658f00ed7d64d3b4cb426e90094e41c3505bfe684619a02",
+        "libmagicdesk_guest_task_wait_live.so": "6c7ab8d707a9fdf740c87c8a64dbccaebd61d6e317759c807b64dd2ea998e7f9"
+      },
+      "baselineRuntimeHashes": {},
+      "samples": [
+        {
+          "mode": "chroot",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 99.16,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:20:21.305913+00:00",
+          "finishedUtc": "2026-10-26T05:22:02.308196+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2110060.4316546763,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "proot",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 61.14,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:22:02.311215+00:00",
+          "finishedUtc": "2026-10-26T05:23:05.042899+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 3604541.149797571,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              },
+              "after": {
+                "scaling_cur_freq": 3628800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "guest",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 62.13,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:23:05.044011+00:00",
+          "finishedUtc": "2026-10-26T05:24:08.903477+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 3593338.371170027,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              },
+              "after": {
+                "scaling_cur_freq": 1670400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "chroot",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 59.29,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:24:08.905624+00:00",
+          "finishedUtc": "2026-10-26T05:25:09.893179+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 3588907.8711391566,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1324800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              },
+              "after": {
+                "scaling_cur_freq": 3398400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "proot",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 61.01,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:25:09.894695+00:00",
+          "finishedUtc": "2026-10-26T05:26:12.474781+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 3592293.9197930144,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1555200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              },
+              "after": {
+                "scaling_cur_freq": 3628800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 62.0,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:26:12.478158+00:00",
+          "finishedUtc": "2026-10-26T05:27:16.133490+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 3597718.2209469154,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              },
+              "after": {
+                "scaling_cur_freq": 1996800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "proot",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 61.71,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:27:16.135618+00:00",
+          "finishedUtc": "2026-10-26T05:28:19.373672+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 3595800.0960461022,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 883200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              },
+              "after": {
+                "scaling_cur_freq": 2227200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 70.89,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:28:19.375536+00:00",
+          "finishedUtc": "2026-10-26T05:29:32.112521+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 3135030.627615063,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 883200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              },
+              "after": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "chroot",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 77.86,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:29:32.116666+00:00",
+          "finishedUtc": "2026-10-26T05:30:51.441512+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2747017.6957352003,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 883200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              },
+              "after": {
+                "scaling_cur_freq": 3398400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 93.19,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:30:51.443733+00:00",
+          "finishedUtc": "2026-10-26T05:32:26.656847+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2369884.4708629656,
+              "endpointLimitsDiffer": true,
+              "before": {
+                "scaling_cur_freq": 998400,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              },
+              "after": {
+                "scaling_cur_freq": 1785600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "chroot",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 99.38,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:32:26.662420+00:00",
+          "finishedUtc": "2026-10-26T05:34:07.854167+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2121174.780526736,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "proot",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 102.35,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T05:34:07.859806+00:00",
+          "finishedUtc": "2026-10-26T05:35:51.688033+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2104327.4418604653,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        }
+      ]
+    }
+  ]
+}

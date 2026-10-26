@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -31,7 +32,8 @@ int main(int argc,char **argv) {
     int idle=!strcmp(argv[1],"idle"),epoll=!strcmp(argv[1],"epoll");
     int cycle=!strcmp(argv[1],"file-cycle"),opening=!strcmp(argv[1],"file-open");
     int files=cycle || opening || !strcmp(argv[1],"file-stat");
-    assert(files || idle || epoll || !strcmp(argv[1],"poll"));
+    int memory=!strcmp(argv[1],"memory");
+    assert(files || memory || idle || epoll || !strcmp(argv[1],"poll"));
     assert(files || blocks==1);
     char directory[]="/tmp/md-readiness-XXXXXX";
     int dir=-1;
@@ -66,6 +68,12 @@ int main(int argc,char **argv) {
                 } else {
                     struct stat st; assert(!fstatat(dir,"file",&st,0) && S_ISREG(st.st_mode));
                 }
+            } else if (memory) {
+                size_t size=(size_t)getpagesize()*16;
+                void *address=mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+                assert(address!=MAP_FAILED);
+                *(volatile unsigned char *)address=(unsigned char)i;
+                assert(!munmap(address,size));
             } else if (epoll) {
                 assert(epoll_wait(queue,&received,1,0)==1);
                 assert(received.events==EPOLLIN && received.data.u64==42);

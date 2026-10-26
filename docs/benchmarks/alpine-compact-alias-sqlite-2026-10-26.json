@@ -1,0 +1,790 @@
+{
+  "schema": 1,
+  "date": "2026-10-26",
+  "device": {
+    "manufacturer": "nubia",
+    "model": "NX809J",
+    "sdk": 36,
+    "release": "16"
+  },
+  "kernel": "Linux localhost 6.12.23-android16-5-gf1bdb13583da-ab13761046-4k #1 SMP PREEMPT Wed Jul  9 10:22:53 UTC 2025 aarch64 Toybox\n",
+  "repositoryHead": "2fed4f74c0822c328d357f7ba94a4014ef0a2f95",
+  "candidate": "uncommitted performance fixes; runtime SHA-256 identifies each measured bundle",
+  "manifest": {
+    "suite": "alpine-3.23.6",
+    "architecture": "aarch64",
+    "profile": "build-only",
+    "source": "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/aarch64/alpine-minirootfs-3.23.6-aarch64.tar.gz",
+    "sha256": "b17a57958e29735ff0e6e64254d958e65903687a70ca30cc430b33a965ad49d7",
+    "preparation": "Stock apk add --no-cache build-base time coreutils in a private native chroot; same tree imported for Shroot",
+    "trust": "Pinned rootfs SHA256 from installer; signed APK repositories using bundled Alpine keys",
+    "databaseSha256": "48a3e37317bbf6f86103e185934f67fa98a7b03e8848399aeaede26d0b98e684",
+    "packages": [
+      {
+        "name": "acl-libs",
+        "version": "2.3.2-r1",
+        "checksum": "Q1ivkuYFapCcA5bg0k0oim5cNWFuI="
+      },
+      {
+        "name": "alpine-baselayout",
+        "version": "3.7.2-r0",
+        "checksum": "Q1QkUOKD6u7R2NPH0hNZLIoLCqxGI="
+      },
+      {
+        "name": "alpine-baselayout-data",
+        "version": "3.7.2-r0",
+        "checksum": "Q1T7JfQG4z3Ng25B508cv6zEZtjmg="
+      },
+      {
+        "name": "alpine-keys",
+        "version": "2.6-r0",
+        "checksum": "Q1ttok1Zot0OOAMgV+EWlX5I5y9DQ="
+      },
+      {
+        "name": "alpine-release",
+        "version": "3.23.6-r0",
+        "checksum": "Q1QWFIC5mh4GHIl0wQr2hIVJdfTvA="
+      },
+      {
+        "name": "apk-tools",
+        "version": "3.0.8-r0",
+        "checksum": "Q1WiNQYOdbMTbUkU6FA0UT1xWVsp4="
+      },
+      {
+        "name": "binutils",
+        "version": "2.45.1-r0",
+        "checksum": "Q1SPhO4swKEzfaB6w3vd+EQKoO+pc="
+      },
+      {
+        "name": "build-base",
+        "version": "0.5-r3",
+        "checksum": "Q1VlQh+WQRjObE1kTHbfZRMBThwDg="
+      },
+      {
+        "name": "busybox",
+        "version": "1.37.0-r30",
+        "checksum": "Q1ikqlwHVQiBbHyd5Y5R6TMlf4pN8="
+      },
+      {
+        "name": "busybox-binsh",
+        "version": "1.37.0-r30",
+        "checksum": "Q1/YFiyYlIXezr4VKV5b+L7sCjd1o="
+      },
+      {
+        "name": "ca-certificates-bundle",
+        "version": "20260909-r0",
+        "checksum": "Q1dD/z5PZ+8Th/D8GkYvcdlRqP95A="
+      },
+      {
+        "name": "coreutils",
+        "version": "9.8-r1",
+        "checksum": "Q1s2rkMlkrMOPGh5dRUjVGwGlwyFQ="
+      },
+      {
+        "name": "coreutils-env",
+        "version": "9.8-r1",
+        "checksum": "Q1tTgCu4xa5lhScq1wvRevjlOjACU="
+      },
+      {
+        "name": "coreutils-fmt",
+        "version": "9.8-r1",
+        "checksum": "Q1vAvtgznKhcx6d23ow0lKupK/WZE="
+      },
+      {
+        "name": "coreutils-sha512sum",
+        "version": "9.8-r1",
+        "checksum": "Q1yjuyCdfCUp7e1yMVPSYP4i5kMIg="
+      },
+      {
+        "name": "file",
+        "version": "5.46-r2",
+        "checksum": "Q14D+UHake8eXGR6pGn8YojdzNrnw="
+      },
+      {
+        "name": "fortify-headers",
+        "version": "1.1-r5",
+        "checksum": "Q1vwaF5j6173raLe0bryGkSQIuhls="
+      },
+      {
+        "name": "g++",
+        "version": "15.2.0-r2",
+        "checksum": "Q1kI/Bwlk2v0dsZuNTIArjyyzAVjA="
+      },
+      {
+        "name": "gcc",
+        "version": "15.2.0-r2",
+        "checksum": "Q1s5CnLIh6RbGp9hspdWXnc+UDtGw="
+      },
+      {
+        "name": "gmp",
+        "version": "6.3.0-r4",
+        "checksum": "Q1sRW2NquDrocwlCPlJNVixQoialE="
+      },
+      {
+        "name": "isl26",
+        "version": "0.26-r1",
+        "checksum": "Q1l+3aWvWgB1ZPFanLIboXZg4xtUI="
+      },
+      {
+        "name": "jansson",
+        "version": "2.14.1-r0",
+        "checksum": "Q1QigZsLLSvKWk9t9yAZ7X+TXtBF0="
+      },
+      {
+        "name": "libapk",
+        "version": "3.0.8-r0",
+        "checksum": "Q1swdmYlzMDgGdvj1w0ZwzAMX24Ro="
+      },
+      {
+        "name": "libatomic",
+        "version": "15.2.0-r2",
+        "checksum": "Q1az+Mam79nZc2j3ykQMeM07FmMWs="
+      },
+      {
+        "name": "libattr",
+        "version": "2.5.2-r2",
+        "checksum": "Q1iXw8RER6/1TqPeQextx1FduYE8U="
+      },
+      {
+        "name": "libcrypto3",
+        "version": "3.5.8-r0",
+        "checksum": "Q1NqpCMuLCrNtmk8S8hQAc1KnPoOc="
+      },
+      {
+        "name": "libgcc",
+        "version": "15.2.0-r2",
+        "checksum": "Q1OaFN9E99Md/C/xx1zL6SP0ElxQ8="
+      },
+      {
+        "name": "libgomp",
+        "version": "15.2.0-r2",
+        "checksum": "Q1FmjuuUm21q0YY2f8h/1bNeK/weM="
+      },
+      {
+        "name": "libmagic",
+        "version": "5.46-r2",
+        "checksum": "Q1D212CUIUtSjzsZxGf0DzJGmXvGY="
+      },
+      {
+        "name": "libssl3",
+        "version": "3.5.8-r0",
+        "checksum": "Q1hx3hzCQRsEq2apjgQ+k/GK+X15s="
+      },
+      {
+        "name": "libstdc++",
+        "version": "15.2.0-r2",
+        "checksum": "Q1CiwhEijgPIBPIGazqvseyTWbYMM="
+      },
+      {
+        "name": "libstdc++-dev",
+        "version": "15.2.0-r2",
+        "checksum": "Q19Koik22RcdEX0WHya6ogJvEdC5I="
+      },
+      {
+        "name": "make",
+        "version": "4.4.1-r3",
+        "checksum": "Q1Bos2DGwC0/DbxBC5NJ10OWOdj1c="
+      },
+      {
+        "name": "mpc1",
+        "version": "1.3.1-r1",
+        "checksum": "Q10EW/XEsy9pvc65jYWftHs/dWG+Q="
+      },
+      {
+        "name": "mpfr4",
+        "version": "4.2.2-r0",
+        "checksum": "Q1FTIiT9bg3CN4MC3g8lOhixUdulk="
+      },
+      {
+        "name": "musl",
+        "version": "1.2.5-r24",
+        "checksum": "Q1Gpmv84P2QM7qzmrxAM68h3dvVVQ="
+      },
+      {
+        "name": "musl-dev",
+        "version": "1.2.5-r24",
+        "checksum": "Q1D7DWt6D+lxUMphwQdhPa0uTvxxg="
+      },
+      {
+        "name": "musl-utils",
+        "version": "1.2.5-r23",
+        "checksum": "Q1tciDNWavSBIvy8D7i3Vju1wL+fc="
+      },
+      {
+        "name": "patch",
+        "version": "2.8-r0",
+        "checksum": "Q1qAMuyswQD4RoRihIk2CMAZO0FkM="
+      },
+      {
+        "name": "scanelf",
+        "version": "1.3.8-r2",
+        "checksum": "Q1n864lrGFcx4BDLQ3sfHVol7hNqw="
+      },
+      {
+        "name": "skalibs-libs",
+        "version": "2.14.4.0-r0",
+        "checksum": "Q1WgeIIN1tp0gcOt0EDaJYOi7PcUM="
+      },
+      {
+        "name": "ssl_client",
+        "version": "1.37.0-r30",
+        "checksum": "Q1gy9qWYcbvxYTV3MWRqCzY5fVHes="
+      },
+      {
+        "name": "time",
+        "version": "1.9-r1",
+        "checksum": "Q19UbM92uY44MOgN9DJvS3HKDR1oc="
+      },
+      {
+        "name": "utmps-libs",
+        "version": "0.1.3.1-r0",
+        "checksum": "Q1vfpp2IakmatTWRhz5it4i0d6xt4="
+      },
+      {
+        "name": "zlib",
+        "version": "1.3.2-r0",
+        "checksum": "Q16KxKLHZrgH2jspuUJ44nsWpSfZk="
+      },
+      {
+        "name": "zstd-libs",
+        "version": "1.5.7-r2",
+        "checksum": "Q1ppY2frZMXRXfIPzp1r0Fgwz3TnE="
+      }
+    ]
+  },
+  "prootVersion": " _____ _____              ___\n|  __ \\  __ \\_____  _____|   |_\n|   __/     /  _  \\/  _  \\    _|\n|__|  |__|__\\_____/\\_____/\\____| 5.1.107.92\n\nbuilt-in accelerators: process_vm = yes, seccomp_filter = yes\n\nVisit http://proot.me for help, bug reports, suggestions, patchs, ...\nCopyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.\n",
+  "prootPackage": "proot\t5.1.107.92\n",
+  "compilerHashes": [
+    "7072485772de4833a8dc945964e08346b0d39509825c401927a71cff541bcd14",
+    "6749bd20454cc36dd791260343f2d96751e9c0e14890cc420d520f991685bc7a"
+  ],
+  "cpuFrequencyScope": "policy-wide command envelope, including startup/teardown; not per-thread frequency",
+  "workloads": [
+    {
+      "id": "58656ac263254b4cbb99ce14691864e7",
+      "workload": "compile",
+      "policy": {
+        "jobs": 4,
+        "iterations": 1024,
+        "fileBlocks": 8,
+        "compilerCache": false,
+        "dropPageCache": false,
+        "guestStatistics": false,
+        "preopenProc": false,
+        "affinityObservation": "sched_getaffinity/getpriority in an untimed child",
+        "warmupsPerMode": 1,
+        "rounds": 3,
+        "affinityPinned": true,
+        "cpuMask": "0x3",
+        "cpuGovernorChanged": false,
+        "nice": 0,
+        "hostNice": -10,
+        "timing": "monotonic loop time for microbenchmarks; GNU time around make for compilation",
+        "identities": {
+          "proot": 10601,
+          "chroot": 0,
+          "guest": 2000,
+          "guest-baseline": 2000
+        }
+      },
+      "summary": {
+        "chroot": {
+          "medianSeconds": 113.5,
+          "seconds": [
+            98.65,
+            113.5,
+            113.52
+          ]
+        },
+        "proot": {
+          "medianSeconds": 102.37,
+          "seconds": [
+            102.37,
+            101.38,
+            119.6
+          ]
+        },
+        "guest": {
+          "medianSeconds": 109.74,
+          "seconds": [
+            102.67,
+            114.0,
+            109.74
+          ]
+        }
+      },
+      "identicalArtifacts": true,
+      "sourceHashes": {
+        "sqlite3.c": "9512509b1bccb7461f79bea8aad6280ae4699e925fa4804381b71f59e7efb0c5",
+        "shell.c": "4a5bde1b3e00f873caa7e0e7a4def2ea656b7dfae6cad5fb1e9c0d8f44f4397a",
+        "sqlite3.h": "19585c8b5230e9d4f223bf31b709ece7b6a0bb3faf00d8310625d8e58cda1b1d",
+        "sqlite3ext.h": "ea81fb7bd05882e0e0b92c4d60f677b205f7f1fbf085f218b12f0b5b3f0b9e48",
+        "Makefile": "96d13a4a18c1f72414dc862ae0f5b185278cd3621e44d7e113887d37953f4b0e",
+        "run.sh": "148b76801ba5d887f613143c653ef8d095e5d4d4523bc0bfb04884f58f27203a",
+        "verify-library.c": "b94cffcec56f124380c1da125bf7fe7f8970cdf1525b02bc66de8f26c70bbc18",
+        "runtime-workloads.c": "c4dd8b39e0715be0f4f825f3b1dfdb4d7e109c2621222e6f0139d3f1b3d5a319",
+        "readiness-benchmark.c": "e566bb78b81bd5a0391fb00de61544ceabe0e3848d84d52e3062192d3fc898f7"
+      },
+      "performanceTarget": {
+        "formula": "sqrt(chroot * proot)",
+        "seconds": 107.79144214639676,
+        "guestOverTarget": 1.018077110898626,
+        "met": false
+      },
+      "runtimeHashes": {
+        "libmagicdesk_guest_bootstrap.so": "8b35cef212d28ef713369b007eab4ff31f14f184f79950d9a51958a1c5c92926",
+        "libmagicdesk_guest_image.so": "a263df7410152b01debd4c8e22564b1fef0b7b47018bbeb5ecdd663595edf80e",
+        "libmagicdesk_guest_run.so": "1dd2879cb5ed9a6e32f1dc0a7851fdc7693fa8bf84140a0fcdc25b27368b7c91",
+        "libmagicdesk_guest_supervisor.so": "e479b6cad51b7052a3bb84198e25d94cc4c5ab7043ed86f37e283f71bed410bd",
+        "libmagicdesk_guest_supervisor_state.so": "2bb2a7ee3aa0a37a0c6c901e0b61fd5c2dc6c21b98bf8552c6c21ef7ea2fb586"
+      },
+      "baselineRuntimeHashes": {},
+      "samples": [
+        {
+          "mode": "chroot",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 81.04,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T06:26:03.540147+00:00",
+          "finishedUtc": "2026-10-26T06:27:26.216587+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2609554.8883192968,
+              "endpointLimitsDiffer": true,
+              "before": {
+                "scaling_cur_freq": 1785600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 3628800
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "proot",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 102.22,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T06:27:26.219169+00:00",
+          "finishedUtc": "2026-10-26T06:29:10.180279+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2106600.3497182825,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1555200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1785600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "guest",
+          "phase": "warmup",
+          "round": -1,
+          "workSeconds": 102.95,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T06:29:10.182386+00:00",
+          "finishedUtc": "2026-10-26T06:30:55.301106+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2100147.1458773785,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1555200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "chroot",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 98.65,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T06:30:55.303674+00:00",
+          "finishedUtc": "2026-10-26T06:32:35.643332+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2112366.4122137404,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1996800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "proot",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 102.37,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T06:32:35.645661+00:00",
+          "finishedUtc": "2026-10-26T06:34:19.970979+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2101383.9009287925,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1440000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 0,
+          "workSeconds": 102.67,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T06:34:19.973868+00:00",
+          "finishedUtc": "2026-10-26T06:36:04.130402+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2105805.853375833,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 787200,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "proot",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 101.38,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T06:36:04.132014+00:00",
+          "finishedUtc": "2026-10-26T06:37:46.806026+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 2119267.9666829985,
+              "endpointLimitsDiffer": true,
+              "before": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 2361600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2361600
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 114.0,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T06:37:46.808748+00:00",
+          "finishedUtc": "2026-10-26T06:39:42.535437+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1908361.7124956492,
+              "endpointLimitsDiffer": true,
+              "before": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 1228800,
+                "scaling_max_freq": 3187200
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "chroot",
+          "phase": "measured",
+          "round": 1,
+          "workSeconds": 113.5,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T06:39:42.540212+00:00",
+          "finishedUtc": "2026-10-26T06:41:37.820419+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1876505.0607464383,
+              "endpointLimitsDiffer": true,
+              "before": {
+                "scaling_cur_freq": 1440000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1785600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "guest",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 109.74,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T06:41:37.832672+00:00",
+          "finishedUtc": "2026-10-26T06:43:29.069928+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1966927.7426350985,
+              "endpointLimitsDiffer": true,
+              "before": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              },
+              "after": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "chroot",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 113.52,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T06:43:29.071923+00:00",
+          "finishedUtc": "2026-10-26T06:45:24.022427+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1837906.4083457526,
+              "endpointLimitsDiffer": true,
+              "before": {
+                "scaling_cur_freq": 2112000,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 2112000
+              },
+              "after": {
+                "scaling_cur_freq": 1785600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        },
+        {
+          "mode": "proot",
+          "phase": "measured",
+          "round": 2,
+          "workSeconds": 119.6,
+          "affinity": {
+            "before": "3",
+            "after": "3"
+          },
+          "startedUtc": "2026-10-26T06:45:24.027733+00:00",
+          "finishedUtc": "2026-10-26T06:47:25.463840+00:00",
+          "passed": true,
+          "cpu": {
+            "policy0": {
+              "relatedCpus": "0 1 2 3 4 5",
+              "residencyWeightedKhz": 1816848.4345154057,
+              "endpointLimitsDiffer": false,
+              "before": {
+                "scaling_cur_freq": 1113600,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              },
+              "after": {
+                "scaling_cur_freq": 1228800,
+                "scaling_min_freq": 787200,
+                "scaling_max_freq": 1785600
+              }
+            }
+          },
+          "artifacts": {
+            "sqlite3": "bc62ad750d957e57fdf3c74810de9ebf2e44fa10dec80f7982c3ec763e08b586",
+            "libsqlite3.so": "d51475de43290b9b20960c8cf6169dfe6d8fbcc9b111d840a9f0b011044edbb1",
+            "shell.o": "56e2615e50580fce44f7ececaa8419c885785c0a190ddfff6455d0262c4df4e8",
+            "sqlite3.o": "196601d8fd3fce731c605a2db09208978cbc31705993772e079a0e47346e3b98",
+            "sqlite3.pic.o": "c6c8a3586b6b750bf5d3e91f16ccf0921a4d12ed35073ab199f43b85e5dd2c1b"
+          }
+        }
+      ]
+    }
+  ]
+}
